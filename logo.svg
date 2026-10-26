@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- rainy: raindrop outline with a small gap where a sun dot sits -->
+  <path d="M32 5 C32 5 50 27 50 40 A18 18 0 0 1 14 40 C14 27 32 5 32 5" fill="none" stroke="#0B2A5B"
+    stroke-width="4" stroke-linecap="round" stroke-linejoin="round" pathLength="100"
+    stroke-dasharray="90.5 9.5" stroke-dashoffset="-18.5"/>
+  <circle cx="42.7" cy="20.4" r="2.8" fill="#F5A700"/>
+</svg>

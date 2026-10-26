@@ -4,6 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>rainy</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#0B2A5B">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="rainy">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <style>
   :root {
@@ -16,6 +22,7 @@
     --sun-soft: #fbd98a;
     --temp: #e5484d;
     --night: #eef0f4;
+    --logo: #0B2A5B;
     --shadow: 0 -6px 24px rgba(20, 24, 31, 0.12);
   }
   @media (prefers-color-scheme: dark) {
@@ -26,6 +33,7 @@
       --line: #2a2f38;
       --sun-soft: #7a5a14;
       --night: #1d2129;
+      --logo: #8FB2FF;
       --shadow: 0 -6px 24px rgba(0, 0, 0, 0.5);
     }
   }
@@ -45,7 +53,12 @@
   .brand { position: absolute; top: max(12px, env(safe-area-inset-top)); left: 12px; z-index: 1000;
     background: var(--bg); padding: 6px 12px; border-radius: 999px; font-weight: 800; font-size: 18px;
     letter-spacing: -0.02em; box-shadow: 0 2px 10px rgba(0,0,0,.15); }
-  .brand span { color: var(--rain); }
+  .brand { display: flex; align-items: center; gap: 6px; }
+  #brandName { color: var(--logo); }
+  .brand .logo { width: 22px; height: 22px; color: var(--logo); }
+  body.sunny .brand .logo, body.sunny #brandName { color: var(--sun); }
+  .ico { width: 16px; height: 16px; vertical-align: -3px; margin-right: 4px; color: var(--logo); }
+  .ico.sun { color: var(--sun); }
   body.sunny .brand span { color: var(--sun); }
   .version { font-weight: 500; font-size: 11px; color: var(--muted); margin-left: 4px; }
 
@@ -78,8 +91,22 @@
 </style>
 </head>
 <body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <!-- rainy logo: raindrop outline with a gap that holds a small sun dot; sunny: matching sun ring -->
+  <symbol id="logo" viewBox="0 0 64 64">
+    <path d="M32 5 C32 5 50 27 50 40 A18 18 0 0 1 14 40 C14 27 32 5 32 5" fill="none" stroke="currentColor"
+      stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round" pathLength="100"
+      stroke-dasharray="90.5 9.5" stroke-dashoffset="-18.5"/>
+    <circle cx="42.7" cy="20.4" r="3" fill="#F5A700"/>
+  </symbol>
+  <symbol id="sunIcon" viewBox="0 0 64 64">
+    <circle cx="32" cy="34" r="17" fill="none" stroke="currentColor" stroke-width="4.5" stroke-linecap="round"
+      pathLength="100" stroke-dasharray="86 14" stroke-dashoffset="-94.5"/>
+    <circle cx="44" cy="22" r="3.2" style="fill: var(--logo)"/>
+  </symbol>
+</svg>
 <div id="map"></div>
-<div class="brand"><span id="brandName">rainy</span><span class="version" id="ver"></span></div>
+<div class="brand"><svg class="logo" id="brandLogo"><use href="#logo"/></svg><span id="brandName">rainy</span><span class="version" id="ver"></span></div>
 <button class="fab" id="refresh" title="Aktualisieren" aria-label="Aktualisieren" style="bottom:calc(var(--sheet-h, 250px) + 66px)">↻</button>
 <button class="fab" id="locate" title="Mein Standort" aria-label="Mein Standort">◎</button>
 
@@ -93,8 +120,8 @@
   </div>
   <div class="head">
     <div class="toggle" role="tablist">
-      <button id="modeRain" class="on" role="tab">☔ rainy</button>
-      <button id="modeSun" role="tab">☀ sunny</button>
+      <button id="modeRain" class="on" role="tab"><svg class="ico"><use href="#logo"/></svg>rainy</button>
+      <button id="modeSun" role="tab"><svg class="ico sun"><use href="#sunIcon"/></svg>sunny</button>
     </div>
     <div class="toggle" role="tablist">
       <button id="rangeShort" class="on" role="tab">2 h</button>
@@ -114,7 +141,7 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
 "use strict";
-const VERSION = "v0.8";
+const VERSION = "v0.9";
 const FALLBACK = { lat: 53.5511, lon: 9.9937, name: "Hamburg" };
 const DWD_WMS = "https://maps.dwd.de/geoserver/dwd/wms";
 const EUM_WMS = "https://view.eumetsat.int/geoserver/ows";
@@ -482,12 +509,12 @@ function cityZoom(bbox) {
 // ---------- Data ----------
 async function loadPoint(loc) {
   const d = await getJSON(`https://api.open-meteo.com/v1/forecast?latitude=${loc.lat}&longitude=${loc.lon}` +
-    `&minutely_15=temperature_2m,precipitation,sunshine_duration,is_day` +
+    `&minutely_15=temperature_2m,precipitation,cloud_cover,is_day` +
     `&past_minutely_15=8&forecast_minutely_15=64&timeformat=unixtime`);
   const m = d.minutely_15;
   state.point = {
     t: m.time.map((s) => s * 1000), temp: m.temperature_2m, precip: m.precipitation,
-    sun: m.sunshine_duration, isDay: m.is_day,
+    cover: m.cloud_cover, isDay: m.is_day,
   };
 }
 async function loadRadarPoint(loc) {
@@ -549,8 +576,9 @@ function buildViews() {
   for (const range of ["short", "long"]) {
     state.views[`sun-${range}`] = finish(steps(RANGE_HOURS[range]).map((ts) => {
       const isDay = isDayAt(ts) ? 1 : 0;
-      const k = p.t.indexOf(ts);
-      const sun = clamp((k >= 0 ? p.sun[k] : interp(p.t, p.sun, ts)) / 900, 0, 1);
+      // Sun share = clear-sky share from the same cloud cover the map shows (the model's separate
+      // sunshine-duration field often contradicts its own cloud cover).
+      const sun = isDay ? clamp(1 - interp(p.t, p.cover, ts) / 100, 0, 1) : 0;
       const sat = state.satLatest && ts <= now ? Math.min(ts, state.satLatest) : null;
       return { ts, value: sun, isDay, temp: temp(ts), map: sat ? { kind: "sat", ts: sat } : { kind: "model" } };
     }));
@@ -607,6 +635,8 @@ function summary() {
   }
   const next = fr.find(sunny);
   if (next) return `Sonne ab ca. ${fmtTime(next.ts)}`;
+  const some = fr.find((f) => f.value >= 0.2);
+  if (some) return `Kaum Sonne, etwas ab ca. ${fmtTime(some.ts)}`;
   return fr[0].isDay ? `Keine Sonne in den nächsten ${h} h` : `Nacht – keine Sonne in den nächsten ${h} h`;
 }
 
@@ -777,6 +807,7 @@ function applyView() {
   stop();
   document.body.classList.toggle("sunny", state.mode === "sun");
   document.getElementById("brandName").textContent = state.mode === "sun" ? "sunny" : "rainy";
+  document.querySelector("#brandLogo use").setAttribute("href", state.mode === "sun" ? "#sunIcon" : "#logo");
   document.getElementById("modeRain").classList.toggle("on", state.mode === "rain");
   document.getElementById("modeSun").classList.toggle("on", state.mode === "sun");
   document.getElementById("rangeShort").classList.toggle("on", state.range === "short");
