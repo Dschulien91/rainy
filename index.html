@@ -52,6 +52,8 @@
     width: 44px; height: 44px; border-radius: 50%; border: 0; background: var(--bg); color: var(--fg);
     box-shadow: 0 2px 10px rgba(0,0,0,.2); font-size: 20px; cursor: pointer; }
 
+  .fab.spin { animation: spin 0.8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
   .sheet { position: absolute; left: 0; right: 0; bottom: 0; height: var(--sheet-h, 250px); z-index: 1000;
     background: var(--bg); border-radius: 18px 18px 0 0; box-shadow: var(--shadow);
     padding: 12px 16px max(10px, env(safe-area-inset-bottom)); display: flex; flex-direction: column; gap: 8px; }
@@ -77,6 +79,7 @@
 <body>
 <div id="map"></div>
 <div class="brand"><span id="brandName">rainy</span><span class="version" id="ver"></span></div>
+<button class="fab" id="refresh" title="Aktualisieren" aria-label="Aktualisieren" style="bottom:calc(var(--sheet-h, 250px) + 66px)">↻</button>
 <button class="fab" id="locate" title="Mein Standort" aria-label="Mein Standort">◎</button>
 
 <div class="sheet">
@@ -107,7 +110,7 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
 "use strict";
-const VERSION = "v0.6";
+const VERSION = "v0.7";
 const FALLBACK = { lat: 53.5511, lon: 9.9937, name: "Hamburg" };
 const DWD_WMS = "https://maps.dwd.de/geoserver/dwd/wms";
 const RAIN_STEP_MIN = 5;
@@ -128,6 +131,7 @@ const state = {
   playing: null,
 };
 const cur = () => state[state.mode];
+let locRequest = 0; // increments per location load; stale responses are dropped
 
 // ---------- Map ----------
 const dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
@@ -175,75 +179,130 @@ const RECOLOR = new Map(Object.entries(DWD_CLASSES).map(([hex, mmh]) => {
   return [parseInt(hex, 16), [c[0], c[1], c[2], Math.round(c[3] * 255)]];
 }));
 
-// Radar tile layer: fetches DWD WMS tiles and repaints them in the rainy palette.
-const RadarLayer = L.GridLayer.extend({
-  createTile(coords, done) {
-    const size = this.getTileSize();
-    const tile = document.createElement("canvas");
-    tile.width = size.x; tile.height = size.y;
-    const b = this._tileCoordsToNwSe(coords);
-    const nw = L.CRS.EPSG3857.project(b[0]), se = L.CRS.EPSG3857.project(b[1]);
-    // Fetch at roughly the radar's native 1 km resolution, recolor, then upscale with smoothing
-    // so rain areas render as soft shapes instead of blocks.
-    const groundKm = ((se.x - nw.x) * Math.cos((b[0].lat * Math.PI) / 180)) / 1000;
-    const n = clamp(Math.round(groundKm), 16, size.x);
+// Radar frames: one DWD WMS image per time step covering the (padded) visible area,
+// recolored into the rainy palette. One request per frame keeps loading fast; the image is
+// fetched at ~1 km resolution and upscaled smoothly by the browser.
+let radarView = null, radarViewId = 0;
+function makeRadarView() {
+  const b = map.getBounds().pad(0.5);
+  const nw = L.CRS.EPSG3857.project(b.getNorthWest()), se = L.CRS.EPSG3857.project(b.getSouthEast());
+  const k = Math.cos((b.getCenter().lat * Math.PI) / 180) / 1000; // projected metres -> ground km
+  return {
+    id: ++radarViewId, bounds: b, zoom: map.getZoom(),
+    bbox: `${nw.x},${se.y},${se.x},${nw.y}`,
+    w: clamp(Math.round((se.x - nw.x) * k * 1.2), 32, 900),
+    h: clamp(Math.round((nw.y - se.y) * k * 1.2), 32, 900),
+  };
+}
+function recolor(ctx, w, h) {
+  const data = ctx.getImageData(0, 0, w, h), px = data.data;
+  for (let i = 0; i < px.length; i += 4) {
+    const out = px[i + 3] > 200 && RECOLOR.get((px[i] << 16) | (px[i + 1] << 8) | px[i + 2]);
+    if (out) { px[i] = out[0]; px[i + 1] = out[1]; px[i + 2] = out[2]; px[i + 3] = out[3]; }
+    else px[i + 3] = 0; // no rain, no-data area, coverage outline
+  }
+  ctx.putImageData(data, 0, 0);
+}
+
+const radarFrames = new Map(); // ts -> { overlay, viewId, pending, pendingView }
+function radarFrame(ts) {
+  if (!radarFrames.has(ts)) radarFrames.set(ts, { ts, overlay: null, viewId: 0, pending: null, pendingView: 0 });
+  return radarFrames.get(ts);
+}
+const frameReady = (f) => !!radarView && f.viewId === radarView.id;
+function loadRadarFrame(f) {
+  if (!radarView) radarView = makeRadarView();
+  const view = radarView;
+  if (f.viewId === view.id) return Promise.resolve();
+  if (f.pending && f.pendingView === view.id) return f.pending;
+  f.pendingView = view.id;
+  f.pending = new Promise((resolve) => {
     const img = new Image();
     img.crossOrigin = "anonymous";
     img.onload = () => {
-      const small = document.createElement("canvas");
-      small.width = small.height = n;
-      const sctx = small.getContext("2d", { willReadFrequently: true });
-      sctx.drawImage(img, 0, 0);
-      const data = sctx.getImageData(0, 0, n, n), px = data.data;
-      for (let i = 0; i < px.length; i += 4) {
-        const out = px[i + 3] > 200 && RECOLOR.get((px[i] << 16) | (px[i + 1] << 8) | px[i + 2]);
-        if (out) { px[i] = out[0]; px[i + 1] = out[1]; px[i + 2] = out[2]; px[i + 3] = out[3]; }
-        else px[i + 3] = 0; // no rain, no-data area, coverage outline
+      if (f.pendingView === view.id) {
+        const c = document.createElement("canvas");
+        c.width = view.w; c.height = view.h;
+        const ctx = c.getContext("2d", { willReadFrequently: true });
+        ctx.drawImage(img, 0, 0);
+        recolor(ctx, view.w, view.h);
+        const url = c.toDataURL();
+        if (!f.overlay) {
+          f.overlay = L.imageOverlay(url, view.bounds, { pane: "weather", className: "radar-frame", opacity: 0 }).addTo(map);
+        } else { f.overlay.setUrl(url); f.overlay.setBounds(view.bounds); }
+        f.viewId = view.id; f.pending = null;
+        if (shownTs === f.ts && state.mode === "rain") setVisibleFrame(f);
       }
-      sctx.putImageData(data, 0, 0);
-      const ctx = tile.getContext("2d");
-      ctx.imageSmoothingEnabled = true;
-      ctx.imageSmoothingQuality = "high";
-      ctx.drawImage(small, 0, 0, size.x, size.y);
-      done(null, tile);
+      resolve();
     };
-    img.onerror = () => done(new Error("radar tile"), tile);
+    // A failed frame counts as done for this view (playback keeps the previous image) so loading never stalls.
+    img.onerror = () => { if (f.pendingView === view.id) { f.pending = null; f.viewId = view.id; } resolve(); };
     img.src = `${DWD_WMS}?service=WMS&version=1.1.1&request=GetMap&layers=dwd:Niederschlagsradar&styles=` +
-      `&format=image/png&transparent=true&srs=EPSG:3857&width=${n}&height=${n}` +
-      `&bbox=${nw.x},${se.y},${se.x},${nw.y}&time=${this.options.time}`;
-    return tile;
-  },
-});
-
-// One radar layer per frame; only the active one is visible, the others preload and cross-fade.
-const radarLayers = new Map();
-function radarLayer(ts) {
-  if (!radarLayers.has(ts)) {
-    radarLayers.set(ts, new RadarLayer({
-      time: new Date(ts).toISOString(), tileSize: 512, opacity: 0, pane: "weather",
-      updateWhenIdle: true, keepBuffer: 1, className: "radar-frame",
-    }));
-  }
-  return radarLayers.get(ts);
+      `&format=image/png&transparent=true&srs=EPSG:3857&width=${view.w}&height=${view.h}` +
+      `&bbox=${view.bbox}&time=${new Date(f.ts).toISOString()}`;
+  });
+  return f.pending;
 }
-let shownRadar = null;
+
+let shownTs = null, visibleFrame = null;
+function setVisibleFrame(f) {
+  if (!f.overlay) return;
+  f.overlay.setOpacity(1);
+  if (visibleFrame && visibleFrame !== f && visibleFrame.overlay) visibleFrame.overlay.setOpacity(0);
+  visibleFrame = f;
+}
 function showRadar(ts) {
-  const layer = radarLayer(ts);
-  if (!map.hasLayer(layer)) layer.addTo(map);
-  layer.setOpacity(1);
-  if (shownRadar && shownRadar !== layer) shownRadar.setOpacity(0);
-  shownRadar = layer;
+  shownTs = ts;
+  const f = radarFrame(ts);
+  setVisibleFrame(f); // shows an older image of this frame right away if there is one
+  loadRadarFrame(f);
 }
 function hideRadar() {
-  if (shownRadar) shownRadar.setOpacity(0);
-  shownRadar = null;
+  if (visibleFrame && visibleFrame.overlay) visibleFrame.overlay.setOpacity(0);
+  visibleFrame = null; shownTs = null;
 }
+function clearRadar() {
+  preloadToken++;
+  radarFrames.forEach((f) => f.overlay && f.overlay.remove());
+  radarFrames.clear(); visibleFrame = null; shownTs = null; radarView = null;
+}
+
+// Load all frames: the selected one first, then forecast, then history; 6 requests in flight.
+let preloadToken = 0;
 function preloadRadar() {
-  // Stagger preloading so the visible frame wins the bandwidth race.
-  state.rain.frames.forEach((f, i) => setTimeout(() => {
-    const layer = radarLayer(f.ts);
-    if (!map.hasLayer(layer)) layer.addTo(map);
-  }, 300 + i * 120));
+  const token = ++preloadToken;
+  const fr = state.rain.frames, at = state.rain.idx;
+  const order = [...fr.slice(at), ...fr.slice(0, at).reverse()].map((f) => radarFrame(f.ts));
+  let active = 0;
+  const next = () => {
+    if (token !== preloadToken) return;
+    while (active < 6 && order.length) {
+      const f = order.shift();
+      if (frameReady(f)) continue;
+      active++;
+      loadRadarFrame(f).then(() => { active--; next(); });
+    }
+    updateRadarProgress();
+  };
+  next();
+}
+// Panned or zoomed beyond the loaded area: fetch a new view for all frames.
+map.on("moveend", () => {
+  if (!radarView || !state.rain.hasRadarMap) return;
+  if (!radarView.bounds.contains(map.getBounds()) || Math.abs(radarView.zoom - map.getZoom()) >= 1) {
+    radarView = makeRadarView();
+    if (shownTs) loadRadarFrame(radarFrame(shownTs));
+    preloadRadar();
+  }
+});
+function updateRadarProgress() {
+  if (state.mode !== "rain" || !state.rain.hasRadarMap) return;
+  const total = state.rain.frames.length;
+  const ready = state.rain.frames.filter((f) => radarFrames.has(f.ts) && frameReady(radarFrames.get(f.ts))).length;
+  document.getElementById("source").textContent = ready < total
+    ? `Radar: DWD · lade Bilder ${ready}/${total}` : "Radar: DWD (Analyse + 2 h Vorhersage)";
+  clearTimeout(updateRadarProgress.timer);
+  if (ready < total) updateRadarProgress.timer = setTimeout(updateRadarProgress, 500);
 }
 
 // Cloud overlay for sunny mode (rendered from a coarse forecast grid, smoothed by the browser + blur).
@@ -312,13 +371,16 @@ async function loadPoint(loc) {
   };
 }
 
-async function loadRain(loc) {
+function fetchRadarPoint(loc) {
+  const now = Date.now(), iso = (t) => new Date(t).toISOString().slice(0, 19) + "Z";
+  return getJSON(`https://api.brightsky.dev/radar?lat=${loc.lat}&lon=${loc.lon}&distance=1000&format=plain` +
+    `&date=${iso(now - 3600e3)}&last_date=${iso(now + 2.5 * 3600e3)}`).catch(() => null);
+}
+async function loadRain(loc, radarPoint) {
   const now = Date.now();
   try {
-    const iso = (t) => new Date(t).toISOString().slice(0, 19) + "Z";
-    const d = await getJSON(`https://api.brightsky.dev/radar?lat=${loc.lat}&lon=${loc.lon}&distance=1000&format=plain` +
-      `&date=${iso(now - 3600e3)}&last_date=${iso(now + 2.5 * 3600e3)}`);
-    if (!d.radar || !d.radar.length) throw new Error("no radar");
+    const d = await radarPoint;
+    if (!d || !d.radar || !d.radar.length) throw new Error("no radar");
     const frames = d.radar.map((r) => {
       const g = r.precipitation_5;
       const center = g[Math.floor(g.length / 2)][Math.floor(g[0].length / 2)];
@@ -586,9 +648,8 @@ function play() {
     const s = cur();
     if (s.idx >= s.frames.length - 1) { stop(); return; }
     // Hold the current frame (max ~2 s) until the next radar frame has its tiles, so playback never flickers.
-    const next = state.mode === "rain" && state.rain.hasRadarMap && radarLayer(s.frames[s.idx + 1].ts);
-    if (next && !map.hasLayer(next)) next.addTo(map);
-    if (next && next.isLoading() && waited++ < 4) return;
+    const next = state.mode === "rain" && state.rain.hasRadarMap && radarFrame(s.frames[s.idx + 1].ts);
+    if (next && !frameReady(next) && waited++ < 4) { loadRadarFrame(next); return; }
     waited = 0;
     setIdx(s.idx + 1);
   }, state.mode === "rain" ? 450 : 250);
@@ -605,10 +666,11 @@ function setMode(mode) {
   document.getElementById("source").textContent = mode === "sun"
     ? "Wolken: Modellvorhersage (Open-Meteo)"
     : (state.rain.hasRadarMap ? "Radar: DWD (Analyse + 2 h Vorhersage)" : "Kein Radar hier – Modellvorhersage");
-  if (mode === "sun") loadClouds();
+  if (mode === "sun") loadClouds(); else updateRadarProgress();
   updateHeader();
   renderFrame();
 }
+document.getElementById("refresh").addEventListener("click", refreshAll);
 document.getElementById("modeRain").addEventListener("click", () => setMode("rain"));
 document.getElementById("modeSun").addEventListener("click", () => setMode("sun"));
 document.getElementById("locate").addEventListener("click", async () => {
@@ -637,24 +699,45 @@ window.addEventListener("resize", drawChart);
 // ---------- Boot ----------
 (async function init() {
   const params = new URLSearchParams(location.search);
-  let loc = params.has("lat") ? { lat: +params.get("lat"), lon: +params.get("lon") } : await getPosition();
-  loc = loc || { lat: FALLBACK.lat, lon: FALLBACK.lon };
-  state.home = loc;
-  youAreHere.setLatLng([loc.lat, loc.lon]);
-  const place = await reverseGeocode(loc);
-  map.setView([loc.lat, loc.lon], cityZoom(place.bbox), { animate: false });
-  await setLocation(loc, false, place.name);
-  if (state.rain.hasRadarMap) preloadRadar();
-  // Refresh data every 5 minutes
-  setInterval(async () => {
-    radarLayers.forEach((l) => l.remove()); radarLayers.clear(); shownRadar = null;
-    await setLocation(state.loc, state.picked, state.placeName);
+  let cached = null;
+  try { cached = JSON.parse(localStorage.getItem("rainy.last")); } catch {}
+  if (params.has("lat")) cached = null;
+
+  // Known place from last visit: show it immediately, then check whether the user has moved.
+  const posP = params.has("lat") ? Promise.resolve({ lat: +params.get("lat"), lon: +params.get("lon") }) : getPosition();
+  if (cached) {
+    state.home = cached;
+    youAreHere.setLatLng([cached.lat, cached.lon]);
+    map.setView([cached.lat, cached.lon], cached.zoom, { animate: false });
+    await setLocation(cached, false, cached.name);
     if (state.rain.hasRadarMap) preloadRadar();
-  }, 5 * 60e3);
+  }
+  let loc = await posP;
+  if (!loc && !cached) loc = { lat: FALLBACK.lat, lon: FALLBACK.lon };
+  if (loc && (!cached || map.distance([loc.lat, loc.lon], [cached.lat, cached.lon]) > 1000)) {
+    state.home = loc;
+    youAreHere.setLatLng([loc.lat, loc.lon]);
+    const place = await Promise.race([reverseGeocode(loc), new Promise((r) => setTimeout(() => r(null), 1500))]);
+    map.setView([loc.lat, loc.lon], place ? cityZoom(place.bbox) : 11, { animate: false });
+    await setLocation(loc, false, place ? place.name : undefined);
+    if (state.rain.hasRadarMap) preloadRadar();
+  }
+  setInterval(refreshAll, 5 * 60e3);
 })();
 
+// Reload everything: point data, radar frames and the cloud grid.
+async function refreshAll() {
+  const btn = document.getElementById("refresh");
+  btn.classList.add("spin");
+  clearRadar();
+  cloudFetchBounds = null;
+  await setLocation(state.loc, state.picked, state.placeName);
+  if (state.mode === "sun") loadClouds();
+  if (state.rain.hasRadarMap) preloadRadar();
+  btn.classList.remove("spin");
+}
+
 // Load timeline data for a location. picked = chosen by long-press (not the user's own position).
-let locRequest = 0;
 async function setLocation(loc, picked, knownName) {
   const req = ++locRequest;
   stop();
@@ -664,8 +747,9 @@ async function setLocation(loc, picked, knownName) {
   placeEl.textContent = picked ? "📍 Ort wird geladen …" : knownName || "…";
   const nameP = knownName ? Promise.resolve(knownName) : reverseGeocode(loc, picked).then((p) => p.name);
   try {
+    const radarPoint = fetchRadarPoint(loc); // runs in parallel with Open-Meteo
     await loadPoint(loc);
-    await loadRain(loc);
+    await loadRain(loc, radarPoint);
     buildSunFrames();
   } catch (err) {
     document.getElementById("summary").textContent = "Wetterdaten konnten nicht geladen werden";
@@ -676,6 +760,9 @@ async function setLocation(loc, picked, knownName) {
   if (req !== locRequest) return; // a newer long-press won
   state.placeName = name;
   placeEl.textContent = picked ? "📍 " + name : name;
+  if (!picked) {
+    try { localStorage.setItem("rainy.last", JSON.stringify({ lat: loc.lat, lon: loc.lon, name, zoom: map.getZoom() })); } catch {}
+  }
   if (picked) {
     const back = document.createElement("button");
     back.textContent = "× zurück";
