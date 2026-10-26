@@ -12,7 +12,6 @@
     --muted: #6b7380;
     --line: #e6e9ee;
     --rain: #2f7bf5;
-    --rain-soft: #a9c8fb;
     --sun: #f5a700;
     --sun-soft: #fbd98a;
     --temp: #e5484d;
@@ -25,7 +24,6 @@
       --fg: #f1f3f6;
       --muted: #9aa2ae;
       --line: #2a2f38;
-      --rain-soft: #2d4f86;
       --sun-soft: #7a5a14;
       --night: #1d2129;
       --shadow: 0 -6px 24px rgba(0, 0, 0, 0.5);
@@ -36,8 +34,11 @@
     font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; overflow: hidden; }
   #map { position: absolute; inset: 0 0 var(--sheet-h, 250px) 0; }
   .leaflet-container { background: var(--night); }
-  .cloud-overlay { filter: blur(14px); transition: none; }
+  .grid-overlay { filter: blur(14px); }
   .radar-frame { transition: opacity 0.4s ease; filter: blur(2.5px); }
+  .sat-frame { transition: opacity 0.4s ease; filter: blur(3px); }
+  /* dark map: lighten instead of covering, so sun tint reads as warm light and not olive */
+  body.dark .sat-frame, body.dark .grid-overlay { mix-blend-mode: screen; }
   .place button { border: 0; background: var(--night); color: var(--fg); border-radius: 999px;
     font-size: 11px; padding: 1px 7px; margin-left: 6px; cursor: pointer; }
 
@@ -51,9 +52,9 @@
   .fab { position: absolute; right: 12px; bottom: calc(var(--sheet-h, 250px) + 12px); z-index: 1000;
     width: 44px; height: 44px; border-radius: 50%; border: 0; background: var(--bg); color: var(--fg);
     box-shadow: 0 2px 10px rgba(0,0,0,.2); font-size: 20px; cursor: pointer; }
-
   .fab.spin { animation: spin 0.8s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
+
   .sheet { position: absolute; left: 0; right: 0; bottom: 0; height: var(--sheet-h, 250px); z-index: 1000;
     background: var(--bg); border-radius: 18px 18px 0 0; box-shadow: var(--shadow);
     padding: 12px 16px max(10px, env(safe-area-inset-bottom)); display: flex; flex-direction: column; gap: 8px; }
@@ -95,7 +96,10 @@
       <button id="modeRain" class="on" role="tab">☔ rainy</button>
       <button id="modeSun" role="tab">☀ sunny</button>
     </div>
-    <div class="place" id="frameTime" style="font-weight:700;color:var(--fg)"></div>
+    <div class="toggle" role="tablist">
+      <button id="rangeShort" class="on" role="tab">2 h</button>
+      <button id="rangeLong" role="tab">14 h</button>
+    </div>
   </div>
   <div class="chart-row">
     <button class="play" id="play" aria-label="Abspielen">▶</button>
@@ -103,39 +107,45 @@
   </div>
   <div class="status">
     <span id="source"></span>
-    <span>Daten: <a href="https://www.dwd.de" target="_blank">DWD</a>, Bright Sky, Open-Meteo, Esri</span>
+    <span>Daten: <a href="https://www.dwd.de" target="_blank">DWD</a>, EUMETSAT, Bright Sky, Open-Meteo, Esri</span>
   </div>
 </div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
 "use strict";
-const VERSION = "v0.7";
+const VERSION = "v0.8";
 const FALLBACK = { lat: 53.5511, lon: 9.9937, name: "Hamburg" };
 const DWD_WMS = "https://maps.dwd.de/geoserver/dwd/wms";
-const RAIN_STEP_MIN = 5;
-const SUN_STEP_MIN = 15;
-const SUN_PAST_STEPS = 4;      // 1 h of history in sunny mode
-const SUN_FUTURE_STEPS = 48;   // 12 h of forecast in sunny mode
-const CLOUD_GRID = 10;         // 10x10 Open-Meteo points for the cloud map
+const EUM_WMS = "https://view.eumetsat.int/geoserver/ows";
+const STEP = 15 * 60e3;                     // timeline step for everything except the 5-min radar view
+const RANGE_HOURS = { short: 2, long: 14 };
+const GRID = 12;                            // 12x12 Open-Meteo points for model maps (clouds, rain > 2 h)
 
 document.getElementById("ver").textContent = VERSION;
 
 const state = {
-  mode: "rain",
-  loc: null,
-  rain: { frames: [], nowIdx: 0, idx: 0, hasRadarMap: true },
-  sun: { frames: [], nowIdx: 0, idx: 0 },
-  point: null,      // Open-Meteo minutely_15 data for the location
-  clouds: null,     // cloud grid for the sunny map
+  mode: "rain",          // rain | sun
+  range: "short",        // short (2 h) | long (14 h)
+  loc: null, home: null, picked: false, placeName: "",
+  point: null,           // Open-Meteo minutely_15 series for the location
+  radarPoint: [],        // Bright Sky radar series for the location ({ts, mmh}), empty outside Germany
+  satLatest: null,       // newest available satellite cloud mask (ms)
+  grid: null,            // Open-Meteo grid for model maps
+  views: {},             // "rain-short" etc. -> { frames, nowIdx, idx, split }
   playing: null,
 };
-const cur = () => state[state.mode];
-let locRequest = 0; // increments per location load; stale responses are dropped
+const cur = () => state.views[`${state.mode}-${state.range}`] || { frames: [], nowIdx: 0, idx: 0 };
+let locRequest = 0;      // increments per location load; stale responses are dropped
+let imgView = null, imgViewId = 0, shownKey = null, visibleFrame = null, preloadToken = 0;
+let gridOverlay = null, gridFetching = false;
+const imgFrames = new Map();
 
 // ---------- Map ----------
 const dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
-const map = L.map("map", { zoomControl: false, attributionControl: false, fadeAnimation: false }).setView([FALLBACK.lat, FALLBACK.lon], 10);
+document.body.classList.toggle("dark", dark);
+const map = L.map("map", { zoomControl: false, attributionControl: false, fadeAnimation: false })
+  .setView([FALLBACK.lat, FALLBACK.lon], 10);
 map.createPane("weather").style.zIndex = 350;
 map.createPane("labels").style.zIndex = 450;
 map.getPane("labels").style.pointerEvents = "none";
@@ -147,174 +157,15 @@ L.tileLayer(`${esri}${tone}_Reference/MapServer/tile/{z}/{y}/{x}`, { maxZoom: 16
 const youAreHere = L.circleMarker([FALLBACK.lat, FALLBACK.lon], {
   radius: 7, color: "#fff", weight: 3, fillColor: "#2f7bf5", fillOpacity: 1, pane: "labels",
 }).addTo(map);
-
-// ---------- rainy palette ----------
-// Intensity (mm/h) -> color stops, interpolated in log space. Used for the map and the timeline bars.
-const RAIN_STOPS = [
-  [0.1, [154, 208, 255, 0.55]], [0.5, [75, 163, 255, 0.75]], [2, [47, 107, 245, 0.85]],
-  [5, [107, 61, 240, 0.9]], [10, [192, 38, 211, 0.95]], [30, [255, 61, 110, 1]], [75, [255, 212, 0, 1]],
-];
-function rainColor(mmh) {
-  if (mmh < RAIN_STOPS[0][0]) return null;
-  const l = Math.log(mmh);
-  for (let i = 1; i < RAIN_STOPS.length; i++) {
-    const [v0, c0] = RAIN_STOPS[i - 1], [v1, c1] = RAIN_STOPS[i];
-    if (mmh <= v1) {
-      const t = (l - Math.log(v0)) / (Math.log(v1) - Math.log(v0));
-      return c0.map((c, k) => c + (c1[k] - c) * t);
-    }
-  }
-  return RAIN_STOPS[RAIN_STOPS.length - 1][1];
-}
-const rgba = (c, alphaScale = 1) => `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${c[3] * alphaScale})`;
-
-// DWD legend colors (style "niederschlagsradar") -> representative mm/h of each class.
-const DWD_CLASSES = {
-  "33ffff": 0.14, "1acc9a": 0.28, "019934": 0.63, "4db31b": 1.4, "99cc01": 2.4, "cce601": 3.9,
-  "ffff01": 6.1, "ffc401": 8.7, "ff8901": 12, "ff4501": 21, "fe0000": 37, "e5004c": 58,
-  "cc0098": 87, "6600cb": 120, "0000fe": 160,
-};
-const RECOLOR = new Map(Object.entries(DWD_CLASSES).map(([hex, mmh]) => {
-  const c = rainColor(mmh);
-  return [parseInt(hex, 16), [c[0], c[1], c[2], Math.round(c[3] * 255)]];
-}));
-
-// Radar frames: one DWD WMS image per time step covering the (padded) visible area,
-// recolored into the rainy palette. One request per frame keeps loading fast; the image is
-// fetched at ~1 km resolution and upscaled smoothly by the browser.
-let radarView = null, radarViewId = 0;
-function makeRadarView() {
-  const b = map.getBounds().pad(0.5);
-  const nw = L.CRS.EPSG3857.project(b.getNorthWest()), se = L.CRS.EPSG3857.project(b.getSouthEast());
-  const k = Math.cos((b.getCenter().lat * Math.PI) / 180) / 1000; // projected metres -> ground km
-  return {
-    id: ++radarViewId, bounds: b, zoom: map.getZoom(),
-    bbox: `${nw.x},${se.y},${se.x},${nw.y}`,
-    w: clamp(Math.round((se.x - nw.x) * k * 1.2), 32, 900),
-    h: clamp(Math.round((nw.y - se.y) * k * 1.2), 32, 900),
-  };
-}
-function recolor(ctx, w, h) {
-  const data = ctx.getImageData(0, 0, w, h), px = data.data;
-  for (let i = 0; i < px.length; i += 4) {
-    const out = px[i + 3] > 200 && RECOLOR.get((px[i] << 16) | (px[i + 1] << 8) | px[i + 2]);
-    if (out) { px[i] = out[0]; px[i + 1] = out[1]; px[i + 2] = out[2]; px[i + 3] = out[3]; }
-    else px[i + 3] = 0; // no rain, no-data area, coverage outline
-  }
-  ctx.putImageData(data, 0, 0);
-}
-
-const radarFrames = new Map(); // ts -> { overlay, viewId, pending, pendingView }
-function radarFrame(ts) {
-  if (!radarFrames.has(ts)) radarFrames.set(ts, { ts, overlay: null, viewId: 0, pending: null, pendingView: 0 });
-  return radarFrames.get(ts);
-}
-const frameReady = (f) => !!radarView && f.viewId === radarView.id;
-function loadRadarFrame(f) {
-  if (!radarView) radarView = makeRadarView();
-  const view = radarView;
-  if (f.viewId === view.id) return Promise.resolve();
-  if (f.pending && f.pendingView === view.id) return f.pending;
-  f.pendingView = view.id;
-  f.pending = new Promise((resolve) => {
-    const img = new Image();
-    img.crossOrigin = "anonymous";
-    img.onload = () => {
-      if (f.pendingView === view.id) {
-        const c = document.createElement("canvas");
-        c.width = view.w; c.height = view.h;
-        const ctx = c.getContext("2d", { willReadFrequently: true });
-        ctx.drawImage(img, 0, 0);
-        recolor(ctx, view.w, view.h);
-        const url = c.toDataURL();
-        if (!f.overlay) {
-          f.overlay = L.imageOverlay(url, view.bounds, { pane: "weather", className: "radar-frame", opacity: 0 }).addTo(map);
-        } else { f.overlay.setUrl(url); f.overlay.setBounds(view.bounds); }
-        f.viewId = view.id; f.pending = null;
-        if (shownTs === f.ts && state.mode === "rain") setVisibleFrame(f);
-      }
-      resolve();
-    };
-    // A failed frame counts as done for this view (playback keeps the previous image) so loading never stalls.
-    img.onerror = () => { if (f.pendingView === view.id) { f.pending = null; f.viewId = view.id; } resolve(); };
-    img.src = `${DWD_WMS}?service=WMS&version=1.1.1&request=GetMap&layers=dwd:Niederschlagsradar&styles=` +
-      `&format=image/png&transparent=true&srs=EPSG:3857&width=${view.w}&height=${view.h}` +
-      `&bbox=${view.bbox}&time=${new Date(f.ts).toISOString()}`;
-  });
-  return f.pending;
-}
-
-let shownTs = null, visibleFrame = null;
-function setVisibleFrame(f) {
-  if (!f.overlay) return;
-  f.overlay.setOpacity(1);
-  if (visibleFrame && visibleFrame !== f && visibleFrame.overlay) visibleFrame.overlay.setOpacity(0);
-  visibleFrame = f;
-}
-function showRadar(ts) {
-  shownTs = ts;
-  const f = radarFrame(ts);
-  setVisibleFrame(f); // shows an older image of this frame right away if there is one
-  loadRadarFrame(f);
-}
-function hideRadar() {
-  if (visibleFrame && visibleFrame.overlay) visibleFrame.overlay.setOpacity(0);
-  visibleFrame = null; shownTs = null;
-}
-function clearRadar() {
-  preloadToken++;
-  radarFrames.forEach((f) => f.overlay && f.overlay.remove());
-  radarFrames.clear(); visibleFrame = null; shownTs = null; radarView = null;
-}
-
-// Load all frames: the selected one first, then forecast, then history; 6 requests in flight.
-let preloadToken = 0;
-function preloadRadar() {
-  const token = ++preloadToken;
-  const fr = state.rain.frames, at = state.rain.idx;
-  const order = [...fr.slice(at), ...fr.slice(0, at).reverse()].map((f) => radarFrame(f.ts));
-  let active = 0;
-  const next = () => {
-    if (token !== preloadToken) return;
-    while (active < 6 && order.length) {
-      const f = order.shift();
-      if (frameReady(f)) continue;
-      active++;
-      loadRadarFrame(f).then(() => { active--; next(); });
-    }
-    updateRadarProgress();
-  };
-  next();
-}
-// Panned or zoomed beyond the loaded area: fetch a new view for all frames.
-map.on("moveend", () => {
-  if (!radarView || !state.rain.hasRadarMap) return;
-  if (!radarView.bounds.contains(map.getBounds()) || Math.abs(radarView.zoom - map.getZoom()) >= 1) {
-    radarView = makeRadarView();
-    if (shownTs) loadRadarFrame(radarFrame(shownTs));
-    preloadRadar();
-  }
+const pickedMarker = L.circleMarker([0, 0], {
+  radius: 8, color: "#fff", weight: 3, fillColor: "#e5484d", fillOpacity: 1, pane: "labels",
 });
-function updateRadarProgress() {
-  if (state.mode !== "rain" || !state.rain.hasRadarMap) return;
-  const total = state.rain.frames.length;
-  const ready = state.rain.frames.filter((f) => radarFrames.has(f.ts) && frameReady(radarFrames.get(f.ts))).length;
-  document.getElementById("source").textContent = ready < total
-    ? `Radar: DWD · lade Bilder ${ready}/${total}` : "Radar: DWD (Analyse + 2 h Vorhersage)";
-  clearTimeout(updateRadarProgress.timer);
-  if (ready < total) updateRadarProgress.timer = setTimeout(updateRadarProgress, 500);
-}
-
-// Cloud overlay for sunny mode (rendered from a coarse forecast grid, smoothed by the browser + blur).
-const cloudCanvas = document.createElement("canvas");
-cloudCanvas.width = cloudCanvas.height = CLOUD_GRID;
-let cloudOverlay = null;
 
 // ---------- Helpers ----------
 const fmtTime = (ts) => new Date(ts).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" });
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 function interp(times, values, t) {
-  if (!times.length) return null;
+  if (!times || !times.length) return null;
   if (t <= times[0]) return values[0];
   for (let i = 1; i < times.length; i++) {
     if (t <= times[i]) {
@@ -330,6 +181,276 @@ async function getJSON(url) {
   if (!r.ok) throw new Error(r.status + " " + url);
   return r.json();
 }
+function loadImage(url) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.onload = () => resolve(img);
+    img.onerror = reject;
+    img.src = url;
+  });
+}
+
+// ---------- Palettes ----------
+// Rain intensity (mm/h) -> color stops, interpolated in log space. Used for maps and timeline bars.
+const RAIN_STOPS = [
+  [0.1, [154, 208, 255, 0.55]], [0.5, [75, 163, 255, 0.75]], [2, [47, 107, 245, 0.85]],
+  [5, [107, 61, 240, 0.9]], [10, [192, 38, 211, 0.95]], [30, [255, 61, 110, 1]], [75, [255, 212, 0, 1]],
+];
+function rainColor(mmh) {
+  if (!(mmh >= RAIN_STOPS[0][0])) return null;
+  const l = Math.log(mmh);
+  for (let i = 1; i < RAIN_STOPS.length; i++) {
+    const [v0, c0] = RAIN_STOPS[i - 1], [v1, c1] = RAIN_STOPS[i];
+    if (mmh <= v1) {
+      const t = (l - Math.log(v0)) / (Math.log(v1) - Math.log(v0));
+      return c0.map((c, k) => c + (c1[k] - c) * t);
+    }
+  }
+  return RAIN_STOPS[RAIN_STOPS.length - 1][1];
+}
+const rgba = (c, alphaScale = 1) => `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${c[3] * alphaScale})`;
+// Clouds: light on the dark map, slate on the light map. Clear sky by day gets a warm sun tint.
+const CLOUD_RGB = dark ? [236, 240, 247] : [128, 128, 128];
+const SUN_RGB = dark ? [255, 190, 40] : [255, 196, 0];
+
+// DWD radar legend colors (style "niederschlagsradar") -> representative mm/h of each class.
+const DWD_CLASSES = {
+  "33ffff": 0.14, "1acc9a": 0.28, "019934": 0.63, "4db31b": 1.4, "99cc01": 2.4, "cce601": 3.9,
+  "ffff01": 6.1, "ffc401": 8.7, "ff8901": 12, "ff4501": 21, "fe0000": 37, "e5004c": 58,
+  "cc0098": 87, "6600cb": 120, "0000fe": 160,
+};
+const RECOLOR = new Map(Object.entries(DWD_CLASSES).map(([hex, mmh]) => {
+  const c = rainColor(mmh);
+  return [parseInt(hex, 16), [c[0], c[1], c[2], Math.round(c[3] * 255)]];
+}));
+
+// ---------- Image frames (radar + satellite) ----------
+// One WMS image per time step covering the padded visible area ("view"), fetched at ~1 km resolution,
+// recolored, and upscaled smoothly by the browser. All frames share the view; panning far enough makes a new one.
+function makeView() {
+  const b = map.getBounds().pad(0.5);
+  const nw = L.CRS.EPSG3857.project(b.getNorthWest()), se = L.CRS.EPSG3857.project(b.getSouthEast());
+  const k = Math.cos((b.getCenter().lat * Math.PI) / 180) / 1000; // projected metres -> ground km
+  return {
+    id: ++imgViewId, bounds: b, zoom: map.getZoom(), nw, se,
+    bbox: `${nw.x},${se.y},${se.x},${nw.y}`,
+    w: clamp(Math.round((se.x - nw.x) * k * 1.2), 32, 900),
+    h: clamp(Math.round((nw.y - se.y) * k * 1.2), 32, 900),
+  };
+}
+const wmsUrl = (base, layer, view, ts) => `${base}?service=WMS&version=1.1.1&request=GetMap&layers=${layer}&styles=` +
+  `&format=image/png&transparent=true&srs=EPSG:3857&width=${view.w}&height=${view.h}` +
+  `&bbox=${view.bbox}&time=${new Date(ts).toISOString()}`;
+function canvasFor(view, img) {
+  const c = document.createElement("canvas");
+  c.width = view.w; c.height = view.h;
+  const ctx = c.getContext("2d", { willReadFrequently: true });
+  if (img) ctx.drawImage(img, 0, 0);
+  return [c, ctx];
+}
+
+const RENDER = {
+  // DWD radar composite, repainted in the rainy palette.
+  async radar(view, ts) {
+    const img = await loadImage(wmsUrl(DWD_WMS, "dwd:Niederschlagsradar", view, ts));
+    const [c, ctx] = canvasFor(view, img);
+    const data = ctx.getImageData(0, 0, view.w, view.h), px = data.data;
+    for (let i = 0; i < px.length; i += 4) {
+      const out = px[i + 3] > 200 && RECOLOR.get((px[i] << 16) | (px[i + 1] << 8) | px[i + 2]);
+      if (out) { px[i] = out[0]; px[i + 1] = out[1]; px[i + 2] = out[2]; px[i + 3] = out[3]; }
+      else px[i + 3] = 0; // no rain, no-data area, coverage outline
+    }
+    ctx.putImageData(data, 0, 0);
+    return { canvas: c };
+  },
+  // EUMETSAT cloud mask (where clouds are, day and night) shaded with the 1 km infrared image (cloud texture).
+  async sat(view, ts) {
+    const irTs = Math.floor(ts / 600e3) * 600e3; // IR comes every 10 min
+    const [clm, ir] = await Promise.all([
+      loadImage(wmsUrl(EUM_WMS, "msg_fes:clm", view, ts)),
+      loadImage(wmsUrl(EUM_WMS, "mtg_fd:ir105_hrfi", view, irTs)).catch(() => null),
+    ]);
+    const [c, ctx] = canvasFor(view, clm);
+    const data = ctx.getImageData(0, 0, view.w, view.h), px = data.data;
+    const irPx = ir ? canvasFor(view, ir)[1].getImageData(0, 0, view.w, view.h).data : null;
+    const day = isDayAt(ts) ? 1 : 0;
+    const mask = new Uint8Array(view.w * view.h); // 0 = no data, 1 = clear, 2 = cloud
+    for (let i = 0, p = 0; i < px.length; i += 4, p++) {
+      if (px[i + 3] < 128) { px[i + 3] = 0; continue; }
+      const cloud = px[i] > 200 && px[i + 1] > 200 && px[i + 2] > 200; // white = cloud, green/blue = clear
+      mask[p] = cloud ? 2 : 1;
+      if (cloud) {
+        const t = irPx ? clamp((irPx[i] - 60) / 140, 0, 1) : 0.5; // brighter IR = colder, thicker cloud
+        px[i] = CLOUD_RGB[0]; px[i + 1] = CLOUD_RGB[1]; px[i + 2] = CLOUD_RGB[2];
+        px[i + 3] = Math.round((0.5 + 0.45 * t) * 255);
+      } else {
+        px[i] = SUN_RGB[0]; px[i + 1] = SUN_RGB[1]; px[i + 2] = SUN_RGB[2];
+        px[i + 3] = Math.round(0.2 * 255 * day);
+      }
+    }
+    ctx.putImageData(data, 0, 0);
+    return { canvas: c, mask };
+  },
+};
+
+function imgFrame(kind, ts) {
+  const key = `${kind}:${ts}`;
+  if (!imgFrames.has(key)) imgFrames.set(key, { key, kind, ts, overlay: null, viewId: 0, pending: null, pendingView: 0 });
+  return imgFrames.get(key);
+}
+const frameReady = (f) => !!imgView && f.viewId === imgView.id;
+function loadImgFrame(f) {
+  if (!imgView) imgView = makeView();
+  const view = imgView;
+  if (f.viewId === view.id) return Promise.resolve();
+  if (f.pending && f.pendingView === view.id) return f.pending;
+  f.pendingView = view.id;
+  f.pending = RENDER[f.kind](view, f.ts).then((res) => {
+    if (f.pendingView !== view.id) return;
+    const url = res.canvas.toDataURL();
+    if (!f.overlay) {
+      f.overlay = L.imageOverlay(url, view.bounds, { pane: "weather", className: `${f.kind}-frame`, opacity: 0 }).addTo(map);
+    } else { f.overlay.setUrl(url); f.overlay.setBounds(view.bounds); }
+    f.viewId = view.id; f.pending = null; f.mask = res.mask; f.view = view;
+    if (shownKey === f.key) setVisibleFrame(f);
+    if (f.kind === "sat" && applySatSamples()) { updateHeader(); drawChart(); }
+  }).catch(() => {
+    // A failed frame counts as done for this view (playback keeps the previous image) so loading never stalls.
+    if (f.pendingView === view.id) { f.pending = null; f.viewId = view.id; }
+  });
+  return f.pending;
+}
+function setVisibleFrame(f) {
+  if (!f.overlay) return;
+  f.overlay.setOpacity(1);
+  if (visibleFrame && visibleFrame !== f && visibleFrame.overlay) visibleFrame.overlay.setOpacity(0);
+  visibleFrame = f;
+}
+function showImg(kind, ts) {
+  const f = imgFrame(kind, ts);
+  shownKey = f.key;
+  setVisibleFrame(f); // shows an older image of this frame right away if there is one
+  loadImgFrame(f);
+}
+function hideImg() {
+  if (visibleFrame && visibleFrame.overlay) visibleFrame.overlay.setOpacity(0);
+  visibleFrame = null; shownKey = null;
+}
+function clearImgFrames() {
+  preloadToken++;
+  imgFrames.forEach((f) => f.overlay && f.overlay.remove());
+  imgFrames.clear(); visibleFrame = null; shownKey = null; imgView = null;
+}
+// Load the image frames of the current timeline: selected first, then later, then earlier; 6 in flight.
+function preloadFrames() {
+  const token = ++preloadToken;
+  const s = cur();
+  const order = [...s.frames.slice(s.idx), ...s.frames.slice(0, s.idx).reverse()]
+    .filter((f) => f.map.kind !== "model").map((f) => imgFrame(f.map.kind, f.map.ts));
+  let active = 0;
+  const next = () => {
+    if (token !== preloadToken) return;
+    while (active < 6 && order.length) {
+      const f = order.shift();
+      if (frameReady(f)) continue;
+      active++;
+      loadImgFrame(f).then(() => { active--; next(); });
+    }
+    updateSource();
+  };
+  next();
+}
+// Sun bars in the past come from the satellite: share of cloudy pixels around the location.
+function satCloudAt(f, loc) {
+  if (!f || !f.mask || !f.view) return null;
+  const v = f.view, p = L.CRS.EPSG3857.project(L.latLng(loc.lat, loc.lon));
+  const x = Math.round(((p.x - v.nw.x) / (v.se.x - v.nw.x)) * v.w), y = Math.round(((v.nw.y - p.y) / (v.nw.y - v.se.y)) * v.h);
+  let cloudy = 0, n = 0;
+  for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
+    const xx = x + dx, yy = y + dy;
+    if (xx < 0 || yy < 0 || xx >= v.w || yy >= v.h) continue;
+    const m = f.mask[yy * v.w + xx];
+    if (m) { n++; if (m === 2) cloudy++; }
+  }
+  return n ? cloudy / n : null;
+}
+function applySatSamples() {
+  let changed = false;
+  for (const key of ["sun-short", "sun-long"]) {
+    const v = state.views[key];
+    if (!v) continue;
+    for (const fr of v.frames) {
+      if (fr.map.kind !== "sat") continue;
+      const c = satCloudAt(imgFrames.get(`sat:${fr.map.ts}`), state.loc);
+      if (c == null) continue;
+      const val = fr.isDay ? 1 - c : 0;
+      if (val !== fr.value) { fr.value = val; fr.measured = true; changed = true; }
+    }
+  }
+  return changed;
+}
+
+// ---------- Model grid (clouds, rain beyond the radar) ----------
+async function loadGrid() {
+  if (gridFetching) return;
+  const viewB = map.getBounds(), g = state.grid;
+  if (g && g.bounds.contains(viewB) && Math.abs(g.zoom - map.getZoom()) < 2) return;
+  gridFetching = true;
+  const b = viewB.pad(0.3);
+  const n = b.getNorth(), s = b.getSouth(), w = b.getWest(), e = b.getEast();
+  const lats = [], lons = [];
+  for (let i = 0; i < GRID; i++) for (let j = 0; j < GRID; j++) {
+    lats.push((n - (i + 0.5) * (n - s) / GRID).toFixed(3));
+    lons.push((w + (j + 0.5) * (e - w) / GRID).toFixed(3));
+  }
+  try {
+    const d = await getJSON(`https://api.open-meteo.com/v1/forecast?latitude=${lats}&longitude=${lons}` +
+      `&hourly=cloud_cover,precipitation,is_day&past_hours=2&forecast_hours=17&timeformat=unixtime`);
+    const arr = Array.isArray(d) ? d : [d];
+    state.grid = {
+      bounds: b, zoom: map.getZoom(),
+      t: arr[0].hourly.time.map((x) => x * 1000),
+      cover: arr.map((p) => p.hourly.cloud_cover),
+      precip: arr.map((p) => p.hourly.precipitation),
+      isDay: arr.map((p) => p.hourly.is_day),
+    };
+    renderFrame();
+  } catch (err) { console.warn("grid failed", err); }
+  gridFetching = false;
+}
+const gridCanvas = document.createElement("canvas");
+gridCanvas.width = gridCanvas.height = GRID;
+function showGrid(ts, kind) {
+  const g = state.grid;
+  if (!g) { loadGrid(); return; }
+  const ctx = gridCanvas.getContext("2d");
+  const img = ctx.createImageData(GRID, GRID);
+  for (let k = 0; k < g.cover.length; k++) {
+    let c;
+    if (kind === "rain") {
+      const col = rainColor(interp(g.t, g.precip[k], ts));
+      c = col ? [col[0], col[1], col[2], col[3]] : [0, 0, 0, 0];
+    } else {
+      const cover = clamp(interp(g.t, g.cover[k], ts) / 100, 0, 1);
+      const day = interp(g.t, g.isDay[k], ts) >= 0.5;
+      // Cloud layer composited over the sun tint (mixing the colors directly turns muddy brown).
+      const ac = 0.8 * cover ** 1.3, as = day ? 0.22 * (1 - cover) : 0;
+      const a = ac + as * (1 - ac);
+      const comp = (k) => (a ? (CLOUD_RGB[k] * ac + SUN_RGB[k] * as * (1 - ac)) / a : 0);
+      c = [comp(0), comp(1), comp(2), a];
+    }
+    img.data.set([c[0], c[1], c[2], c[3] * 255], k * 4);
+  }
+  ctx.putImageData(img, 0, 0);
+  const url = gridCanvas.toDataURL();
+  if (!gridOverlay || !gridOverlay.getBounds().equals(g.bounds)) {
+    if (gridOverlay) gridOverlay.remove();
+    gridOverlay = L.imageOverlay(url, g.bounds, { pane: "weather", className: "grid-overlay" }).addTo(map);
+  } else gridOverlay.setUrl(url);
+  gridOverlay.setOpacity(1);
+}
+function hideGrid() { if (gridOverlay) gridOverlay.setOpacity(0); }
 
 // ---------- Location ----------
 function getPosition() {
@@ -360,154 +481,133 @@ function cityZoom(bbox) {
 
 // ---------- Data ----------
 async function loadPoint(loc) {
-  const url = `https://api.open-meteo.com/v1/forecast?latitude=${loc.lat}&longitude=${loc.lon}` +
+  const d = await getJSON(`https://api.open-meteo.com/v1/forecast?latitude=${loc.lat}&longitude=${loc.lon}` +
     `&minutely_15=temperature_2m,precipitation,sunshine_duration,is_day` +
-    `&past_minutely_15=8&forecast_minutely_15=${SUN_FUTURE_STEPS + 8}&timeformat=unixtime`;
-  const d = await getJSON(url);
+    `&past_minutely_15=8&forecast_minutely_15=64&timeformat=unixtime`);
   const m = d.minutely_15;
   state.point = {
     t: m.time.map((s) => s * 1000), temp: m.temperature_2m, precip: m.precipitation,
     sun: m.sunshine_duration, isDay: m.is_day,
   };
 }
-
-function fetchRadarPoint(loc) {
+async function loadRadarPoint(loc) {
   const now = Date.now(), iso = (t) => new Date(t).toISOString().slice(0, 19) + "Z";
-  return getJSON(`https://api.brightsky.dev/radar?lat=${loc.lat}&lon=${loc.lon}&distance=1000&format=plain` +
-    `&date=${iso(now - 3600e3)}&last_date=${iso(now + 2.5 * 3600e3)}`).catch(() => null);
-}
-async function loadRain(loc, radarPoint) {
-  const now = Date.now();
   try {
-    const d = await radarPoint;
-    if (!d || !d.radar || !d.radar.length) throw new Error("no radar");
-    const frames = d.radar.map((r) => {
+    const d = await getJSON(`https://api.brightsky.dev/radar?lat=${loc.lat}&lon=${loc.lon}&distance=1000&format=plain` +
+      `&date=${iso(now - 3600e3)}&last_date=${iso(now + 2.5 * 3600e3)}`);
+    state.radarPoint = (d.radar || []).map((r) => {
       const g = r.precipitation_5;
       const center = g[Math.floor(g.length / 2)][Math.floor(g[0].length / 2)];
       return { ts: Date.parse(r.timestamp), mmh: (center / 100) * 12 }; // 0.01 mm per 5 min -> mm/h
     });
-    state.rain.hasRadarMap = true;
-    state.rain.frames = frames;
-    document.getElementById("source").textContent = "Radar: DWD (Analyse + 2 h Vorhersage)";
-  } catch {
-    // Outside Germany: no DWD radar; fall back to the Open-Meteo model forecast.
-    const p = state.point;
-    state.rain.hasRadarMap = false;
-    state.rain.frames = p.t.filter((t) => t >= now - 3600e3 && t <= now + 2 * 3600e3)
-      .map((t) => ({ ts: t, mmh: interp(p.t, p.precip, t) * 4 }));
-    document.getElementById("source").textContent = "Kein Radar hier – Modellvorhersage";
-  }
-  for (const f of state.rain.frames) f.temp = interp(state.point.t, state.point.temp, f.ts);
-  state.rain.nowIdx = Math.max(0, state.rain.frames.findLastIndex((f) => f.ts <= now));
-  state.rain.idx = state.rain.nowIdx;
+  } catch { state.radarPoint = []; } // outside Germany: no radar
 }
-
-function buildSunFrames() {
-  const p = state.point, step = SUN_STEP_MIN * 60e3;
-  const start = Math.floor(Date.now() / step) * step - SUN_PAST_STEPS * step;
-  state.sun.frames = [];
-  for (let i = 0; i <= SUN_PAST_STEPS + SUN_FUTURE_STEPS; i++) {
-    const ts = start + i * step;
-    const k = p.t.indexOf(ts);
-    state.sun.frames.push({
-      ts,
-      sun: clamp((k >= 0 ? p.sun[k] : interp(p.t, p.sun, ts)) / 900, 0, 1),
-      isDay: k >= 0 ? p.isDay[k] : Math.round(interp(p.t, p.isDay, ts)),
-      temp: interp(p.t, p.temp, ts),
-    });
-  }
-  state.sun.nowIdx = SUN_PAST_STEPS;
-  state.sun.idx = SUN_PAST_STEPS;
-}
-
-let cloudFetchBounds = null, cloudFetching = false;
-async function loadClouds() {
-  if (cloudFetching) return;
-  const view = map.getBounds();
-  if (cloudFetchBounds && cloudFetchBounds.contains(view) &&
-      Math.abs(state.clouds.zoom - map.getZoom()) < 2) return;
-  cloudFetching = true;
-  const b = view.pad(0.3);
-  const n = b.getNorth(), s = b.getSouth(), w = b.getWest(), e = b.getEast();
-  const lats = [], lons = [];
-  for (let i = 0; i < CLOUD_GRID; i++) for (let j = 0; j < CLOUD_GRID; j++) {
-    lats.push((n - (i + 0.5) * (n - s) / CLOUD_GRID).toFixed(3));
-    lons.push((w + (j + 0.5) * (e - w) / CLOUD_GRID).toFixed(3));
-  }
+// Newest available satellite cloud mask (the satellite runs ~20-30 min behind real time).
+async function loadSatLatest() {
   try {
-    const d = await getJSON(`https://api.open-meteo.com/v1/forecast?latitude=${lats}&longitude=${lons}` +
-      `&hourly=cloud_cover,is_day&past_hours=2&forecast_hours=15&timeformat=unixtime`);
-    const arr = Array.isArray(d) ? d : [d];
-    state.clouds = {
-      bounds: b, zoom: map.getZoom(),
-      t: arr[0].hourly.time.map((x) => x * 1000),
-      cover: arr.map((p) => p.hourly.cloud_cover),
-      isDay: arr.map((p) => p.hourly.is_day),
-    };
-    cloudFetchBounds = b;
-    if (state.mode === "sun") renderFrame();
-  } catch (err) { console.warn("cloud grid failed", err); }
-  cloudFetching = false;
+    const r = await fetch(`https://view.eumetsat.int/geoserver/msg_fes/clm/ows?service=WMS&version=1.3.0&request=GetCapabilities`);
+    const m = (await r.text()).match(/<Dimension name="time"[^>]*>[^<]*\/([0-9T:.\-]+Z)\/PT15M/);
+    state.satLatest = m ? Date.parse(m[1]) : null;
+  } catch { state.satLatest = null; }
+}
+function isDayAt(ts) {
+  const p = state.point;
+  return p ? interp(p.t, p.isDay, ts) >= 0.5 : true;
 }
 
-function renderClouds(ts) {
-  const c = state.clouds;
-  if (!c) return;
-  const ctx = cloudCanvas.getContext("2d");
-  const img = ctx.createImageData(CLOUD_GRID, CLOUD_GRID);
-  for (let k = 0; k < c.cover.length; k++) {
-    const cover = clamp(interp(c.t, c.cover[k], ts) / 100, 0, 1);
-    const day = interp(c.t, c.isDay[k], ts) >= 0.5;
-    // Clear sky by day = warm sun tint, clouds = grey; at night only clouds are drawn.
-    const r = 255 + (105 - 255) * cover, g = 196 + (115 - 196) * cover, bl = 0 + (135 - 0) * cover;
-    const a = day ? 0.28 + 0.45 * cover : 0.7 * cover;
-    img.data.set([r, g, bl, a * 255], k * 4);
+// Build all four timelines (rain/sun x 2 h/14 h) from the loaded series.
+function buildViews() {
+  const now = Date.now(), p = state.point, R = state.radarPoint;
+  const start = Math.floor(now / STEP) * STEP - 4 * STEP; // 1 h history
+  const temp = (ts) => interp(p.t, p.temp, ts);
+  const modelRain = (ts) => Math.max(0, interp(p.t, p.precip, ts) * 4); // mm per 15 min -> mm/h
+  const radarEnd = R.length ? R[R.length - 1].ts : -Infinity;
+  const steps = (hours) => Array.from({ length: 4 + hours * 4 + 1 }, (_, i) => start + i * STEP);
+  const finish = (frames) => {
+    const nowIdx = Math.max(0, frames.findLastIndex((f) => f.ts <= now));
+    const split = frames.findIndex((f, i) => i > 0 && f.map.kind !== frames[i - 1].map.kind);
+    return { frames, nowIdx, idx: nowIdx, split };
+  };
+  const old = { ...state.views };
+
+  // rain, 2 h: 5-minute radar frames (or the model outside radar coverage)
+  state.views["rain-short"] = finish(R.length
+    ? R.map((r) => ({ ts: r.ts, value: r.mmh, temp: temp(r.ts), map: { kind: "radar", ts: r.ts } }))
+    : steps(2).map((ts) => ({ ts, value: modelRain(ts), temp: temp(ts), map: { kind: "model" } })));
+
+  // rain, 14 h: 15-minute steps; radar (averaged) while it lasts, then the model
+  state.views["rain-long"] = finish(steps(14).map((ts) => {
+    if (ts <= radarEnd) {
+      const inStep = R.filter((r) => r.ts >= ts && r.ts < ts + STEP);
+      const v = inStep.length ? inStep.reduce((a, r) => a + r.mmh, 0) / inStep.length : 0;
+      return { ts, value: v, temp: temp(ts), map: { kind: "radar", ts: inStep.length ? inStep[0].ts : ts } };
+    }
+    return { ts, value: modelRain(ts), temp: temp(ts), map: { kind: "model" } };
+  }));
+
+  // sun: satellite up to now, model forecast afterwards
+  for (const range of ["short", "long"]) {
+    state.views[`sun-${range}`] = finish(steps(RANGE_HOURS[range]).map((ts) => {
+      const isDay = isDayAt(ts) ? 1 : 0;
+      const k = p.t.indexOf(ts);
+      const sun = clamp((k >= 0 ? p.sun[k] : interp(p.t, p.sun, ts)) / 900, 0, 1);
+      const sat = state.satLatest && ts <= now ? Math.min(ts, state.satLatest) : null;
+      return { ts, value: sun, isDay, temp: temp(ts), map: sat ? { kind: "sat", ts: sat } : { kind: "model" } };
+    }));
   }
-  ctx.putImageData(img, 0, 0);
-  const url = cloudCanvas.toDataURL();
-  if (!cloudOverlay || !cloudOverlay.getBounds().equals(c.bounds)) {
-    if (cloudOverlay) cloudOverlay.remove();
-    cloudOverlay = L.imageOverlay(url, c.bounds, { pane: "weather", className: "cloud-overlay" }).addTo(map);
-  } else cloudOverlay.setUrl(url);
+  // keep the selected position when data refreshes
+  for (const key in state.views) if (old[key] && old[key] !== state.views[key]) {
+    const o = old[key], v = state.views[key];
+    if (o.idx !== o.nowIdx) v.idx = clamp(v.frames.findIndex((f) => f.ts >= o.frames[o.idx].ts), 0, v.frames.length - 1);
+  }
+  applySatSamples();
 }
 
 // ---------- Rendering ----------
 function renderFrame() {
   const s = cur(), f = s.frames[s.idx];
   if (!f) return;
-  if (state.mode === "rain") {
-    if (cloudOverlay) cloudOverlay.setOpacity(0);
-    if (state.rain.hasRadarMap) showRadar(f.ts);
-  } else {
-    hideRadar();
-    if (cloudOverlay) cloudOverlay.setOpacity(1);
-    renderClouds(f.ts);
-  }
-  const rel = Math.round((f.ts - s.frames[s.nowIdx].ts) / 60e3);
-  document.getElementById("frameTime").textContent =
-    fmtTime(f.ts) + (rel === 0 ? " · jetzt" : rel > 0 ? ` · in ${rel} min` : ` · vor ${-rel} min`);
+  if (f.map.kind === "model") { hideImg(); showGrid(f.ts, state.mode === "rain" ? "rain" : "cloud"); }
+  else { hideGrid(); showImg(f.map.kind, f.map.ts); }
+  updateSource();
   drawChart();
+}
+function updateSource() {
+  const s = cur(), f = s.frames[s.idx];
+  if (!f) return;
+  const now = Date.now();
+  let text = f.map.kind === "radar" ? (f.ts > now ? "Radar-Vorhersage (DWD)" : "Radar gemessen (DWD)")
+    : f.map.kind === "sat" ? `Satellit (EUMETSAT) · Stand ${fmtTime(f.map.ts)}`
+    : state.mode === "rain" ? "Modellvorhersage, ungenauer" : "Wolken-Vorhersage (Modell)";
+  const img = s.frames.filter((x) => x.map.kind !== "model");
+  const keys = [...new Set(img.map((x) => `${x.map.kind}:${x.map.ts}`))];
+  const ready = keys.filter((k) => imgFrames.has(k) && frameReady(imgFrames.get(k))).length;
+  if (ready < keys.length) text += ` · lade ${ready}/${keys.length}`;
+  document.getElementById("source").textContent = text;
+  clearTimeout(updateSource.timer);
+  if (ready < keys.length) updateSource.timer = setTimeout(updateSource, 500);
 }
 
 function summary() {
+  const s = cur(), fr = s.frames.slice(s.nowIdx), h = RANGE_HOURS[state.range];
+  if (!fr.length) return "Keine Daten";
   if (state.mode === "rain") {
-    const fr = state.rain.frames.slice(state.rain.nowIdx), wet = (f) => f.mmh >= 0.1;
-    if (!fr.length) return "Keine Daten";
+    const wet = (f) => f.value >= 0.1;
     if (wet(fr[0])) {
       const dry = fr.find((f) => !wet(f));
-      return dry ? `Regen bis ca. ${fmtTime(dry.ts)}` : "Regen hält die nächsten 2 h an";
+      return dry ? `Regen bis ca. ${fmtTime(dry.ts)}` : `Regen hält die nächsten ${h} h an`;
     }
     const next = fr.find(wet);
-    return next ? `Regen ab ca. ${fmtTime(next.ts)}` : "Die nächsten 2 Stunden trocken";
+    return next ? `Regen ab ca. ${fmtTime(next.ts)}` : `Die nächsten ${h} Stunden trocken`;
   }
-  const fr = state.sun.frames.slice(state.sun.nowIdx), sunny = (f) => f.sun >= 0.5;
+  const sunny = (f) => f.value >= 0.5;
   if (sunny(fr[0])) {
     const end = fr.find((f) => !sunny(f));
     return end ? `Sonne bis ca. ${fmtTime(end.ts)}` : "Sonnig für die nächsten Stunden";
   }
   const next = fr.find(sunny);
   if (next) return `Sonne ab ca. ${fmtTime(next.ts)}`;
-  return fr[0].isDay ? "Keine Sonne in Sicht" : "Nacht – keine Sonne in den nächsten 12 h";
+  return fr[0].isDay ? `Keine Sonne in den nächsten ${h} h` : `Nacht – keine Sonne in den nächsten ${h} h`;
 }
 
 const chart = document.getElementById("chart");
@@ -521,7 +621,7 @@ function drawChart() {
   ctx.scale(dpr, dpr);
   const css = getComputedStyle(document.documentElement);
   const col = (n) => css.getPropertyValue(n).trim();
-  const axisH = 16, top = 18, plotH = H - axisH - top;
+  const axisH = 16, top = 20, plotH = H - axisH - top;
   const n = frames.length, bw = W / n;
   const x = (i) => i * bw + bw / 2;
   const rain = state.mode === "rain";
@@ -534,7 +634,7 @@ function drawChart() {
   // Rain intensity guides: light 0.5, moderate 2, heavy 8 mm/h (evenly spaced on the sqrt scale)
   const guideLabels = [];
   if (rain) {
-    ctx.font = "10px system-ui, sans-serif"; ctx.textAlign = "left"; ctx.lineWidth = 1;
+    ctx.lineWidth = 1;
     for (const [mmh, label] of [[0.5, "leicht"], [2, "mittel"], [8, "stark"]]) {
       const gy = Math.round(top + plotH - Math.sqrt(mmh / 8) * plotH) + 0.5;
       ctx.strokeStyle = col("--line"); ctx.setLineDash([2, 3]);
@@ -543,21 +643,29 @@ function drawChart() {
       guideLabels.push([label, gy]);
     }
   }
-  // Bars: rain intensity (sqrt scale, capped at 8 mm/h) or sunshine fraction
+  // Bars: rain intensity (sqrt scale, capped at 8 mm/h) or sunshine share
   frames.forEach((f, i) => {
-    const v = rain ? Math.sqrt(clamp(f.mmh, 0, 8) / 8) : f.sun;
-    if (v <= 0.005) return;
+    const v = rain ? Math.sqrt(clamp(f.value, 0, 8) / 8) : f.value;
+    if (!(v > 0.005)) return;
     const h = Math.max(2, v * plotH);
     const past = i < s.nowIdx;
-    ctx.fillStyle = rain ? rgba(rainColor(Math.max(f.mmh, 0.1)), past ? 0.5 : 1)
-      : col(past ? "--sun-soft" : "--sun");
+    ctx.fillStyle = rain ? rgba(rainColor(Math.max(f.value, 0.1)), past ? 0.5 : 1) : col(past ? "--sun-soft" : "--sun");
     ctx.beginPath();
     ctx.roundRect(i * bw + bw * 0.12, top + plotH - h, bw * 0.76, h, Math.min(3, bw * 0.3));
     ctx.fill();
   });
-  // Baseline
   ctx.fillStyle = col("--line");
   ctx.fillRect(0, top + plotH, W, 1);
+
+  // Where the data source changes (radar -> model, satellite -> forecast)
+  if (s.split > 0) {
+    const sx = s.split * bw;
+    ctx.strokeStyle = col("--muted"); ctx.lineWidth = 1; ctx.setLineDash([1, 3]);
+    ctx.beginPath(); ctx.moveTo(sx, top); ctx.lineTo(sx, top + plotH); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = col("--muted"); ctx.font = "10px system-ui, sans-serif"; ctx.textAlign = "left";
+    if (sx < W - 50) ctx.fillText(rain ? "Modell ›" : "Prognose ›", sx + 3, top + plotH - 4);
+  }
 
   // Temperature line in the upper part of the plot
   const temps = frames.map((f) => f.temp).filter((t) => t != null);
@@ -569,7 +677,6 @@ function drawChart() {
     ctx.beginPath();
     frames.forEach((f, i) => { if (f.temp != null) i ? ctx.lineTo(x(i), ty(f.temp)) : ctx.moveTo(x(i), ty(f.temp)); });
     ctx.stroke();
-    // Label hottest / coldest point
     ctx.font = "600 11px system-ui, sans-serif"; ctx.fillStyle = col("--temp"); ctx.textAlign = "center";
     const iMax = frames.reduce((a, f, i) => (f.temp > frames[a].temp ? i : a), 0);
     const iMin = frames.reduce((a, f, i) => (f.temp < frames[a].temp ? i : a), 0);
@@ -579,7 +686,7 @@ function drawChart() {
     }
   }
 
-  // Guide labels on top of bars and temperature line, with a backdrop for legibility
+  // Guide labels on top, with a backdrop for legibility
   ctx.font = "10px system-ui, sans-serif"; ctx.textAlign = "left";
   for (const [label, gy] of guideLabels) {
     ctx.fillStyle = col("--bg");
@@ -588,9 +695,9 @@ function drawChart() {
     ctx.fillText(label, 3, gy - 2);
   }
 
-  // Hour labels
+  // Time axis
   ctx.fillStyle = col("--muted"); ctx.font = "11px system-ui, sans-serif"; ctx.textAlign = "center";
-  const labelEvery = rain ? 30 : 180; // minutes
+  const labelEvery = state.range === "short" ? 30 : 180; // minutes
   frames.forEach((f, i) => {
     const d = new Date(f.ts);
     if ((d.getHours() * 60 + d.getMinutes()) % labelEvery === 0) {
@@ -601,22 +708,32 @@ function drawChart() {
 
   // "now" marker
   ctx.strokeStyle = col("--muted"); ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
-  ctx.beginPath(); ctx.moveTo(x(s.nowIdx), top - 4); ctx.lineTo(x(s.nowIdx), top + plotH); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(x(s.nowIdx), top); ctx.lineTo(x(s.nowIdx), top + plotH); ctx.stroke();
   ctx.setLineDash([]);
-  ctx.fillStyle = col("--muted"); ctx.font = "10px system-ui, sans-serif";
-  ctx.fillText("jetzt", clamp(x(s.nowIdx), 14, W - 14), top - 7);
 
-  // Selected frame cursor
+  // Selected frame cursor with a time bubble
+  const cx = x(s.idx);
   ctx.strokeStyle = col("--fg"); ctx.lineWidth = 2;
-  ctx.beginPath(); ctx.moveTo(x(s.idx), top - 2); ctx.lineTo(x(s.idx), top + plotH); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cx, top); ctx.lineTo(cx, top + plotH); ctx.stroke();
+  const label = s.idx === s.nowIdx ? "jetzt" : fmtTime(frames[s.idx].ts);
+  ctx.font = "700 11px system-ui, sans-serif";
+  const bwid = ctx.measureText(label).width + 12, bx = clamp(cx - bwid / 2, 0, W - bwid);
   ctx.fillStyle = col("--fg");
-  ctx.beginPath(); ctx.arc(x(s.idx), top - 2, 4, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.roundRect(bx, 2, bwid, 16, 8); ctx.fill();
+  ctx.fillStyle = col("--bg"); ctx.textAlign = "center";
+  ctx.fillText(label, bx + bwid / 2, 14);
+  if (s.idx !== s.nowIdx) { // small "jetzt" tick so the present stays findable
+    ctx.fillStyle = col("--muted"); ctx.font = "10px system-ui, sans-serif";
+    const nx = x(s.nowIdx);
+    if (Math.abs(nx - cx) > 34) ctx.fillText("jetzt", clamp(nx, 14, W - 14), 14);
+  }
 }
 
 function updateHeader() {
   document.getElementById("summary").textContent = summary();
-  const f = cur().frames[cur().nowIdx];
-  document.getElementById("nowTemp").textContent = f && f.temp != null ? Math.round(f.temp) + "°" : "–°";
+  const p = state.point;
+  const t = p && interp(p.t, p.temp, Date.now());
+  document.getElementById("nowTemp").textContent = t != null ? Math.round(t) + "°" : "–°";
 }
 
 // ---------- Interaction ----------
@@ -632,9 +749,7 @@ function idxFromEvent(e) {
   const r = wrap.getBoundingClientRect();
   return Math.floor(((e.clientX - r.left) / r.width) * cur().frames.length);
 }
-wrap.addEventListener("pointerdown", (e) => {
-  stop(); wrap.setPointerCapture(e.pointerId); setIdx(idxFromEvent(e));
-});
+wrap.addEventListener("pointerdown", (e) => { stop(); wrap.setPointerCapture(e.pointerId); setIdx(idxFromEvent(e)); });
 wrap.addEventListener("pointermove", (e) => { if (wrap.hasPointerCapture(e.pointerId)) setIdx(idxFromEvent(e)); });
 
 const playBtn = document.getElementById("play");
@@ -647,32 +762,35 @@ function play() {
   state.playing = setInterval(() => {
     const s = cur();
     if (s.idx >= s.frames.length - 1) { stop(); return; }
-    // Hold the current frame (max ~2 s) until the next radar frame has its tiles, so playback never flickers.
-    const next = state.mode === "rain" && state.rain.hasRadarMap && radarFrame(s.frames[s.idx + 1].ts);
-    if (next && !frameReady(next) && waited++ < 4) { loadRadarFrame(next); return; }
+    // Hold the current frame (max ~2 s) until the next image has arrived, so playback never flickers.
+    const m = s.frames[s.idx + 1].map;
+    const next = m.kind !== "model" && imgFrame(m.kind, m.ts);
+    if (next && !frameReady(next) && waited++ < 4) { loadImgFrame(next); return; }
     waited = 0;
     setIdx(s.idx + 1);
-  }, state.mode === "rain" ? 450 : 250);
+  }, state.range === "short" && state.mode === "rain" ? 450 : 300);
 }
 playBtn.addEventListener("click", () => (state.playing ? stop() : play()));
 
-function setMode(mode) {
+function needsGrid() { return cur().frames.some((f) => f.map.kind === "model"); }
+function applyView() {
   stop();
-  state.mode = mode;
-  document.body.classList.toggle("sunny", mode === "sun");
-  document.getElementById("brandName").textContent = mode === "sun" ? "sunny" : "rainy";
-  document.getElementById("modeRain").classList.toggle("on", mode === "rain");
-  document.getElementById("modeSun").classList.toggle("on", mode === "sun");
-  document.getElementById("source").textContent = mode === "sun"
-    ? "Wolken: Modellvorhersage (Open-Meteo)"
-    : (state.rain.hasRadarMap ? "Radar: DWD (Analyse + 2 h Vorhersage)" : "Kein Radar hier – Modellvorhersage");
-  if (mode === "sun") loadClouds(); else updateRadarProgress();
+  document.body.classList.toggle("sunny", state.mode === "sun");
+  document.getElementById("brandName").textContent = state.mode === "sun" ? "sunny" : "rainy";
+  document.getElementById("modeRain").classList.toggle("on", state.mode === "rain");
+  document.getElementById("modeSun").classList.toggle("on", state.mode === "sun");
+  document.getElementById("rangeShort").classList.toggle("on", state.range === "short");
+  document.getElementById("rangeLong").classList.toggle("on", state.range === "long");
+  if (needsGrid()) loadGrid();
   updateHeader();
   renderFrame();
+  preloadFrames();
 }
+document.getElementById("modeRain").addEventListener("click", () => { state.mode = "rain"; applyView(); });
+document.getElementById("modeSun").addEventListener("click", () => { state.mode = "sun"; applyView(); });
+document.getElementById("rangeShort").addEventListener("click", () => { state.range = "short"; applyView(); });
+document.getElementById("rangeLong").addEventListener("click", () => { state.range = "long"; applyView(); });
 document.getElementById("refresh").addEventListener("click", refreshAll);
-document.getElementById("modeRain").addEventListener("click", () => setMode("rain"));
-document.getElementById("modeSun").addEventListener("click", () => setMode("sun"));
 document.getElementById("locate").addEventListener("click", async () => {
   const loc = (await getPosition()) || state.home;
   state.home = loc;
@@ -680,11 +798,7 @@ document.getElementById("locate").addEventListener("click", async () => {
   map.setView([loc.lat, loc.lon], map.getZoom() < 10 ? 11 : map.getZoom());
   await setLocation(loc, false);
 });
-
 // Long-press (touch) or right-click on the map: show the forecast for that spot.
-const pickedMarker = L.circleMarker([0, 0], {
-  radius: 8, color: "#fff", weight: 3, fillColor: "#e5484d", fillOpacity: 1, pane: "labels",
-});
 let lastPick = 0;
 map.on("contextmenu", (e) => {
   if (Date.now() - lastPick < 600) return; // Leaflet tap-hold and native contextmenu can both fire
@@ -693,10 +807,66 @@ map.on("contextmenu", (e) => {
   pickedMarker.setLatLng(e.latlng).addTo(map);
   setLocation({ lat: e.latlng.lat, lon: e.latlng.lng }, true);
 });
-map.on("moveend", () => { if (state.mode === "sun") loadClouds(); });
+// Panned or zoomed beyond the loaded area: fetch a new view for all image frames, and the grid if needed.
+map.on("moveend", () => {
+  if (needsGrid()) loadGrid();
+  if (imgView && (!imgView.bounds.contains(map.getBounds()) || Math.abs(imgView.zoom - map.getZoom()) >= 1)) {
+    imgView = makeView();
+    if (shownKey) loadImgFrame(imgFrames.get(shownKey));
+    preloadFrames();
+  }
+});
 window.addEventListener("resize", drawChart);
 
-// ---------- Boot ----------
+// ---------- Loading ----------
+// Load timeline data for a location. picked = chosen by long-press (not the user's own position).
+async function setLocation(loc, picked, knownName) {
+  const req = ++locRequest;
+  stop();
+  state.loc = loc; state.picked = picked;
+  if (!picked) pickedMarker.remove();
+  const placeEl = document.getElementById("place");
+  placeEl.textContent = picked ? "📍 Ort wird geladen …" : knownName || "…";
+  const nameP = knownName ? Promise.resolve(knownName) : reverseGeocode(loc, picked).then((p) => p.name);
+  try {
+    const satP = state.satLatest && Date.now() - state.satLatest < 45 * 60e3 ? null : loadSatLatest();
+    await Promise.all([loadPoint(loc), loadRadarPoint(loc), satP]);
+  } catch (err) {
+    document.getElementById("summary").textContent = "Wetterdaten konnten nicht geladen werden";
+    console.error(err);
+    return;
+  }
+  if (req !== locRequest) return; // a newer request won
+  buildViews();
+  const name = await nameP;
+  if (req !== locRequest) return;
+  state.placeName = name;
+  placeEl.textContent = picked ? "📍 " + name : name;
+  if (picked) {
+    const back = document.createElement("button");
+    back.textContent = "× zurück";
+    back.addEventListener("click", () => document.getElementById("locate").click());
+    placeEl.append(back);
+  } else {
+    try { localStorage.setItem("rainy.last", JSON.stringify({ lat: loc.lat, lon: loc.lon, name, zoom: map.getZoom() })); } catch {}
+  }
+  if (needsGrid()) loadGrid();
+  updateHeader();
+  renderFrame();
+  preloadFrames();
+}
+
+// Reload everything: point data, radar and satellite frames, model grid.
+async function refreshAll() {
+  const btn = document.getElementById("refresh");
+  btn.classList.add("spin");
+  clearImgFrames();
+  state.grid = null; state.satLatest = null;
+  for (const v of Object.values(state.views)) v.idx = v.nowIdx;
+  await setLocation(state.loc, state.picked, state.placeName);
+  btn.classList.remove("spin");
+}
+
 (async function init() {
   const params = new URLSearchParams(location.search);
   let cached = null;
@@ -710,7 +880,6 @@ window.addEventListener("resize", drawChart);
     youAreHere.setLatLng([cached.lat, cached.lon]);
     map.setView([cached.lat, cached.lon], cached.zoom, { animate: false });
     await setLocation(cached, false, cached.name);
-    if (state.rain.hasRadarMap) preloadRadar();
   }
   let loc = await posP;
   if (!loc && !cached) loc = { lat: FALLBACK.lat, lon: FALLBACK.lon };
@@ -720,58 +889,9 @@ window.addEventListener("resize", drawChart);
     const place = await Promise.race([reverseGeocode(loc), new Promise((r) => setTimeout(() => r(null), 1500))]);
     map.setView([loc.lat, loc.lon], place ? cityZoom(place.bbox) : 11, { animate: false });
     await setLocation(loc, false, place ? place.name : undefined);
-    if (state.rain.hasRadarMap) preloadRadar();
   }
   setInterval(refreshAll, 5 * 60e3);
 })();
-
-// Reload everything: point data, radar frames and the cloud grid.
-async function refreshAll() {
-  const btn = document.getElementById("refresh");
-  btn.classList.add("spin");
-  clearRadar();
-  cloudFetchBounds = null;
-  await setLocation(state.loc, state.picked, state.placeName);
-  if (state.mode === "sun") loadClouds();
-  if (state.rain.hasRadarMap) preloadRadar();
-  btn.classList.remove("spin");
-}
-
-// Load timeline data for a location. picked = chosen by long-press (not the user's own position).
-async function setLocation(loc, picked, knownName) {
-  const req = ++locRequest;
-  stop();
-  state.loc = loc; state.picked = picked;
-  if (!picked) pickedMarker.remove();
-  const placeEl = document.getElementById("place");
-  placeEl.textContent = picked ? "📍 Ort wird geladen …" : knownName || "…";
-  const nameP = knownName ? Promise.resolve(knownName) : reverseGeocode(loc, picked).then((p) => p.name);
-  try {
-    const radarPoint = fetchRadarPoint(loc); // runs in parallel with Open-Meteo
-    await loadPoint(loc);
-    await loadRain(loc, radarPoint);
-    buildSunFrames();
-  } catch (err) {
-    document.getElementById("summary").textContent = "Wetterdaten konnten nicht geladen werden";
-    console.error(err);
-    return;
-  }
-  const name = await nameP;
-  if (req !== locRequest) return; // a newer long-press won
-  state.placeName = name;
-  placeEl.textContent = picked ? "📍 " + name : name;
-  if (!picked) {
-    try { localStorage.setItem("rainy.last", JSON.stringify({ lat: loc.lat, lon: loc.lon, name, zoom: map.getZoom() })); } catch {}
-  }
-  if (picked) {
-    const back = document.createElement("button");
-    back.textContent = "× zurück";
-    back.addEventListener("click", () => document.getElementById("locate").click());
-    placeEl.append(back);
-  }
-  updateHeader();
-  renderFrame();
-}
 </script>
 </body>
 </html>
