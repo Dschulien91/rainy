@@ -105,7 +105,7 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
 "use strict";
-const VERSION = "v0.3";
+const VERSION = "v0.4";
 const FALLBACK = { lat: 53.5511, lon: 9.9937, name: "Hamburg" };
 const DWD_WMS = "https://maps.dwd.de/geoserver/dwd/wms";
 const RAIN_STEP_MIN = 5;
@@ -394,6 +394,18 @@ function drawChart() {
     ctx.fillStyle = col("--night");
     frames.forEach((f, i) => { if (!f.isDay) ctx.fillRect(i * bw, top, bw + 0.5, plotH); });
   }
+  // Rain intensity guides: light 0.5, moderate 2, heavy 8 mm/h (evenly spaced on the sqrt scale)
+  const guideLabels = [];
+  if (rain) {
+    ctx.font = "10px system-ui, sans-serif"; ctx.textAlign = "left"; ctx.lineWidth = 1;
+    for (const [mmh, label] of [[0.5, "leicht"], [2, "mittel"], [8, "stark"]]) {
+      const gy = Math.round(top + plotH - Math.sqrt(mmh / 8) * plotH) + 0.5;
+      ctx.strokeStyle = col("--line"); ctx.setLineDash([2, 3]);
+      ctx.beginPath(); ctx.moveTo(0, gy); ctx.lineTo(W, gy); ctx.stroke();
+      ctx.setLineDash([]);
+      guideLabels.push([label, gy]);
+    }
+  }
   // Bars: rain intensity (sqrt scale, capped at 8 mm/h) or sunshine fraction
   frames.forEach((f, i) => {
     const v = rain ? Math.sqrt(clamp(f.mmh, 0, 8) / 8) : f.sun;
@@ -424,9 +436,18 @@ function drawChart() {
     const iMax = frames.reduce((a, f, i) => (f.temp > frames[a].temp ? i : a), 0);
     const iMin = frames.reduce((a, f, i) => (f.temp < frames[a].temp ? i : a), 0);
     for (const i of new Set([iMax, iMin])) {
-      const lx = clamp(x(i), 14, W - 14);
+      const lx = clamp(x(i), rain ? 48 : 14, W - 14); // keep clear of the guide labels
       ctx.fillText(Math.round(frames[i].temp) + "°", lx, i === iMax ? ty(frames[i].temp) - 5 : ty(frames[i].temp) + 13);
     }
+  }
+
+  // Guide labels on top of bars and temperature line, with a backdrop for legibility
+  ctx.font = "10px system-ui, sans-serif"; ctx.textAlign = "left";
+  for (const [label, gy] of guideLabels) {
+    ctx.fillStyle = col("--bg");
+    ctx.fillRect(0, gy - 11, ctx.measureText(label).width + 6, 11);
+    ctx.fillStyle = col("--muted");
+    ctx.fillText(label, 3, gy - 2);
   }
 
   // Hour labels
