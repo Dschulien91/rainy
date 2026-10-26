@@ -1,12 +1,14 @@
-# Renders the rainy app icons (PNG) from the same geometry as logo.svg.
+# Renders the rainy app icons (PNG) from the same geometry as logo.svg:
+# a raindrop outline tilted by 18 degrees with a smaller filled drop inside.
 # Run: python tools/make_icons.py   (needs Pillow)
 import math
 from pathlib import Path
 from PIL import Image, ImageDraw
 
 NAVY = (11, 42, 91, 255)
-SUN = (245, 167, 0, 255)
 OUT = Path(__file__).resolve().parent.parent
+TILT = math.radians(18)
+PIVOT = (32, 36)
 
 
 def bezier(p0, p1, p2, p3, n=400):
@@ -17,40 +19,37 @@ def bezier(p0, p1, p2, p3, n=400):
                u**3 * p0[1] + 3 * u * u * t * p1[1] + 3 * u * t * t * p2[1] + t**3 * p3[1])
 
 
-def drop_outline():
-    """Points along the drop (viewBox 0..64), starting at the tip, clockwise."""
+def drop():
+    """Points along the drop in viewBox units (0..64), starting at the tip, clockwise."""
     pts = list(bezier((32, 5), (32, 5), (50, 27), (50, 40)))
-    pts += [(32 + 18 * math.cos(a), 40 + 18 * math.sin(a))
-            for a in (math.pi * i / 400 for i in range(401))]  # bottom half circle, right to left
+    pts += [(32 + 18 * math.cos(a), 40 + 18 * math.sin(a)) for a in (math.pi * i / 400 for i in range(401))]
     pts += list(bezier((14, 40), (14, 27), (32, 5), (32, 5)))
     return pts
 
 
-def render(size, background):
+def rotate(p):
+    x, y = p[0] - PIVOT[0], p[1] - PIVOT[1]
+    return (PIVOT[0] + x * math.cos(TILT) - y * math.sin(TILT), PIVOT[1] + x * math.sin(TILT) + y * math.cos(TILT))
+
+
+def render(size):
     scale = 8  # supersampling
     s = size * scale
-    img = Image.new("RGBA", (s, s), background)
+    img = Image.new("RGBA", (s, s), (255, 255, 255, 255))
     d = ImageDraw.Draw(img)
-    pad = 0.16 * s
-    k = (s - 2 * pad) / 64
-    pts = drop_outline()
-    lengths = [0.0]
-    for a, b in zip(pts, pts[1:]):
-        lengths.append(lengths[-1] + math.dist(a, b))
-    total = lengths[-1]
-    r = 2 * k  # stroke width 4 in viewBox units
-    for (x, y), l in zip(pts, lengths):
-        if 0.09 * total < l < 0.185 * total:  # the gap for the sun dot
-            continue
-        cx, cy = pad + x * k, pad + y * k
+    pad = 0.14 * s
+    k = (s - 2 * pad) / 68  # viewBox -2..66
+    to_px = lambda p: (pad + (p[0] + 2) * k, pad + (p[1] + 2) * k)
+    r = 3 * k  # stroke width 6
+    for p in drop():
+        cx, cy = to_px(rotate(p))
         d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=NAVY)
-    cx, cy, rr = pad + 42.7 * k, pad + 20.4 * k, 2.8 * k
-    d.ellipse([cx - rr, cy - rr, cx + rr, cy + rr], fill=SUN)
-    return img.resize((size, size), Image.LANCZOS)
+    inner = [to_px(rotate((32 + (x - 32) * 0.42, 42 + (y - 40) * 0.42))) for x, y in drop()]
+    d.polygon(inner, fill=NAVY)
+    return img.resize((size, size), Image.LANCZOS).convert("RGB")
 
 
 if __name__ == "__main__":
-    render(180, (255, 255, 255, 255)).convert("RGB").save(OUT / "apple-touch-icon.png")
-    render(192, (255, 255, 255, 255)).convert("RGB").save(OUT / "icon-192.png")
-    render(512, (255, 255, 255, 255)).convert("RGB").save(OUT / "icon-512.png")
+    for name, size in (("apple-touch-icon.png", 180), ("icon-192.png", 192), ("icon-512.png", 512)):
+        render(size).save(OUT / name)
     print("icons written to", OUT)
