@@ -1,0 +1,551 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>rainy</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+  :root {
+    --bg: #ffffff;
+    --fg: #14181f;
+    --muted: #6b7380;
+    --line: #e6e9ee;
+    --rain: #2f7bf5;
+    --rain-soft: #a9c8fb;
+    --sun: #f5a700;
+    --sun-soft: #fbd98a;
+    --temp: #e5484d;
+    --night: #eef0f4;
+    --shadow: 0 -6px 24px rgba(20, 24, 31, 0.12);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #15181e;
+      --fg: #f1f3f6;
+      --muted: #9aa2ae;
+      --line: #2a2f38;
+      --rain-soft: #2d4f86;
+      --sun-soft: #7a5a14;
+      --night: #1d2129;
+      --shadow: 0 -6px 24px rgba(0, 0, 0, 0.5);
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; overflow: hidden; }
+  #map { position: absolute; inset: 0 0 var(--sheet-h, 250px) 0; }
+  .leaflet-container { background: var(--night); }
+  .cloud-overlay { filter: blur(14px); transition: none; }
+  .leaflet-weather-pane { filter: blur(1.5px); } /* soften the 1 km radar pixels */
+
+  .brand { position: absolute; top: max(12px, env(safe-area-inset-top)); left: 12px; z-index: 1000;
+    background: var(--bg); padding: 6px 12px; border-radius: 999px; font-weight: 800; font-size: 18px;
+    letter-spacing: -0.02em; box-shadow: 0 2px 10px rgba(0,0,0,.15); }
+  .brand span { color: var(--rain); }
+  body.sunny .brand span { color: var(--sun); }
+  .version { font-weight: 500; font-size: 11px; color: var(--muted); margin-left: 4px; }
+
+  .fab { position: absolute; right: 12px; bottom: calc(var(--sheet-h, 250px) + 12px); z-index: 1000;
+    width: 44px; height: 44px; border-radius: 50%; border: 0; background: var(--bg); color: var(--fg);
+    box-shadow: 0 2px 10px rgba(0,0,0,.2); font-size: 20px; cursor: pointer; }
+
+  .sheet { position: absolute; left: 0; right: 0; bottom: 0; height: var(--sheet-h, 250px); z-index: 1000;
+    background: var(--bg); border-radius: 18px 18px 0 0; box-shadow: var(--shadow);
+    padding: 12px 16px max(10px, env(safe-area-inset-bottom)); display: flex; flex-direction: column; gap: 8px; }
+  .head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .place { font-size: 13px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .summary { font-size: 17px; font-weight: 700; line-height: 1.2; }
+  .now-temp { font-size: 28px; font-weight: 300; margin-left: auto; }
+
+  .toggle { display: inline-flex; background: var(--night); border-radius: 999px; padding: 3px; flex: none; }
+  .toggle button { border: 0; background: transparent; color: var(--muted); font: inherit; font-weight: 700;
+    font-size: 13px; padding: 6px 12px; border-radius: 999px; cursor: pointer; }
+  .toggle button.on { background: var(--bg); color: var(--fg); box-shadow: 0 1px 4px rgba(0,0,0,.15); }
+
+  .chart-row { display: flex; align-items: stretch; gap: 8px; flex: 1; min-height: 0; }
+  .play { flex: none; width: 40px; border: 0; border-radius: 12px; background: var(--night); color: var(--fg);
+    font-size: 16px; cursor: pointer; }
+  .chart-wrap { position: relative; flex: 1; min-width: 0; touch-action: none; cursor: ew-resize; }
+  #chart { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .status { font-size: 11px; color: var(--muted); display: flex; justify-content: space-between; gap: 8px; }
+  .status a { color: inherit; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div class="brand"><span id="brandName">rainy</span><span class="version" id="ver"></span></div>
+<button class="fab" id="locate" title="Mein Standort" aria-label="Mein Standort">◎</button>
+
+<div class="sheet">
+  <div class="head">
+    <div style="min-width:0">
+      <div class="place" id="place">Standort wird ermittelt …</div>
+      <div class="summary" id="summary">Lade Daten …</div>
+    </div>
+    <div class="now-temp" id="nowTemp">–°</div>
+  </div>
+  <div class="head">
+    <div class="toggle" role="tablist">
+      <button id="modeRain" class="on" role="tab">☔ rainy</button>
+      <button id="modeSun" role="tab">☀ sunny</button>
+    </div>
+    <div class="place" id="frameTime" style="font-weight:700;color:var(--fg)"></div>
+  </div>
+  <div class="chart-row">
+    <button class="play" id="play" aria-label="Abspielen">▶</button>
+    <div class="chart-wrap" id="chartWrap"><canvas id="chart"></canvas></div>
+  </div>
+  <div class="status">
+    <span id="source"></span>
+    <span>Daten: <a href="https://www.dwd.de" target="_blank">DWD</a>, Bright Sky, Open-Meteo, Esri</span>
+  </div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+"use strict";
+const VERSION = "v0.3";
+const FALLBACK = { lat: 53.5511, lon: 9.9937, name: "Hamburg" };
+const DWD_WMS = "https://maps.dwd.de/geoserver/dwd/wms";
+const RAIN_STEP_MIN = 5;
+const SUN_STEP_MIN = 15;
+const SUN_PAST_STEPS = 4;      // 1 h of history in sunny mode
+const SUN_FUTURE_STEPS = 48;   // 12 h of forecast in sunny mode
+const CLOUD_GRID = 10;         // 10x10 Open-Meteo points for the cloud map
+
+document.getElementById("ver").textContent = VERSION;
+
+const state = {
+  mode: "rain",
+  loc: null,
+  rain: { frames: [], nowIdx: 0, idx: 0, hasRadarMap: true },
+  sun: { frames: [], nowIdx: 0, idx: 0 },
+  point: null,      // Open-Meteo minutely_15 data for the location
+  clouds: null,     // cloud grid for the sunny map
+  playing: null,
+};
+const cur = () => state[state.mode];
+
+// ---------- Map ----------
+const dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+const map = L.map("map", { zoomControl: false, attributionControl: false }).setView([FALLBACK.lat, FALLBACK.lon], 10);
+map.createPane("weather").style.zIndex = 350;
+map.createPane("labels").style.zIndex = 450;
+map.getPane("labels").style.pointerEvents = "none";
+// Esri canvas basemap: base below the weather layer, labels above it.
+const esri = "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/";
+const tone = dark ? "World_Dark_Gray" : "World_Light_Gray";
+L.tileLayer(`${esri}${tone}_Base/MapServer/tile/{z}/{y}/{x}`, { maxZoom: 16 }).addTo(map);
+L.tileLayer(`${esri}${tone}_Reference/MapServer/tile/{z}/{y}/{x}`, { maxZoom: 16, pane: "labels" }).addTo(map);
+const youAreHere = L.circleMarker([FALLBACK.lat, FALLBACK.lon], {
+  radius: 7, color: "#fff", weight: 3, fillColor: "#2f7bf5", fillOpacity: 1, pane: "labels",
+}).addTo(map);
+
+// One WMS layer per radar frame; only the active one is visible, the others preload tiles.
+const radarLayers = new Map();
+function radarLayer(ts) {
+  if (!radarLayers.has(ts)) {
+    const layer = L.tileLayer.wms(DWD_WMS, {
+      layers: "dwd:Niederschlagsradar", format: "image/png", transparent: true,
+      time: new Date(ts).toISOString(), tileSize: 512, zoomOffset: -1,
+      opacity: 0, pane: "weather", updateWhenIdle: true, keepBuffer: 1,
+    });
+    radarLayers.set(ts, layer);
+  }
+  return radarLayers.get(ts);
+}
+let shownRadar = null;
+function showRadar(ts) {
+  const layer = radarLayer(ts);
+  if (!map.hasLayer(layer)) layer.addTo(map);
+  layer.setOpacity(0.8);
+  if (shownRadar && shownRadar !== layer) shownRadar.setOpacity(0);
+  shownRadar = layer;
+}
+function hideRadar() {
+  if (shownRadar) shownRadar.setOpacity(0);
+  shownRadar = null;
+}
+function preloadRadar() {
+  // Stagger preloading so the visible frame wins the bandwidth race.
+  state.rain.frames.forEach((f, i) => setTimeout(() => {
+    const layer = radarLayer(f.ts);
+    if (!map.hasLayer(layer)) layer.addTo(map);
+  }, 300 + i * 120));
+}
+
+// Cloud overlay for sunny mode (rendered from a coarse forecast grid, smoothed by the browser + blur).
+const cloudCanvas = document.createElement("canvas");
+cloudCanvas.width = cloudCanvas.height = CLOUD_GRID;
+let cloudOverlay = null;
+
+// ---------- Helpers ----------
+const fmtTime = (ts) => new Date(ts).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" });
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+function interp(times, values, t) {
+  if (!times.length) return null;
+  if (t <= times[0]) return values[0];
+  for (let i = 1; i < times.length; i++) {
+    if (t <= times[i]) {
+      const a = values[i - 1], b = values[i];
+      if (a == null || b == null) return a ?? b;
+      return a + (b - a) * (t - times[i - 1]) / (times[i] - times[i - 1]);
+    }
+  }
+  return values[values.length - 1];
+}
+async function getJSON(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(r.status + " " + url);
+  return r.json();
+}
+
+// ---------- Location ----------
+function getPosition() {
+  return new Promise((resolve) => {
+    if (!navigator.geolocation) return resolve(null);
+    navigator.geolocation.getCurrentPosition(
+      (p) => resolve({ lat: p.coords.latitude, lon: p.coords.longitude }),
+      () => resolve(null), { timeout: 6000, maximumAge: 300000 });
+  });
+}
+async function reverseGeocode(loc) {
+  try {
+    const d = await getJSON(`https://nominatim.openstreetmap.org/reverse?lat=${loc.lat}&lon=${loc.lon}&zoom=10&format=jsonv2&accept-language=de`);
+    const a = d.address || {};
+    return { name: a.city || a.town || a.village || a.municipality || d.name || "Dein Standort", bbox: d.boundingbox };
+  } catch { return { name: "Dein Standort", bbox: null }; }
+}
+// Zoom so roughly the whole city is visible, but never wider than zoom 10 or closer than 13.
+function cityZoom(bbox) {
+  if (!bbox) return 11;
+  const b = L.latLngBounds([+bbox[0], +bbox[2]], [+bbox[1], +bbox[3]]);
+  return clamp(map.getBoundsZoom(b), 10, 13);
+}
+
+// ---------- Data ----------
+async function loadPoint(loc) {
+  const url = `https://api.open-meteo.com/v1/forecast?latitude=${loc.lat}&longitude=${loc.lon}` +
+    `&minutely_15=temperature_2m,precipitation,sunshine_duration,is_day` +
+    `&past_minutely_15=8&forecast_minutely_15=${SUN_FUTURE_STEPS + 8}&timeformat=unixtime`;
+  const d = await getJSON(url);
+  const m = d.minutely_15;
+  state.point = {
+    t: m.time.map((s) => s * 1000), temp: m.temperature_2m, precip: m.precipitation,
+    sun: m.sunshine_duration, isDay: m.is_day,
+  };
+}
+
+async function loadRain(loc) {
+  const now = Date.now();
+  try {
+    const iso = (t) => new Date(t).toISOString().slice(0, 19) + "Z";
+    const d = await getJSON(`https://api.brightsky.dev/radar?lat=${loc.lat}&lon=${loc.lon}&distance=1000&format=plain` +
+      `&date=${iso(now - 3600e3)}&last_date=${iso(now + 2.5 * 3600e3)}`);
+    if (!d.radar || !d.radar.length) throw new Error("no radar");
+    const frames = d.radar.map((r) => {
+      const g = r.precipitation_5;
+      const center = g[Math.floor(g.length / 2)][Math.floor(g[0].length / 2)];
+      return { ts: Date.parse(r.timestamp), mmh: (center / 100) * 12 }; // 0.01 mm per 5 min -> mm/h
+    });
+    state.rain.hasRadarMap = true;
+    state.rain.frames = frames;
+    document.getElementById("source").textContent = "Radar: DWD (Analyse + 2 h Vorhersage)";
+  } catch {
+    // Outside Germany: no DWD radar; fall back to the Open-Meteo model forecast.
+    const p = state.point;
+    state.rain.hasRadarMap = false;
+    state.rain.frames = p.t.filter((t) => t >= now - 3600e3 && t <= now + 2 * 3600e3)
+      .map((t) => ({ ts: t, mmh: interp(p.t, p.precip, t) * 4 }));
+    document.getElementById("source").textContent = "Kein Radar hier – Modellvorhersage";
+  }
+  for (const f of state.rain.frames) f.temp = interp(state.point.t, state.point.temp, f.ts);
+  state.rain.nowIdx = Math.max(0, state.rain.frames.findLastIndex((f) => f.ts <= now));
+  state.rain.idx = state.rain.nowIdx;
+}
+
+function buildSunFrames() {
+  const p = state.point, step = SUN_STEP_MIN * 60e3;
+  const start = Math.floor(Date.now() / step) * step - SUN_PAST_STEPS * step;
+  state.sun.frames = [];
+  for (let i = 0; i <= SUN_PAST_STEPS + SUN_FUTURE_STEPS; i++) {
+    const ts = start + i * step;
+    const k = p.t.indexOf(ts);
+    state.sun.frames.push({
+      ts,
+      sun: clamp((k >= 0 ? p.sun[k] : interp(p.t, p.sun, ts)) / 900, 0, 1),
+      isDay: k >= 0 ? p.isDay[k] : Math.round(interp(p.t, p.isDay, ts)),
+      temp: interp(p.t, p.temp, ts),
+    });
+  }
+  state.sun.nowIdx = SUN_PAST_STEPS;
+  state.sun.idx = SUN_PAST_STEPS;
+}
+
+let cloudFetchBounds = null, cloudFetching = false;
+async function loadClouds() {
+  if (cloudFetching) return;
+  const view = map.getBounds();
+  if (cloudFetchBounds && cloudFetchBounds.contains(view) &&
+      Math.abs(state.clouds.zoom - map.getZoom()) < 2) return;
+  cloudFetching = true;
+  const b = view.pad(0.3);
+  const n = b.getNorth(), s = b.getSouth(), w = b.getWest(), e = b.getEast();
+  const lats = [], lons = [];
+  for (let i = 0; i < CLOUD_GRID; i++) for (let j = 0; j < CLOUD_GRID; j++) {
+    lats.push((n - (i + 0.5) * (n - s) / CLOUD_GRID).toFixed(3));
+    lons.push((w + (j + 0.5) * (e - w) / CLOUD_GRID).toFixed(3));
+  }
+  try {
+    const d = await getJSON(`https://api.open-meteo.com/v1/forecast?latitude=${lats}&longitude=${lons}` +
+      `&hourly=cloud_cover,is_day&past_hours=2&forecast_hours=15&timeformat=unixtime`);
+    const arr = Array.isArray(d) ? d : [d];
+    state.clouds = {
+      bounds: b, zoom: map.getZoom(),
+      t: arr[0].hourly.time.map((x) => x * 1000),
+      cover: arr.map((p) => p.hourly.cloud_cover),
+      isDay: arr.map((p) => p.hourly.is_day),
+    };
+    cloudFetchBounds = b;
+    if (state.mode === "sun") renderFrame();
+  } catch (err) { console.warn("cloud grid failed", err); }
+  cloudFetching = false;
+}
+
+function renderClouds(ts) {
+  const c = state.clouds;
+  if (!c) return;
+  const ctx = cloudCanvas.getContext("2d");
+  const img = ctx.createImageData(CLOUD_GRID, CLOUD_GRID);
+  for (let k = 0; k < c.cover.length; k++) {
+    const cover = clamp(interp(c.t, c.cover[k], ts) / 100, 0, 1);
+    const day = interp(c.t, c.isDay[k], ts) >= 0.5;
+    // Clear sky by day = warm sun tint, clouds = grey; at night only clouds are drawn.
+    const r = 255 + (105 - 255) * cover, g = 196 + (115 - 196) * cover, bl = 0 + (135 - 0) * cover;
+    const a = day ? 0.28 + 0.45 * cover : 0.7 * cover;
+    img.data.set([r, g, bl, a * 255], k * 4);
+  }
+  ctx.putImageData(img, 0, 0);
+  const url = cloudCanvas.toDataURL();
+  if (!cloudOverlay || !cloudOverlay.getBounds().equals(c.bounds)) {
+    if (cloudOverlay) cloudOverlay.remove();
+    cloudOverlay = L.imageOverlay(url, c.bounds, { pane: "weather", className: "cloud-overlay" }).addTo(map);
+  } else cloudOverlay.setUrl(url);
+}
+
+// ---------- Rendering ----------
+function renderFrame() {
+  const s = cur(), f = s.frames[s.idx];
+  if (!f) return;
+  if (state.mode === "rain") {
+    if (cloudOverlay) cloudOverlay.setOpacity(0);
+    if (state.rain.hasRadarMap) showRadar(f.ts);
+  } else {
+    hideRadar();
+    if (cloudOverlay) cloudOverlay.setOpacity(1);
+    renderClouds(f.ts);
+  }
+  const rel = Math.round((f.ts - s.frames[s.nowIdx].ts) / 60e3);
+  document.getElementById("frameTime").textContent =
+    fmtTime(f.ts) + (rel === 0 ? " · jetzt" : rel > 0 ? ` · in ${rel} min` : ` · vor ${-rel} min`);
+  drawChart();
+}
+
+function summary() {
+  if (state.mode === "rain") {
+    const fr = state.rain.frames.slice(state.rain.nowIdx), wet = (f) => f.mmh >= 0.1;
+    if (!fr.length) return "Keine Daten";
+    if (wet(fr[0])) {
+      const dry = fr.find((f) => !wet(f));
+      return dry ? `Regen bis ca. ${fmtTime(dry.ts)}` : "Regen hält die nächsten 2 h an";
+    }
+    const next = fr.find(wet);
+    return next ? `Regen ab ca. ${fmtTime(next.ts)}` : "Die nächsten 2 Stunden trocken";
+  }
+  const fr = state.sun.frames.slice(state.sun.nowIdx), sunny = (f) => f.sun >= 0.5;
+  if (sunny(fr[0])) {
+    const end = fr.find((f) => !sunny(f));
+    return end ? `Sonne bis ca. ${fmtTime(end.ts)}` : "Sonnig für die nächsten Stunden";
+  }
+  const next = fr.find(sunny);
+  if (next) return `Sonne ab ca. ${fmtTime(next.ts)}`;
+  return fr[0].isDay ? "Keine Sonne in Sicht" : "Nacht – keine Sonne in den nächsten 12 h";
+}
+
+const chart = document.getElementById("chart");
+function drawChart() {
+  const s = cur(), frames = s.frames;
+  const dpr = window.devicePixelRatio || 1;
+  const W = chart.clientWidth, H = chart.clientHeight;
+  if (!W || !H || !frames.length) return;
+  chart.width = W * dpr; chart.height = H * dpr;
+  const ctx = chart.getContext("2d");
+  ctx.scale(dpr, dpr);
+  const css = getComputedStyle(document.documentElement);
+  const col = (n) => css.getPropertyValue(n).trim();
+  const axisH = 16, top = 18, plotH = H - axisH - top;
+  const n = frames.length, bw = W / n;
+  const x = (i) => i * bw + bw / 2;
+  const rain = state.mode === "rain";
+
+  // Night shading (sunny mode)
+  if (!rain) {
+    ctx.fillStyle = col("--night");
+    frames.forEach((f, i) => { if (!f.isDay) ctx.fillRect(i * bw, top, bw + 0.5, plotH); });
+  }
+  // Bars: rain intensity (sqrt scale, capped at 8 mm/h) or sunshine fraction
+  frames.forEach((f, i) => {
+    const v = rain ? Math.sqrt(clamp(f.mmh, 0, 8) / 8) : f.sun;
+    if (v <= 0.005) return;
+    const h = Math.max(2, v * plotH);
+    const past = i < s.nowIdx;
+    ctx.fillStyle = col(rain ? (past ? "--rain-soft" : "--rain") : (past ? "--sun-soft" : "--sun"));
+    ctx.beginPath();
+    ctx.roundRect(i * bw + bw * 0.12, top + plotH - h, bw * 0.76, h, Math.min(3, bw * 0.3));
+    ctx.fill();
+  });
+  // Baseline
+  ctx.fillStyle = col("--line");
+  ctx.fillRect(0, top + plotH, W, 1);
+
+  // Temperature line in the upper part of the plot
+  const temps = frames.map((f) => f.temp).filter((t) => t != null);
+  if (temps.length) {
+    let tMin = Math.min(...temps), tMax = Math.max(...temps);
+    if (tMax - tMin < 4) { const m = (tMin + tMax) / 2; tMin = m - 2; tMax = m + 2; }
+    const ty = (t) => top + 4 + (1 - (t - tMin) / (tMax - tMin)) * plotH * 0.55;
+    ctx.strokeStyle = col("--temp"); ctx.lineWidth = 2; ctx.lineJoin = "round";
+    ctx.beginPath();
+    frames.forEach((f, i) => { if (f.temp != null) i ? ctx.lineTo(x(i), ty(f.temp)) : ctx.moveTo(x(i), ty(f.temp)); });
+    ctx.stroke();
+    // Label hottest / coldest point
+    ctx.font = "600 11px system-ui, sans-serif"; ctx.fillStyle = col("--temp"); ctx.textAlign = "center";
+    const iMax = frames.reduce((a, f, i) => (f.temp > frames[a].temp ? i : a), 0);
+    const iMin = frames.reduce((a, f, i) => (f.temp < frames[a].temp ? i : a), 0);
+    for (const i of new Set([iMax, iMin])) {
+      const lx = clamp(x(i), 14, W - 14);
+      ctx.fillText(Math.round(frames[i].temp) + "°", lx, i === iMax ? ty(frames[i].temp) - 5 : ty(frames[i].temp) + 13);
+    }
+  }
+
+  // Hour labels
+  ctx.fillStyle = col("--muted"); ctx.font = "11px system-ui, sans-serif"; ctx.textAlign = "center";
+  const labelEvery = rain ? 30 : 180; // minutes
+  frames.forEach((f, i) => {
+    const d = new Date(f.ts);
+    if ((d.getHours() * 60 + d.getMinutes()) % labelEvery === 0) {
+      ctx.fillText(fmtTime(f.ts), clamp(x(i), 16, W - 16), H - 3);
+      ctx.fillRect(x(i), top + plotH, 1, 3);
+    }
+  });
+
+  // "now" marker
+  ctx.strokeStyle = col("--muted"); ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
+  ctx.beginPath(); ctx.moveTo(x(s.nowIdx), top - 4); ctx.lineTo(x(s.nowIdx), top + plotH); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = col("--muted"); ctx.font = "10px system-ui, sans-serif";
+  ctx.fillText("jetzt", clamp(x(s.nowIdx), 14, W - 14), top - 7);
+
+  // Selected frame cursor
+  ctx.strokeStyle = col("--fg"); ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(x(s.idx), top - 2); ctx.lineTo(x(s.idx), top + plotH); ctx.stroke();
+  ctx.fillStyle = col("--fg");
+  ctx.beginPath(); ctx.arc(x(s.idx), top - 2, 4, 0, Math.PI * 2); ctx.fill();
+}
+
+function updateHeader() {
+  document.getElementById("summary").textContent = summary();
+  const f = cur().frames[cur().nowIdx];
+  document.getElementById("nowTemp").textContent = f && f.temp != null ? Math.round(f.temp) + "°" : "–°";
+}
+
+// ---------- Interaction ----------
+function setIdx(i) {
+  const s = cur();
+  i = clamp(i, 0, s.frames.length - 1);
+  if (i === s.idx) return;
+  s.idx = i;
+  renderFrame();
+}
+const wrap = document.getElementById("chartWrap");
+function idxFromEvent(e) {
+  const r = wrap.getBoundingClientRect();
+  return Math.floor(((e.clientX - r.left) / r.width) * cur().frames.length);
+}
+wrap.addEventListener("pointerdown", (e) => {
+  stop(); wrap.setPointerCapture(e.pointerId); setIdx(idxFromEvent(e));
+});
+wrap.addEventListener("pointermove", (e) => { if (wrap.hasPointerCapture(e.pointerId)) setIdx(idxFromEvent(e)); });
+
+const playBtn = document.getElementById("play");
+function stop() { clearInterval(state.playing); state.playing = null; playBtn.textContent = "▶"; }
+function play() {
+  const s = cur();
+  if (s.idx >= s.frames.length - 1) setIdx(0);
+  playBtn.textContent = "❚❚";
+  state.playing = setInterval(() => {
+    const s = cur();
+    if (s.idx >= s.frames.length - 1) { stop(); return; }
+    setIdx(s.idx + 1);
+  }, state.mode === "rain" ? 350 : 250);
+}
+playBtn.addEventListener("click", () => (state.playing ? stop() : play()));
+
+function setMode(mode) {
+  stop();
+  state.mode = mode;
+  document.body.classList.toggle("sunny", mode === "sun");
+  document.getElementById("brandName").textContent = mode === "sun" ? "sunny" : "rainy";
+  document.getElementById("modeRain").classList.toggle("on", mode === "rain");
+  document.getElementById("modeSun").classList.toggle("on", mode === "sun");
+  document.getElementById("source").textContent = mode === "sun"
+    ? "Wolken: Modellvorhersage (Open-Meteo)"
+    : (state.rain.hasRadarMap ? "Radar: DWD (Analyse + 2 h Vorhersage)" : "Kein Radar hier – Modellvorhersage");
+  if (mode === "sun") loadClouds();
+  updateHeader();
+  renderFrame();
+}
+document.getElementById("modeRain").addEventListener("click", () => setMode("rain"));
+document.getElementById("modeSun").addEventListener("click", () => setMode("sun"));
+document.getElementById("locate").addEventListener("click", async () => {
+  const pos = await getPosition();
+  const loc = pos || state.loc;
+  map.setView([loc.lat, loc.lon], map.getZoom() < 10 ? 11 : map.getZoom());
+});
+map.on("moveend", () => { if (state.mode === "sun") loadClouds(); });
+window.addEventListener("resize", drawChart);
+
+// ---------- Boot ----------
+(async function init() {
+  const params = new URLSearchParams(location.search);
+  let loc = params.has("lat") ? { lat: +params.get("lat"), lon: +params.get("lon") } : await getPosition();
+  loc = loc || { lat: FALLBACK.lat, lon: FALLBACK.lon };
+  state.loc = loc;
+  youAreHere.setLatLng([loc.lat, loc.lon]);
+  const place = await reverseGeocode(loc);
+  document.getElementById("place").textContent = place.name;
+  map.setView([loc.lat, loc.lon], cityZoom(place.bbox), { animate: false });
+
+  try {
+    await loadPoint(loc);
+    await loadRain(loc);
+    buildSunFrames();
+  } catch (err) {
+    document.getElementById("summary").textContent = "Wetterdaten konnten nicht geladen werden";
+    console.error(err);
+    return;
+  }
+  updateHeader();
+  renderFrame();
+  if (state.rain.hasRadarMap) preloadRadar();
+  // Refresh data every 5 minutes
+  setInterval(async () => {
+    await loadPoint(state.loc); await loadRain(state.loc); buildSunFrames();
+    radarLayers.forEach((l) => l.remove()); radarLayers.clear(); shownRadar = null;
+    updateHeader(); renderFrame(); if (state.rain.hasRadarMap) preloadRadar();
+  }, 5 * 60e3);
+})();
+</script>
+</body>
+</html>
