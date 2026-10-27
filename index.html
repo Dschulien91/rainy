@@ -51,6 +51,8 @@
   .grid-overlay { filter: blur(14px); }
   .radar-frame { transition: opacity 0.45s linear; filter: blur(2.5px); } /* linear cross-fade = smooth playback */
   .nodata-overlay { pointer-events: none; }
+  .basemap { transition: filter 0.4s; }
+  body.sunny .basemap { filter: sepia(0.55) saturate(1.6) hue-rotate(-12deg) brightness(1.08); } /* light orange cast */
   .eu-frame, .srvus-frame, .srvsat-frame { transition: opacity 0.45s linear; filter: blur(1px); } /* already interpolated by the server */
   .sat-frame { transition: opacity 0.4s ease; filter: blur(3px); }
   /* dark map: lighten instead of covering, so sun tint reads as warm light and not olive */
@@ -250,7 +252,7 @@
 <script src="https://unpkg.com/@maplibre/maplibre-gl-leaflet@0.0.22/leaflet-maplibre-gl.js"></script>
 <script>
 "use strict";
-const VERSION = "v0.35";
+const VERSION = "v0.36";
 const FALLBACK = { lat: 53.5511, lon: 9.9937, name: "Hamburg" };
 const DWD_WMS = "https://maps.dwd.de/geoserver/dwd/wms";
 const EUM_WMS = "https://view.eumetsat.int/geoserver/ows";
@@ -388,7 +390,8 @@ map.getPane("labels").style.pointerEvents = "none";
     style.layers = style.layers.filter((l) => !drop.has(l.id));
     for (const l of style.layers) if (minZoom[l.id] != null) l.minzoom = Math.max(l.minzoom || 0, minZoom[l.id]);
     const part = (keep) => ({ ...style, layers: style.layers.filter(keep) });
-    L.maplibreGL({ style: part((l) => l.type !== "symbol"), interactive: false }).addTo(map);
+    const base = L.maplibreGL({ style: part((l) => l.type !== "symbol"), interactive: false }).addTo(map);
+    base.getContainer().classList.add("basemap");
     L.maplibreGL({ style: part((l) => l.type === "symbol"), interactive: false, pane: "labels" }).addTo(map);
   } catch (err) { console.warn("basemap failed", err); }
 })();
@@ -1196,7 +1199,7 @@ function buildViews() {
 }
 
 // ---------- Where data is missing ----------
-// Rain mode: diagonal hatching over areas without radar (satellite estimates there are only rough).
+// Rain mode: diagonal hatching where there is neither radar nor a satellite rain estimate.
 // Sunny mode: hatching where no weather satellite we use covers the map.
 map.createPane("nodata").style.zIndex = 345;
 let nodataOverlay = null, nodataToken = 0;
@@ -1227,6 +1230,7 @@ async function updateNodata() {
       const mask = await loadImage(`${API_BASE}/api/radar/mask?bbox=${bbox}&width=${w}&height=${h}`).catch(() => null);
       if (token !== nodataToken) return;
       if (mask) ctx.drawImage(mask, 0, 0, w, h); else box(US_BOX);
+      box([[-40, -60], [72, 60]]); // satellite rain estimate (rough, drawn fainter) covers Europe/Africa/Atlantic
     } else box(US_BOX);
   }
   const url = c.toDataURL();
