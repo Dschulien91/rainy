@@ -52,7 +52,6 @@
   .radar-frame, .eu-frame { transition: opacity 0.4s ease; filter: blur(2.5px); }
   .sat-frame { transition: opacity 0.4s ease; filter: blur(3px); }
   /* dark map: lighten instead of covering, so sun tint reads as warm light and not olive */
-  body.dark .sat-frame, body.dark .grid-overlay { mix-blend-mode: screen; }
   .place button { border: 0; background: var(--night); color: var(--fg); border-radius: 999px;
     font-size: 11px; padding: 1px 7px; margin-left: 6px; cursor: pointer; }
 
@@ -93,10 +92,12 @@
   .results .r-go { flex: 1; text-align: left; border: 0; background: none; color: var(--fg); font: inherit; padding: 12px 4px; cursor: pointer; }
   .results .r-sub { display: block; font-size: 12px; color: var(--muted); }
   .results .hint { color: var(--muted); padding: 14px 4px; border: 0; }
-  .star-btn { border: 0; background: none; color: var(--sun); cursor: pointer; padding: 6px; display: flex; }
+  .star-btn { border: 0; background: none; color: var(--muted); cursor: pointer; padding: 6px; display: flex; }
+  .star-btn.on { color: #f5b800; }
   .star-btn svg { width: 22px; height: 22px; }
   .star-btn.on path { fill: currentColor; }
-  .place .star-btn { display: inline-flex; vertical-align: -4px; padding: 0 4px; background: none; color: var(--sun); margin-left: 4px; }
+  .place .star-btn { display: inline-flex; vertical-align: -4px; padding: 0 4px; background: none; color: var(--muted); margin-left: 4px; }
+  .place .star-btn.on { color: #f5b800; }
   .place .star-btn svg { width: 16px; height: 16px; }
   .fav-controls { margin-top: 12px; }
   .fav-list { flex: 1; overflow: auto; margin: 12px -16px 0; padding: 0 16px; }
@@ -111,6 +112,8 @@
   .fav-del svg { width: 16px; height: 16px; }
   .fav .hours { margin: 0; padding: 0 4px; border-top: 0; }
   .fav .loading { color: var(--muted); font-size: 13px; padding: 14px 10px; }
+  .pin { background: none; border: 0; filter: drop-shadow(0 2px 3px rgba(0,0,0,.4)); }
+  .place .pin-ico { width: 13px; height: 13px; vertical-align: -1px; margin-right: 3px; color: var(--muted); }
   .fab.spin { animation: spin 0.8s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
 
@@ -120,7 +123,7 @@
   .head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
   .place { font-size: 13px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .summary { font-size: 17px; font-weight: 700; line-height: 1.2; }
-  .now-temp { font-size: 28px; font-weight: 300; margin-left: auto; }
+  .now-temp { font-size: 28px; font-weight: 300; margin-left: auto; white-space: nowrap; }
 
   .toggle { display: inline-flex; background: var(--night); border-radius: 999px; padding: 3px; flex: none; }
   .toggle button { border: 0; background: transparent; color: var(--muted); font: inherit; font-weight: 700;
@@ -247,7 +250,7 @@
 <script src="https://unpkg.com/@maplibre/maplibre-gl-leaflet@0.0.22/leaflet-maplibre-gl.js"></script>
 <script>
 "use strict";
-const VERSION = "v0.29";
+const VERSION = "v0.30";
 const FALLBACK = { lat: 53.5511, lon: 9.9937, name: "Hamburg" };
 const DWD_WMS = "https://maps.dwd.de/geoserver/dwd/wms";
 const EUM_WMS = "https://view.eumetsat.int/geoserver/ows";
@@ -263,7 +266,7 @@ const serverReady = API_BASE ? fetch(`${API_BASE}/api/health`).then((r) => r.jso
   if (h.openmeteo) OM_BASE = `${API_BASE}/om`;
   return h;
 }).catch(() => null) : Promise.resolve(null);
-const isImgKind = (k) => k === "radar" || k === "sat" || k === "eu" || k === "ca" || k === "us";
+const isImgKind = (k) => k === "radar" || k === "sat" || k === "eu" || k === "srvus" || k === "ca" || k === "us";
 // Canada (ECCC GeoMet): rain rate in 14 discrete classes, observations every 6 min plus a 72 min nowcast.
 const CA_WMS = "https://geo.weather.gc.ca/geomet";
 const CA_CLASSES = { "98cbfe": 0.3, "0098fe": 1.4, "00fe66": 2.8, "00cb00": 5.7, "009800": 9.8, "006600": 13.9,
@@ -314,6 +317,11 @@ function repaintRates(view, img, rateOf) {
   }
   ctx.putImageData(data, 0, 0);
   return { canvas: c, rates };
+}
+async function serverRadar(region, view, ts, ref) {
+  const img = await loadImage(`${API_BASE}/api/radar/image?region=${region}&ts=${ts}` +
+    `&ref=${ref || 0}&bbox=${view.bbox}&width=${view.w}&height=${view.h}`);
+  return { canvas: canvasFor(view, img)[0] };
 }
 // Satellite by region: Meteosat (EUMETSAT) for Europe/Africa, GOES via NASA GIBS for the Americas.
 const GIBS_WMS = "https://gibs.earthdata.nasa.gov/wms/epsg3857/best/wms.cgi";
@@ -370,6 +378,12 @@ map.getPane("labels").style.pointerEvents = "none";
       const tf = l.layout && l.layout["text-field"];
       if (tf && JSON.stringify(tf).includes("name")) l.layout["text-field"] = ["coalesce", ["get", `name:${lang}`], ["get", "name"]];
     }
+    // calmer map: no road names, states or minor places; places only from sensible zoom levels
+    const drop = new Set(["road_oneway", "road_oneway_opposite", "highway_name_other", "highway_name_motorway",
+      "place_state", "place_other", "place_country_other"]);
+    const minZoom = { place_suburb: 12, place_village: 11, place_town: 9, place_city: 6, place_city_large: 4, water_name: 9 };
+    style.layers = style.layers.filter((l) => !drop.has(l.id));
+    for (const l of style.layers) if (minZoom[l.id] != null) l.minzoom = Math.max(l.minzoom || 0, minZoom[l.id]);
     const part = (keep) => ({ ...style, layers: style.layers.filter(keep) });
     L.maplibreGL({ style: part((l) => l.type !== "symbol"), interactive: false }).addTo(map);
     L.maplibreGL({ style: part((l) => l.type === "symbol"), interactive: false, pane: "labels" }).addTo(map);
@@ -378,8 +392,13 @@ map.getPane("labels").style.pointerEvents = "none";
 const youAreHere = L.circleMarker([FALLBACK.lat, FALLBACK.lon], {
   radius: 7, color: "#fff", weight: 3, fillColor: "#2f7bf5", fillOpacity: 1, pane: "labels",
 }).addTo(map);
-const pickedMarker = L.circleMarker([0, 0], {
-  radius: 8, color: "#fff", weight: 3, fillColor: "#e5484d", fillOpacity: 1, pane: "labels",
+const pickedMarker = L.marker([0, 0], {
+  interactive: false, keyboard: false,
+  icon: L.divIcon({
+    className: "pin", iconSize: [30, 40], iconAnchor: [15, 38],
+    html: '<svg viewBox="0 0 30 40" width="30" height="40"><path d="M15 39C15 39 3 24.5 3 15a12 12 0 0 1 24 0c0 9.5-12 24-12 24z" ' +
+      'fill="#e5484d" stroke="#fff" stroke-width="2"/><circle cx="15" cy="15" r="4.5" fill="#fff"/></svg>',
+  }),
 });
 
 // ---------- Helpers ----------
@@ -433,7 +452,9 @@ function rainColor(mmh) {
 const rgba = (c, alphaScale = 1) => `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${c[3] * alphaScale})`;
 // Clouds: light on the dark map, slate on the light map. Clear sky by day gets a warm sun tint.
 const CLOUD_RGB = dark ? [236, 240, 247] : [128, 128, 128];
-const SUN_RGB = dark ? [255, 190, 40] : [255, 196, 0];
+// Clear sky by day: a warm yellow-to-red glow (pick a variant for testing with ?sun=1..4)
+const SUN_VARIANTS = { 1: [[255, 150, 20], 0.34], 2: [[255, 95, 35], 0.34], 3: [[255, 200, 40], 0.3], 4: [[240, 60, 70], 0.3] };
+const [SUN_RGB, SUN_ALPHA] = SUN_VARIANTS[new URLSearchParams(location.search).get("sun")] || SUN_VARIANTS[1];
 
 // DWD radar legend colors (style "niederschlagsradar") -> representative mm/h of each class.
 const DWD_CLASSES = {
@@ -511,12 +532,9 @@ const RENDER = {
       `&time=${new Date(ts).toISOString()}`;
     return repaintRates(view, await loadImage(url), usRate);
   },
-  // Europe radar from our own server: images come ready-colored in the rainy palette.
-  async eu(view, ts, ref) {
-    const img = await loadImage(`${API_BASE}/api/radar/image?region=${state.radarRegion || "eu"}&ts=${ts}` +
-      `&ref=${ref || 0}&bbox=${view.bbox}&width=${view.w}&height=${view.h}`);
-    return { canvas: canvasFor(view, img)[0] };
-  },
+  // Europe / USA radar from our own server: images come ready-colored in the rainy palette.
+  async eu(view, ts, ref) { return serverRadar("eu", view, ts, ref); },
+  async srvus(view, ts, ref) { return serverRadar("us", view, ts, ref); },
   // EUMETSAT cloud mask (where clouds are, day and night) shaded with the 1 km infrared image (cloud texture).
   async sat(view, ts) {
     const region = satRegion(L.CRS.EPSG3857.unproject(L.point((view.nw.x + view.se.x) / 2, (view.nw.y + view.se.y) / 2)).lng);
@@ -541,7 +559,7 @@ const RENDER = {
         px[i + 3] = Math.round((0.5 + 0.45 * t) * 255);
       } else {
         px[i] = SUN_RGB[0]; px[i + 1] = SUN_RGB[1]; px[i + 2] = SUN_RGB[2];
-        px[i + 3] = Math.round(0.2 * 255 * day);
+        px[i + 3] = Math.round(SUN_ALPHA * 255 * day);
       }
     }
     ctx.putImageData(data, 0, 0);
@@ -569,7 +587,7 @@ async function goesSat(view, ts, region) {
       px[i + 3] = Math.round((0.45 + 0.5 * t) * 255);
     } else {
       px[i] = SUN_RGB[0]; px[i + 1] = SUN_RGB[1]; px[i + 2] = SUN_RGB[2];
-      px[i + 3] = Math.round(0.2 * 255 * day);
+      px[i + 3] = Math.round(SUN_ALPHA * 255 * day);
     }
   }
   ctx.putImageData(data, 0, 0);
@@ -600,7 +618,7 @@ function loadImgFrame(f) {
     if (f.kind === "sat" && applySatSamples()) { updateHeader(); drawChart(); }
   }).catch(() => {
     // A failed frame counts as done for this view (playback keeps the previous image) so loading never stalls.
-    if (f.pendingView === view.id) { f.pending = null; f.viewId = view.id; }
+    if (f.pendingView === view.id) { f.pending = null; f.viewId = view.id; f.failed = true; if (shownKey === f.key) setVisibleFrame(f); }
   });
   return f.pending;
 }
@@ -615,6 +633,7 @@ function sampleRadarFrame(f) {
     sum += f.rates[yy * v.w + xx]; n++;
   }
   if (!n) return;
+  if (f.kind !== state.radarSource) return;
   const r = state.radarPoint.find((q) => q.ts === f.ts && (q.ref || null) === (f.ref || null));
   if (!r || r.mmh === sum / n) return;
   r.mmh = sum / n;
@@ -622,7 +641,10 @@ function sampleRadarFrame(f) {
   sampleRadarFrame.timer = setTimeout(() => { buildViews(); updateHeader(); drawChart(); }, 250);
 }
 function setVisibleFrame(f) {
-  if (!f.overlay) return;
+  if (!f.overlay) {
+    if (f.failed && visibleFrame && visibleFrame !== f && visibleFrame.overlay) { visibleFrame.overlay.setOpacity(0); visibleFrame = null; }
+    return;
+  }
   f.overlay.setOpacity(1);
   if (visibleFrame && visibleFrame !== f && visibleFrame.overlay) visibleFrame.overlay.setOpacity(0);
   visibleFrame = f;
@@ -647,7 +669,7 @@ function preloadFrames() {
   const token = ++preloadToken;
   const s = cur();
   const order = [...s.frames.slice(s.idx), ...s.frames.slice(0, s.idx).reverse()]
-    .filter((f) => isImgKind(f.map.kind)).map((f) => imgFrame(f.map.kind, f.map.ts, f.map.ref));
+    .map((f) => isImgKind(f.map.kind) && resolveMap(f.map)).filter(Boolean).map((m) => imgFrame(m.kind, m.ts, m.ref));
   let active = 0;
   const next = () => {
     if (token !== preloadToken) return;
@@ -739,10 +761,17 @@ async function loadMotion() {
   const mpp = (2 * half) / N; // projected metres per pixel
   let flow = null;
   try {
-    const [a, b] = await Promise.all([ts - 1800e3, ts].map((t) => loadImage(wmsUrl(EUM_WMS, "msg_fes:clm", view, t))));
+    const region = satRegion(loc.lon);
+    const url = (t) => region === "meteosat" ? wmsUrl(EUM_WMS, "msg_fes:clm", view, t) : gibsUrl(GOES_LAYER[region], view, t);
+    const [a, b] = await Promise.all([ts - 1800e3, ts].map((t) => loadImage(url(t))));
     const grid = (img) => {
       const d = canvasFor(view, img)[1].getImageData(0, 0, N, N).data, out = new Float32Array(N * N);
-      for (let i = 0; i < N * N; i++) out[i] = d[i * 4 + 3] < 128 ? -1 : (d[i * 4] > 200 && d[i * 4 + 1] > 200 && d[i * 4 + 2] > 200 ? 1 : 0);
+      for (let i = 0; i < N * N; i++) {
+        const r = d[i * 4], g = d[i * 4 + 1], b = d[i * 4 + 2];
+        if (d[i * 4 + 3] < 128) out[i] = -1;
+        else if (region === "meteosat") out[i] = r > 200 && g > 200 && b > 200 ? 1 : 0;          // EUMETSAT cloud mask
+        else out[i] = Math.max(r, g, b) - Math.min(r, g, b) > 30 || r > 150 ? 1 : 0;              // GOES IR: cold = cloud
+      }
       return out;
     };
     flow = estimateShift(grid(a), grid(b), N, 15);
@@ -835,7 +864,7 @@ function nowcastImage(f) {
         const alpha = src[i4 + 3] / 255;
         cloud = a1 < a0 ? (a0 > 0.05 ? alpha * (a1 / a0) : alpha) : alpha + (1 - alpha) * form * 0.5;
       } else cloud = form * 0.6; // clear pixel: new cloud forms
-      const tint = day ? 0.2 * (1 - Math.min(1, cloud / 0.5)) : 0;
+      const tint = day ? SUN_ALPHA * (1 - Math.min(1, cloud / 0.5)) : 0;
       const a = cloud + tint * (1 - cloud);
       if (a <= 0.01) continue;
       for (let ch = 0; ch < 3; ch++) o[i4 + ch] = (CLOUD_RGB[ch] * cloud + SUN_RGB[ch] * tint * (1 - cloud)) / a;
@@ -917,7 +946,7 @@ function showGrid(ts, kind, opacity = 1) {
       const cover = clamp(interp(g.t, g.cover[k], ts) / 100, 0, 1);
       const day = interp(g.t, g.isDay[k], ts) >= 0.5;
       // Cloud layer composited over the sun tint (mixing the colors directly turns muddy brown).
-      const ac = 0.8 * cover ** 1.3, as = day ? 0.22 * (1 - cover) : 0;
+      const ac = 0.8 * cover ** 1.3, as = day ? SUN_ALPHA * (1 - cover) : 0;
       const a = ac + as * (1 - ac);
       const comp = (k) => (a ? (CLOUD_RGB[k] * ac + SUN_RGB[k] * as * (1 - ac)) / a : 0);
       c = [comp(0), comp(1), comp(2), a];
@@ -1020,7 +1049,7 @@ async function loadRadarPoint(loc) {
       await serverReady;
       const d = await getJSON(`${API_BASE}/api/radar/point?lat=${loc.lat}&lon=${loc.lon}`);
       state.radarPoint = (d.series || []).map((r) => ({ ts: r.ts, mmh: r.mmh, ref: r.ts > d.ref ? d.ref : null }));
-      state.radarSource = "eu";
+      state.radarSource = d.region === "us" ? "srvus" : "eu";
       state.radarRegion = d.region || "eu";
     } catch { state.radarPoint = []; }
   }
@@ -1077,9 +1106,22 @@ async function loadSatLatest(loc) {
     state.satLatest = m ? Date.parse(m[1]) : null;
   } catch { state.satLatest = null; }
 }
+// Day or night: from the weather model when available, otherwise from the sun's elevation at the place.
 function isDayAt(ts) {
   const p = state.point;
-  return p ? interp(p.t, p.isDay, ts) >= 0.5 : true;
+  if (p && p.t.length) return interp(p.t, p.isDay, ts) >= 0.5;
+  return state.loc ? sunElevation(ts, state.loc.lat, state.loc.lon) > -0.83 : true;
+}
+// Solar elevation in degrees (NOAA approximation, good to a fraction of a degree).
+function sunElevation(ts, lat, lon) {
+  const rad = Math.PI / 180, d = ts / 86400e3 - 10957.5; // days since J2000.0
+  const g = (357.529 + 0.98560028 * d) * rad, q = 280.459 + 0.98564736 * d;
+  const lambda = (q + 1.915 * Math.sin(g) + 0.02 * Math.sin(2 * g)) * rad, eps = (23.439 - 0.00000036 * d) * rad;
+  const dec = Math.asin(Math.sin(eps) * Math.sin(lambda));
+  const ra = Math.atan2(Math.cos(eps) * Math.sin(lambda), Math.cos(lambda));
+  const gmst = (18.697374558 + 24.06570982441908 * d) % 24;
+  const ha = (gmst * 15 + lon) * rad - ra;
+  return Math.asin(Math.sin(lat * rad) * Math.sin(dec) + Math.cos(lat * rad) * Math.cos(dec) * Math.cos(ha)) / rad;
 }
 
 // Build all four timelines (rain/sun x 2 h/14 h) from the loaded series.
@@ -1139,6 +1181,52 @@ function buildViews() {
   applySatSamples();
 }
 
+// ---------- Map radar provider for the visible area ----------
+// The timeline belongs to the chosen place, but the map shows radar for wherever the user looks: near the place
+// we use the place's own source; elsewhere the provider of the visible region, matched to the nearest frame time.
+const DE_BOX = [[47.2, 5.8], [55.1, 15.1]], US_BOX = [[24, -125], [49.4, -66.5]];
+const inBox = (b, lat, lon) => lat >= b[0][0] && lat <= b[1][0] && lon >= b[0][1] && lon <= b[1][1];
+function providerForView() {
+  const c = map.getCenter(), loc = state.loc;
+  if (loc && map.distance(c, [loc.lat, loc.lon]) < 300e3 && state.radarPoint.length) return state.radarSource;
+  if (c.lng > -32 && c.lng < 50 && c.lat > 30) return inBox(DE_BOX, c.lat, c.lng) || !API_BASE ? "radar" : "eu";
+  if (inBox(US_BOX, c.lat, c.lng)) return API_BASE ? "srvus" : "us";
+  if (c.lng < -50 && c.lat > 41) return "ca";
+  return null;
+}
+const provTimes = {};
+async function loadProviderTimes(kind) {
+  const now = Date.now(), cached = provTimes[kind];
+  if (cached && (cached.pending || now - cached.at < 4 * 60e3)) return;
+  provTimes[kind] = { ...(cached || { list: [] }), pending: true };
+  let list = [];
+  try {
+    if (kind === "eu" || kind === "srvus") {
+      const d = await getJSON(`${API_BASE}/api/radar/frames?region=${kind === "eu" ? "eu" : "us"}`);
+      list = d.frames.map((f) => ({ ts: f.ts, ref: f.fc ? d.ref : null }));
+    } else if (kind === "ca") list = await caFrames();
+    else if (kind === "us") list = await usFrames();
+    else if (kind === "radar") { // DWD: 5-min steps, latest run by default
+      const t0 = Math.floor((now - 8 * 60e3) / 300e3) * 300e3;
+      for (let t = t0 - 3600e3; t <= t0 + 7200e3; t += 300e3) list.push({ ts: t, ref: null });
+    }
+  } catch {}
+  provTimes[kind] = { at: Date.now(), list, pending: false };
+  renderFrame(); preloadFrames();
+}
+function resolveMap(m) {
+  if (!isImgKind(m.kind) || m.kind === "sat") return m;
+  const prov = providerForView();
+  if (prov === m.kind) return m;
+  if (!prov) return null;
+  const pt = provTimes[prov];
+  if (!pt || Date.now() - pt.at > 4 * 60e3) loadProviderTimes(prov);
+  if (!pt || !pt.list.length) return null;
+  let best = null, bd = 6 * 60e3 + 1;
+  for (const f of pt.list) { const d = Math.abs(f.ts - m.ts); if (d < bd) { bd = d; best = f; } }
+  return best ? { kind: prov, ts: best.ts, ref: best.ref } : null;
+}
+
 // ---------- Rendering ----------
 function renderFrame() {
   const s = cur(), f = s.frames[s.idx];
@@ -1146,7 +1234,11 @@ function renderFrame() {
   const k = f.map.kind;
   if (k === "model") { hideImg(); hideNowcast(); showGrid(f.ts, state.mode === "rain" ? "rain" : "cloud"); }
   else if (k === "nowcast") { hideImg(); showNowcast(f); showGrid(f.ts, "cloud", 1 - f.map.w); }
-  else { hideGrid(); hideNowcast(); showImg(k, f.map.ts, f.map.ref); }
+  else {
+    hideGrid(); hideNowcast();
+    const m = resolveMap(f.map);
+    if (m) showImg(m.kind, m.ts, m.ref); else hideImg();
+  }
   updateSource();
   drawChart();
 }
@@ -1154,17 +1246,20 @@ function updateSource() {
   const s = cur(), f = s.frames[s.idx];
   if (!f) return;
   const now = Date.now();
-  let text = f.map.kind === "radar" ? (f.ts > now ? "Radar-Vorhersage (DWD)" : "Radar gemessen (DWD)")
-    : f.map.kind === "eu" ? (f.map.ref ? `Radar-Vorhersage (rainy, aus ${state.radarRegion === "us" ? "NOAA" : "EUMETNET OPERA"})`
-      : `Radar gemessen (${state.radarRegion === "us" ? "NOAA" : "EUMETNET OPERA"})`)
-    : f.map.kind === "ca" ? (f.map.ref ? "Radar-Vorhersage (Environment Canada)" : "Radar gemessen (Environment Canada)")
-    : f.map.kind === "us" ? "Radar gemessen (NOAA)"
+  const shown = isImgKind(f.map.kind) && f.map.kind !== "sat" ? resolveMap(f.map) : f.map;
+  const k = shown ? shown.kind : "none", fc = f.ts > now;
+  let text = k === "none" ? "Kein Radar für diesen Kartenausschnitt"
+    : k === "radar" ? (fc ? "Radar-Vorhersage (DWD)" : "Radar gemessen (DWD)")
+    : k === "eu" ? (fc ? "Radar-Vorhersage (rainy, aus EUMETNET OPERA)" : "Radar gemessen (EUMETNET OPERA)")
+    : k === "srvus" ? (fc ? "Radar-Vorhersage (rainy, aus NOAA-Radar)" : "Radar gemessen (NOAA)")
+    : k === "ca" ? (fc ? "Radar-Vorhersage (Environment Canada)" : "Radar gemessen (Environment Canada)")
+    : k === "us" ? "Radar gemessen (NOAA)"
     : f.map.kind === "sat" ? `Satellit (${state.satRegion === "meteosat" ? "EUMETSAT" : "NOAA GOES / NASA"}) · Stand ${fmtTime(f.map.ts)}`
     : f.map.kind === "nowcast" ? `Satellit hochgerechnet${nowcast.motion ? " (Zug: " + nowcast.motion.source + ")" : ""}` +
       (f.map.w < 0.5 ? " + Modell" : "")
     : state.mode === "rain" ? "Modellvorhersage, ungenauer" : "Wolken-Vorhersage (Modell)";
-  const img = s.frames.filter((x) => isImgKind(x.map.kind));
-  const keys = [...new Set(img.map((x) => frameKey(x.map.kind, x.map.ts, x.map.ref)))];
+  const img = s.frames.map((x) => isImgKind(x.map.kind) && resolveMap(x.map)).filter(Boolean);
+  const keys = [...new Set(img.map((m) => frameKey(m.kind, m.ts, m.ref)))];
   const ready = keys.filter((k) => imgFrames.has(k) && frameReady(imgFrames.get(k))).length;
   if (ready < keys.length) text += ` · lade ${ready}/${keys.length}`;
   document.getElementById("source").textContent = text;
@@ -1512,7 +1607,8 @@ function play() {
     if (s.idx >= s.frames.length - 1) { stop(); return; }
     // Hold the current frame (max ~2 s) until the next image has arrived, so playback never flickers.
     const m = s.frames[s.idx + 1].map;
-    const next = isImgKind(m.kind) && imgFrame(m.kind, m.ts, m.ref);
+    const rm = isImgKind(m.kind) && resolveMap(m);
+    const next = rm && imgFrame(rm.kind, rm.ts, rm.ref);
     if (next && !frameReady(next) && waited++ < 4) { loadImgFrame(next); return; }
     waited = 0;
     setIdx(s.idx + 1);
@@ -1560,6 +1656,10 @@ map.on("contextmenu", (e) => {
 });
 // Panned or zoomed beyond the loaded area: fetch a new view for all image frames, and the grid if needed.
 map.on("moveend", () => {
+  if (state.mode === "rain") {
+    const prov = providerForView();
+    if (prov !== map._lastProv) { map._lastProv = prov; renderFrame(); preloadFrames(); }
+  }
   if (needsGrid()) loadGrid();
   if (needsNowcast()) loadNowcastBase().then(() => renderFrame());
   if (imgView && (!imgView.bounds.contains(map.getBounds()) || Math.abs(imgView.zoom - map.getZoom()) >= 1)) {
@@ -1578,7 +1678,7 @@ async function setLocation(loc, picked, knownName) {
   state.loc = loc; state.picked = picked;
   if (!picked) pickedMarker.remove();
   const placeEl = document.getElementById("place");
-  placeEl.textContent = picked ? "📍 Ort wird geladen …" : knownName || "…";
+  if (picked) placeEl.innerHTML = '<svg class="pin-ico" viewBox="0 0 24 24"><path d="M12 22s-7-7.6-7-13a7 7 0 0 1 14 0c0 5.4-7 13-7 13z" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="9" r="2.4" fill="none" stroke="currentColor" stroke-width="2"/></svg>Ort wird geladen …'; else placeEl.textContent = knownName || "…";
   const nameP = knownName ? Promise.resolve(knownName) : reverseGeocode(loc, picked).then((p) => p.name);
   try {
     const fresh = state.satLatest && state.satRegion === satRegion(loc.lon) && Date.now() - state.satLatest < 45 * 60e3;
@@ -1633,7 +1733,7 @@ function toggleFav(loc, name) {
 function renderPlace() {
   const el = document.getElementById("place"), loc = state.loc;
   if (!loc) return;
-  el.innerHTML = (state.picked ? "📍 " : "") + esc(state.placeName || "") +
+  el.innerHTML = (state.picked ? '<svg class="pin-ico" viewBox="0 0 24 24"><path d="M12 22s-7-7.6-7-13a7 7 0 0 1 14 0c0 5.4-7 13-7 13z" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="9" r="2.4" fill="none" stroke="currentColor" stroke-width="2"/></svg>' : "") + esc(state.placeName || "") +
     `<button class="star-btn${isFav(loc) ? " on" : ""}" aria-label="Favorit">${STAR}</button>` +
     (state.picked ? '<button class="back">× zurück</button>' : "");
   el.querySelector(".star-btn").addEventListener("click", () => toggleFav(state.loc, state.placeName));
