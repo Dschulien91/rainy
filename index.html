@@ -88,9 +88,13 @@
     font-size: 16px; cursor: pointer; }
   .chart-wrap { position: relative; flex: 1; min-width: 0; touch-action: none; cursor: ew-resize; }
   #chart { position: absolute; inset: 0; width: 100%; height: 100%; }
-  .hours-toggle { flex: none; align-self: center; border: 0; background: var(--night); color: var(--muted); font: inherit;
-    font-size: 12px; font-weight: 700; padding: 3px 12px; border-radius: 999px; cursor: pointer; display: flex; gap: 6px; }
-  body.hours-open .hours-toggle .chev { transform: rotate(180deg); }
+  .hours-tabs { flex: none; display: flex; gap: 6px; }
+  .hours-tabs button { border: 0; background: var(--night); color: var(--muted); font: inherit; font-size: 12px;
+    font-weight: 700; padding: 3px 12px; border-radius: 999px; cursor: pointer; }
+  .hours-tabs button.on { background: var(--fg); color: var(--bg); }
+  .hours-tabs .chev { display: inline-block; font-size: 10px; }
+  .hours-tabs button.on .chev { transform: rotate(180deg); }
+  .hour .ev { font-size: 11px; font-weight: 700; color: var(--sun); }
   .hours[hidden] { display: none; }
   .hours { display: flex; overflow-x: auto; scroll-snap-type: x mandatory; margin: 0 -16px; padding: 0 16px;
     scrollbar-width: none; flex: none; border-top: 1px solid var(--line); }
@@ -148,7 +152,10 @@
     <button class="play" id="play" aria-label="Abspielen">▶</button>
     <div class="chart-wrap" id="chartWrap"><canvas id="chart"></canvas></div>
   </div>
-  <button class="hours-toggle" id="hoursToggle" aria-expanded="false"><span>24 Stunden</span><span class="chev">▾</span></button>
+  <div class="hours-tabs" id="hoursTabs">
+    <button data-range="24h" aria-expanded="false">24 Stunden <span class="chev">▾</span></button>
+    <button data-range="3d" aria-expanded="false">3 Tage <span class="chev">▾</span></button>
+  </div>
   <div class="hours" id="hours" hidden></div>
   <div class="status">
     <span id="source"></span>
@@ -159,7 +166,7 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
 "use strict";
-const VERSION = "v0.16";
+const VERSION = "v0.17";
 const FALLBACK = { lat: 53.5511, lon: 9.9937, name: "Hamburg" };
 const DWD_WMS = "https://maps.dwd.de/geoserver/dwd/wms";
 const EUM_WMS = "https://view.eumetsat.int/geoserver/ows";
@@ -710,7 +717,7 @@ async function loadPoint(loc) {
     `&minutely_15=temperature_2m,precipitation,cloud_cover,is_day` +
     `&past_minutely_15=8&forecast_minutely_15=64` +
     `&hourly=temperature_2m,precipitation,cloud_cover,is_day,weather_code,wind_speed_700hPa,wind_direction_700hPa` +
-    `&forecast_hours=25&timeformat=unixtime`);
+    `&forecast_hours=73&daily=sunrise,sunset&forecast_days=4&timezone=auto&timeformat=unixtime`);
   const m = d.minutely_15;
   // Steering wind at ~3 km height: fallback for how clouds move when the satellite gives no usable motion.
   const h = d.hourly;
@@ -719,6 +726,9 @@ async function loadPoint(loc) {
     ts: t * 1000, temp: h.temperature_2m[i], precip: h.precipitation[i], cover: h.cloud_cover[i],
     isDay: h.is_day[i], code: h.weather_code[i],
   })) : [];
+  const dl = d.daily;
+  state.sunEvents = dl ? [...dl.sunrise.map((t) => ({ ts: t * 1000, type: "rise" })), ...dl.sunset.map((t) => ({ ts: t * 1000, type: "set" }))]
+    .sort((a, b) => a.ts - b.ts) : [];
   state.point = {
     t: m.time.map((s) => s * 1000), temp: m.temperature_2m, precip: m.precipitation,
     cover: m.cloud_cover, isDay: m.is_day,
@@ -904,6 +914,22 @@ function drawChart() {
   ctx.fillStyle = col("--line");
   ctx.fillRect(0, top + plotH, W, 1);
 
+  // Sunrise / sunset markers (sunny mode)
+  if (!rain && state.sunEvents && n > 1) {
+    const t0 = frames[0].ts, t1 = frames[n - 1].ts;
+    ctx.font = "600 10px system-ui, sans-serif";
+    for (const e of state.sunEvents) {
+      if (e.ts < t0 || e.ts > t1) continue;
+      const ex = bw / 2 + ((e.ts - t0) / (t1 - t0)) * (W - bw);
+      ctx.strokeStyle = col("--sun"); ctx.lineWidth = 1; ctx.setLineDash([2, 2]);
+      ctx.beginPath(); ctx.moveTo(ex, top + plotH * 0.35); ctx.lineTo(ex, top + plotH); ctx.stroke();
+      ctx.setLineDash([]);
+      const label = (e.type === "rise" ? "↑ " : "↓ ") + fmtTime(e.ts);
+      const tw = ctx.measureText(label).width;
+      ctx.fillStyle = col("--sun"); ctx.textAlign = "left";
+      ctx.fillText(label, clamp(e.type === "rise" ? ex + 3 : ex - tw - 3, 0, W - tw), top + plotH * 0.35 + 2);
+    }
+  }
   // Where the data source changes (radar -> model, satellite -> forecast)
   if (s.split > 0) {
     const sx = s.split * bw;
@@ -1016,11 +1042,38 @@ function weatherIcon(h) {
   else body = skyG(h, false);
   return `<svg viewBox="0 0 24 24" aria-hidden="true">${body}</svg>`;
 }
+const WEEKDAYS = ["So", "Mo", "Di", "Mi", "Do", "Fr", "Sa"];
+const sunEventIcon = (rise) => '<svg viewBox="0 0 24 24" aria-hidden="true"><g fill="none" stroke="#F5A700" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+  '<path d="M7 18a5 5 0 0 1 10 0"/><line x1="3" y1="18" x2="21" y2="18"/><line x1="4.5" y1="14" x2="6" y2="14.8"/><line x1="19.5" y1="14" x2="18" y2="14.8"/>' +
+  (rise ? '<path d="M12 10V4M9.5 6.5L12 4l2.5 2.5"/>' : '<path d="M12 4v6M9.5 7.5L12 10l2.5-2.5"/>') + "</g></svg>";
+// 4-hour blocks for the 3-day view: worst weather code, mean cloud cover and rain, mean temperature.
+function hourBlocks(list, size) {
+  const out = [];
+  for (let i = 0; i + size <= list.length; i += size) {
+    const g = list.slice(i, i + size), avg = (k) => g.reduce((a, h) => a + h[k], 0) / g.length;
+    out.push({ ts: g[0].ts, temp: avg("temp"), precip: avg("precip"), cover: avg("cover"),
+      isDay: g.filter((h) => h.isDay).length * 2 >= g.length ? 1 : 0, code: Math.max(...g.map((h) => h.code)) });
+  }
+  return out;
+}
 function renderHours() {
-  const el = document.getElementById("hours"), list = state.hours || [];
-  const rain = state.mode === "rain";
-  el.innerHTML = list.slice(0, 24).map((h, i) => {
-    const label = i === 0 ? "Jetzt" : new Date(h.ts).getHours() + " Uhr";
+  const el = document.getElementById("hours"), all = state.hours || [];
+  if (!all.length) return;
+  const rain = state.mode === "rain", three = state.hoursRange === "3d", step = three ? 4 : 1;
+  let items = three ? hourBlocks(all, 4).slice(0, 18) : all.slice(0, 24);
+  const end = items[items.length - 1].ts + step * 3600e3, now = Date.now();
+  const events = (state.sunEvents || []).filter((e) => e.ts > now && e.ts < end).map((e) => ({ ts: e.ts, event: e.type }));
+  items = [...items, ...events].sort((x, y) => x.ts - y.ts);
+  let lastDay = new Date(items[0].ts).getDay();
+  el.innerHTML = items.map((h, i) => {
+    const d = new Date(h.ts);
+    if (h.event) {
+      return `<button class="hour" data-ts="${h.ts}"><span>${fmtTime(h.ts)}</span>${sunEventIcon(h.event === "rise")}` +
+        `<span class="ev">${h.event === "rise" ? "Aufgang" : "Untergang"}</span><span class="bar" style="visibility:hidden"></span></button>`;
+    }
+    const newDay = d.getDay() !== lastDay;
+    lastDay = d.getDay();
+    const label = i === 0 ? "Jetzt" : three ? `${WEEKDAYS[d.getDay()]} ${d.getHours()}h` : newDay ? `${WEEKDAYS[d.getDay()]} ${d.getHours()}h` : `${d.getHours()} Uhr`;
     let v, color;
     if (rain) { v = Math.sqrt(clamp(h.precip, 0, 8) / 8); color = h.precip >= 0.1 ? rgba(rainColor(h.precip)) : "transparent"; }
     else { v = h.isDay ? clamp(1 - h.cover / 100, 0, 1) : 0; color = "var(--sun)"; }
@@ -1029,17 +1082,28 @@ function renderHours() {
       `<span class="tp">${Math.round(h.temp)}°</span><span class="bar">${bar}</span></button>`;
   }).join("");
 }
-// Expand / collapse the hourly strip; the choice is remembered on this device.
-function setHoursOpen(open) {
+// Hourly strip: closed, "24h" (hourly) or "3d" (4-hour steps); tapping the open tab closes it. Remembered per device.
+function setHours(range) {
+  const open = !!range;
+  if (open) state.hoursRange = range;
   document.body.classList.toggle("hours-open", open);
   document.getElementById("hours").hidden = !open;
-  document.getElementById("hoursToggle").setAttribute("aria-expanded", open);
-  try { localStorage.setItem("rainy.hoursOpen", open ? "1" : "0"); } catch {}
+  document.querySelectorAll("#hoursTabs button").forEach((b) => {
+    const on = open && b.dataset.range === range;
+    b.classList.toggle("on", on);
+    b.setAttribute("aria-expanded", on);
+  });
+  try { localStorage.setItem("rainy.hours", range || ""); } catch {}
+  renderHours();
+  document.getElementById("hours").scrollLeft = 0;
   map.invalidateSize();
   drawChart();
 }
-document.getElementById("hoursToggle").addEventListener("click", () => setHoursOpen(!document.body.classList.contains("hours-open")));
-try { setHoursOpen(localStorage.getItem("rainy.hoursOpen") === "1"); } catch { setHoursOpen(false); }
+document.getElementById("hoursTabs").addEventListener("click", (e) => {
+  const b = e.target.closest("button");
+  if (!b) return;
+  setHours(b.classList.contains("on") ? null : b.dataset.range);
+});
 
 // Tap an hour: jump the timeline (and map) to it, switching to 14 h if needed.
 document.getElementById("hours").addEventListener("click", (e) => {
@@ -1196,6 +1260,11 @@ async function refreshAll() {
   await setLocation(state.loc, state.picked, state.placeName);
   btn.classList.remove("spin");
 }
+
+try {
+  const saved = localStorage.getItem("rainy.hours") ?? (localStorage.getItem("rainy.hoursOpen") === "1" ? "24h" : "");
+  setHours(saved || null);
+} catch { setHours(null); }
 
 (async function init() {
   const params = new URLSearchParams(location.search);
