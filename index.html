@@ -243,15 +243,15 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
 "use strict";
-const VERSION = "v0.24";
+const VERSION = "v0.25";
 const FALLBACK = { lat: 53.5511, lon: 9.9937, name: "Hamburg" };
 const DWD_WMS = "https://maps.dwd.de/geoserver/dwd/wms";
 const EUM_WMS = "https://view.eumetsat.int/geoserver/ows";
 const STEP = 15 * 60e3;                     // timeline step for everything except the 5-min radar view
 const RANGE_HOURS = { short: 2, long: 14 };
-const GRID = 12;
+const GRID = 8;                             // 8x8 Open-Meteo points for model maps; each point counts as one API call
 const TREND = 0.5;                          // share of the model's cloud trend applied to the satellite nowcast
-const NOWCAST_MS = 4 * 3600e3;             // satellite cloud nowcast: full weight for 1 h, then fades into the model by 4 h                            // 12x12 Open-Meteo points for model maps (clouds, rain > 2 h)
+const NOWCAST_MS = 4 * 3600e3;             // satellite cloud nowcast: full weight for 1 h, then fades into the model by 4 h
 
 document.getElementById("ver").textContent = VERSION;
 
@@ -703,9 +703,12 @@ function hideNowcast() { if (nowcast.overlay) nowcast.overlay.setOpacity(0); }
 async function loadGrid() {
   if (gridFetching) return;
   const viewB = map.getBounds(), g = state.grid;
-  if (g && g.bounds.contains(viewB) && Math.abs(g.zoom - map.getZoom()) < 2) return;
+  // Reuse the grid while it covers the view and is younger than 30 min (keeps us far below the free API limits).
+  if (g && g.bounds.contains(viewB) && Math.abs(g.zoom - map.getZoom()) < 2 && Date.now() - g.at < 30 * 60e3) return;
+  if (Date.now() - (loadGrid.lastTry || 0) < 20e3) return; // at most one attempt per 20 s (fast panning)
+  loadGrid.lastTry = Date.now();
   gridFetching = true;
-  const b = viewB.pad(0.3);
+  const b = viewB.pad(0.6);
   const n = b.getNorth(), s = b.getSouth(), w = b.getWest(), e = b.getEast();
   const lats = [], lons = [];
   for (let i = 0; i < GRID; i++) for (let j = 0; j < GRID; j++) {
@@ -717,7 +720,7 @@ async function loadGrid() {
       `&hourly=cloud_cover,precipitation,is_day&past_hours=2&forecast_hours=17&timeformat=unixtime`);
     const arr = Array.isArray(d) ? d : [d];
     state.grid = {
-      bounds: b, zoom: map.getZoom(),
+      at: Date.now(), bounds: b, zoom: map.getZoom(),
       t: arr[0].hourly.time.map((x) => x * 1000),
       cover: arr.map((p) => p.hourly.cloud_cover),
       precip: arr.map((p) => p.hourly.precipitation),
@@ -807,7 +810,7 @@ async function loadPoint(loc) {
   state.sunEvents = dl ? [...dl.sunrise.map((t) => ({ ts: t * 1000, type: "rise" })), ...dl.sunset.map((t) => ({ ts: t * 1000, type: "set" }))]
     .sort((a, b) => a.ts - b.ts) : [];
   state.point = {
-    t: m.time.map((s) => s * 1000), temp: m.temperature_2m, precip: m.precipitation,
+    loc, t: m.time.map((s) => s * 1000), temp: m.temperature_2m, precip: m.precipitation,
     cover: m.cloud_cover, isDay: m.is_day,
   };
 }
@@ -1328,7 +1331,16 @@ async function setLocation(loc, picked, knownName) {
   const nameP = knownName ? Promise.resolve(knownName) : reverseGeocode(loc, picked).then((p) => p.name);
   try {
     const satP = state.satLatest && Date.now() - state.satLatest < 45 * 60e3 ? null : loadSatLatest();
-    await Promise.all([loadPoint(loc), loadRadarPoint(loc), satP]);
+    const pointOk = await loadPoint(loc).then(() => true, (err) => { console.warn(err); return false; });
+    await Promise.all([loadRadarPoint(loc), satP]);
+    if (!pointOk) {
+      const same = state.point && state.point.loc && sameLoc(state.point.loc, loc);
+      if (!same) state.point = { loc, t: [], temp: [], precip: [], cover: [], isDay: [] };
+      if (!same) state.hours = [];
+      toast("Das Wettermodell (Open-Meteo) antwortet gerade nicht – vermutlich ist das kostenlose Abfragelimit erreicht. " +
+        "Radar und Satellit laufen weiter, Temperatur und Vorhersage kommen gleich wieder.");
+      setTimeout(() => { if (state.loc === loc) refreshAll(); }, 2 * 60e3);
+    } else if (document.getElementById("toast").textContent.startsWith("Das Wettermodell")) hideToast();
   } catch (err) {
     document.getElementById("summary").textContent = "Wetterdaten konnten nicht geladen werden";
     console.error(err);
@@ -1530,7 +1542,7 @@ async function refreshAll() {
   const btn = document.getElementById("refresh");
   btn.classList.add("spin");
   clearImgFrames();
-  state.grid = null; state.satLatest = null;
+  state.satLatest = null;
   nowcast.base = null; nowcast.motionFor = null;
   for (const v of Object.values(state.views)) v.idx = v.nowIdx;
   await setLocation(state.loc, state.picked, state.placeName);
