@@ -180,7 +180,7 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
 "use strict";
-const VERSION = "v0.21";
+const VERSION = "v0.22";
 const FALLBACK = { lat: 53.5511, lon: 9.9937, name: "Hamburg" };
 const DWD_WMS = "https://maps.dwd.de/geoserver/dwd/wms";
 const EUM_WMS = "https://view.eumetsat.int/geoserver/ows";
@@ -1082,11 +1082,11 @@ function renderHours() {
   const rain = state.mode === "rain", three = state.hoursRange === "3d";
   const items = three ? hourBlocks(all, 4).slice(0, 18) : all.slice(0, 24);
   let lastDay = new Date(items[0].ts).getDay();
-  // Night = 0-7 h (until 8:00); a 4-hour block counts as night when most of its hours fall in that range.
+  // Night = 23-7 h (sleeping hours); a 4-hour block counts as night when most of its hours fall in that range.
   const isNight = (h) => {
     const start = new Date(h.ts).getHours(), len = three ? 4 : 1;
     let n = 0;
-    for (let k = 0; k < len; k++) if ((start + k) % 24 < 8) n++;
+    for (let k = 0; k < len; k++) { const hr = (start + k) % 24; if (hr >= 23 || hr < 7) n++; }
     return n * 2 > len;
   };
   const night = items.map(isNight);
@@ -1107,14 +1107,13 @@ function renderHours() {
       `<span class="tp">${Math.round(h.temp)}°</span><span class="bar">${bar}</span></button>`;
   }).join("");
 }
-// Short message over the map.
+// Short message over the map; it stays until hideToast().
 function toast(text) {
   const el = document.getElementById("toast");
   el.textContent = text;
   el.classList.add("show");
-  clearTimeout(toast.timer);
-  toast.timer = setTimeout(() => el.classList.remove("show"), 4000);
 }
+function hideToast() { document.getElementById("toast").classList.remove("show"); }
 // Hourly strip: closed, "24h" (hourly) or "3d" (4-hour steps); tapping the open tab closes it. Remembered per device.
 function setHours(range) {
   const open = !!range;
@@ -1151,6 +1150,7 @@ document.getElementById("hours").addEventListener("click", (e) => {
       `Für ${WEEKDAYS[d.getDay()]} ${d.getHours()} Uhr gibt es nur die Vorhersage in der Leiste.`);
     return;
   }
+  hideToast();
   setIdx(Math.max(0, fr.findIndex((f) => f.ts >= ts)));
 });
 
@@ -1175,7 +1175,7 @@ function idxFromEvent(e) {
   const r = wrap.getBoundingClientRect();
   return Math.floor(((e.clientX - r.left) / r.width) * cur().frames.length);
 }
-wrap.addEventListener("pointerdown", (e) => { stop(); wrap.setPointerCapture(e.pointerId); setIdx(idxFromEvent(e)); });
+wrap.addEventListener("pointerdown", (e) => { stop(); hideToast(); wrap.setPointerCapture(e.pointerId); setIdx(idxFromEvent(e)); });
 wrap.addEventListener("pointermove", (e) => { if (wrap.hasPointerCapture(e.pointerId)) setIdx(idxFromEvent(e)); });
 
 const playBtn = document.getElementById("play");
