@@ -4,8 +4,10 @@ Builds rain radar with a 2 h nowcast for regions where no official nowcast is fr
 it to the app. Regions:
   eu - EUMETNET OPERA composite (reflectivity, 1 km, every 5 min, CC BY 4.0), LAEA grid kept at 2 km
   us - NOAA nowCOAST base reflectivity mosaic (public domain, every ~4 min), Web Mercator grid ~3 km
-Nowcast: dense optical flow (OpenCV Farneback) between two frames ~15 min apart, then semi-Lagrangian
-extrapolation in 5 min steps (same principle as pySTEPS' extrapolation nowcast).
+Nowcast: dense optical flow (OpenCV Farneback) between two frames ~30 min apart, then semi-Lagrangian
+extrapolation in 5 min steps with smoothing that grows with lead time (small cells are not predictable for
+long, as in S-PROG/pySTEPS). Chosen by backtests (server/tune_nowcast.py): +10-25 % CSI at 60-120 min vs. the
+first version, and better than persistence over the full 2 h in Europe and the USA.
 
 Endpoints (all CORS-enabled, cache headers suitable for a CDN):
   GET /api/health
@@ -34,7 +36,7 @@ import numpy as np
 from PIL import Image
 from pyproj import Transformer
 
-VERSION = "server-v0.3"
+VERSION = "server-v0.4"
 PORT = int(os.environ.get("PORT", "8771"))
 UA = "Mozilla/5.0"          # neutral, carries no identity
 HISTORY_MS = 60 * 60_000    # observed frames kept (1 h)
@@ -103,7 +105,7 @@ def fetch(url, timeout=40):
 
 
 # ---------- nowcast ----------
-def nowcast(prev, last, dt_ms, steps):
+def nowcast(prev, last, dt_ms, steps, smooth=1.0):
     """Extrapolate `last` along the motion observed between `prev` and `last` (dt_ms apart)."""
     ny, nx = last.shape
 
@@ -123,6 +125,8 @@ def nowcast(prev, last, dt_ms, steps):
     for k in range(1, steps + 1):
         r = cv2.remap(base, gx - flow[..., 0] * k, gy - flow[..., 1] * k, cv2.INTER_LINEAR,
                       borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        if smooth:
+            r = cv2.GaussianBlur(r, (0, 0), smooth * math.sqrt(k))  # grows with lead time
         r[last < 0] = NODATA  # keep the coverage outline stable
         out.append(r)
     return out
@@ -163,7 +167,7 @@ class Region:
                     del self.obs[t]
             times = sorted(self.obs)
             last_t = times[-1]
-            prev_t = next((t for t in reversed(times) if last_t - t >= 14 * 60_000), times[0])
+            prev_t = next((t for t in reversed(times) if last_t - t >= 29 * 60_000), times[0])
             prev, last = self.obs[prev_t], self.obs[last_t]
         if prev_t == last_t:
             return len(new)

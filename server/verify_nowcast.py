@@ -56,13 +56,13 @@ def run(region, hours, step_min):
     cache = Cache(region, times)
     ts = sorted(times)
     end = ts[-1] - max(LEADS) * 60_000
-    start = max(ts[0] + 15 * 60_000, ts[-1] - hours * 3600_000)
+    start = max(ts[0] + 30 * 60_000, ts[-1] - hours * 3600_000)
     acc = {(k, lead, thr): np.zeros(3, np.int64) for k in ("nowcast", "persistence") for lead in LEADS for thr in THRESHOLDS}
     bases = 0
     t = start
     while t <= end:
         base = cache.nearest(t)
-        prev = cache.nearest(t - 15 * 60_000, tol_min=4)
+        prev = cache.nearest(t - 30 * 60_000, tol_min=4)  # same pairing as the server
         if base and prev and prev != base:
             started = time.time()
             last = cache.get(base)
