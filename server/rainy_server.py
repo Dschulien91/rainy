@@ -10,6 +10,8 @@ Nowcast: dense optical flow (OpenCV Farneback) between two frames ~30 min apart,
 extrapolation in 5 min steps with smoothing that grows with lead time (small cells are not predictable for
 long, as in S-PROG/pySTEPS). Chosen by backtests (server/tune_nowcast.py): +10-25 % CSI at 60-120 min vs. the
 first version, and better than persistence over the full 2 h in Europe and the USA.
+Where pySTEPS is installed (the Docker image), Europe and the USA use pySTEPS S-PROG instead (server/compare_pysteps.py:
+same skill for widespread rain, clearly better for showers in the second hour).
 Second hour: the radar nowcast is blended with the precipitation forecast of the best national weather model
 for each place (self-hosted Open-Meteo "best match": ICON-D2, AROME, HARMONIE, UKV, HRRR, ...), because the radar
 cannot see showers that have not formed yet. Every model snapshot is logged (model_log/) so that the blend
@@ -25,11 +27,13 @@ Endpoints (all CORS-enabled, cache headers suitable for a CDN):
 Run:  python server/rainy_server.py   (port from env PORT, default 8771)
 Requests to data sources carry a neutral User-Agent and no identifying information.
 """
+import contextlib
 import io
 import json
 import math
 import os
 import re
+import sys
 import threading
 import time
 import urllib.parse
@@ -44,7 +48,14 @@ import numpy as np
 from PIL import Image
 from pyproj import Transformer
 
-VERSION = "server-v0.7"
+try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is used
+    from pysteps import motion as ps_motion, nowcasts as ps_nowcasts
+    from pysteps.utils import transformation as ps_transformation
+    HAVE_PYSTEPS = True
+except ImportError:
+    HAVE_PYSTEPS = False
+
+VERSION = "server-v0.8"
 PORT = int(os.environ.get("PORT", "8771"))
 UA = "Mozilla/5.0"          # neutral, carries no identity
 HISTORY_MS = 60 * 60_000    # observed frames kept (1 h)
@@ -68,6 +79,12 @@ def openmeteo_available():
             _om_state["ok"] = False
         _om_state["at"] = time.time()
     return _om_state["ok"]
+
+def log(msg):
+    """Server messages go to stderr: pySTEPS' progress output on stdout is silenced while it runs."""
+    sys.stderr.write(msg + "\n")
+    sys.stderr.flush()
+
 
 # ---------- palette (same stops as the app, log interpolation) ----------
 STOPS = [(0.1, (154, 208, 255, 0.55)), (0.5, (75, 163, 255, 0.75)), (2, (47, 107, 245, 0.85)),
@@ -106,10 +123,16 @@ def dbz_to_rate(dbz):
     return np.where(dbz >= 10.0, (10 ** (dbz / 10.0) / 200.0) ** (1 / 1.6), 0.0).astype(np.float32)
 
 
-def fetch(url, timeout=40):
+def fetch(url, timeout=40, tries=3):
     req = urllib.request.Request(url, headers={"User-Agent": UA})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return r.read()
+    for attempt in range(tries):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return r.read()
+        except OSError:  # short network hiccups: try again after a pause
+            if attempt == tries - 1:
+                raise
+            time.sleep(5 * (attempt + 1))
 
 
 # ---------- nowcast ----------
@@ -236,7 +259,7 @@ class ModelRain:
                 if time.time() - os.path.getmtime(fp) > MODEL_LOG_KEEP_S:
                     os.remove(fp)
         except OSError as e:
-            print(f"model log failed: {e}", flush=True)
+            log(f"model log failed: {e}")
 
     def field(self, ts, shape, times=None, rate=None):
         """Model rain rate at time ts on the radar grid (default: the latest model data), or None."""
@@ -277,10 +300,45 @@ def model_loop(model):
             if openmeteo_available():
                 n = model.refresh()
                 if n:
-                    print(f"[{datetime.now():%H:%M:%S}] {model.region.name}: model rain for {n} points, {time.time() - started:.0f}s", flush=True)
+                    log(f"[{datetime.now():%H:%M:%S}] {model.region.name}: model rain for {n} points, {time.time() - started:.0f}s")
         except Exception as e:
-            print(f"{model.region.name} model update failed: {e}", flush=True)
+            log(f"{model.region.name} model update failed: {e}")
         time.sleep(max(60, MODEL_REFRESH_S - (time.time() - started)) if model.rate is not None else 60)
+
+
+def _coarse(g, down):
+    """Block mean to a coarser grid; blocks without any coverage stay NODATA."""
+    g = g.astype(np.float32)
+    if down == 1:
+        return g
+    ny, nx = g.shape
+    b = g[: ny // down * down, : nx // down * down].reshape(ny // down, down, nx // down, down)
+    return np.where((b >= 0).any(axis=(1, 3)), np.where(b < 0, 0, b).mean(axis=(1, 3)), NODATA).astype(np.float32)
+
+
+def sprog_nowcast(seq, mot, steps, down):
+    """pySTEPS S-PROG: like `nowcast`, but each spatial scale decays at its own observed rate (small showers fade
+    fast, large rain areas persist). seq: frames 10/5/0 min old; mot: frames 30/15/0 min old (for the motion).
+    Runs on a grid `down` times coarser and is scaled back up. Backtests: equal to `nowcast` for widespread rain,
+    clearly better for showers in the second hour (user-view CSI 60-120 min, USA: 0.42 vs 0.35)."""
+    last = seq[-1].astype(np.float32)
+    ny, nx = last.shape
+    dbz = lambda gs: ps_transformation.dB_transform(np.stack(gs), threshold=0.1, zerovalue=-15.0)[0]
+    m = [_coarse(g, down) for g in mot]
+    velocity = ps_motion.get_method("LK")(dbz([np.where(g < 0, np.nan, g) for g in m])) / 3.0  # per 15 min -> per 5 min
+    s = [_coarse(g, down) for g in seq]
+    with contextlib.redirect_stdout(io.StringIO()):  # pySTEPS prints lengthy progress tables
+        fc = ps_nowcasts.get_method("sprog")(dbz([np.where(g < 0, 0, g) for g in s]), velocity, steps,
+                                             precip_thr=-10.0,  # 0.1 mm/h in dB
+                                             n_cascade_levels=6, num_workers=os.cpu_count() or 1, probmatching_method="cdf")
+    fc = np.nan_to_num(ps_transformation.dB_transform(fc, threshold=-10.0, inverse=True)[0], nan=0.0)
+    out = []
+    for g in fc:
+        g = cv2.resize(g.astype(np.float32), (nx, ny), interpolation=cv2.INTER_LINEAR) if down > 1 else g.astype(np.float32)
+        g[g < 0.05] = 0
+        g[last < 0] = NODATA
+        out.append(g)
+    return out
 
 
 # ---------- regions ----------
@@ -290,6 +348,7 @@ class Region:
     SMOOTH = 1.0      # nowcast smoothing in grid pixels (tuned at ~2-3 km)
     FLOW_DOWN = 2     # optical flow is computed at grid resolution / FLOW_DOWN
     MODEL_DEG = None  # lat/lon spacing of the weather model rain used for blending (None: no blending)
+    SPROG_DOWN = 0    # S-PROG runs at grid resolution / SPROG_DOWN (0: simple nowcast only)
 
     def __init__(self):
         self.lock = threading.Lock()
@@ -330,7 +389,20 @@ class Region:
             prev, last = self.obs[prev_t], self.obs[last_t]
         if prev_t == last_t:
             return len(new)
-        fc = nowcast(prev.astype(np.float32), last.astype(np.float32), last_t - prev_t, FC_STEPS, self.SMOOTH, self.FLOW_DOWN)
+        fc = None
+        if HAVE_PYSTEPS and self.SPROG_DOWN:
+            with self.lock:
+                near = lambda dt, tol: next((self.obs[t] for t in sorted(self.obs, key=lambda t: abs(last_t - dt - t))
+                                             if abs(last_t - dt - t) <= tol), None)
+                seq = [near(k * 60_000, 120_000) for k in (10, 5)] + [last]
+                mot = [near(k * 60_000, 240_000) for k in (30, 15)] + [last]
+            if all(g is not None for g in seq + mot):
+                try:
+                    fc = sprog_nowcast(seq, mot, FC_STEPS, self.SPROG_DOWN)
+                except Exception as e:  # never lose the forecast: fall back to the simple method
+                    log(f"{self.name} S-PROG failed, using simple nowcast: {e}")
+        if fc is None:
+            fc = nowcast(prev.astype(np.float32), last.astype(np.float32), last_t - prev_t, FC_STEPS, self.SMOOTH, self.FLOW_DOWN)
         if self.model:
             fc = self.model.blend(fc, last_t)
         with self.lock:
@@ -346,6 +418,7 @@ class EuropeOpera(Region):
     CELL, NY, NX = 1000.0, 4400, 3800   # full 1 km resolution
     SMOOTH, FLOW_DOWN = 2.0, 4          # same physical scales as the backtested 2 km setup
     MODEL_DEG = 0.15
+    SPROG_DOWN = 2                      # S-PROG at 2 km (1 km would take ~4x as long)
 
     def __init__(self):
         super().__init__()
@@ -389,6 +462,7 @@ class UsaNowcoast(Region):
     BBOX = (-14000000.0, 2700000.0, -7400000.0, 6500000.0)  # CONUS in EPSG:3857
     NX, NY = 2200, 1267
     MODEL_DEG = 0.2
+    SPROG_DOWN = 1
     RAMP = [(6, "599494"), (8, "3bb1b1"), (9, "1dcece"), (10, "00ecec"), (11, "00d9ee"), (13, "00c6f1"), (14, "00b3f3"),
             (15, "01a0f6"), (16, "0078f6"), (18, "0050f6"), (19, "0028f6"), (20, "0000f6"), (21, "003fb8"), (23, "007f7b"),
             (24, "00bf3d"), (25, "00ff00"), (26, "00f100"), (28, "00e300"), (29, "00d500"), (30, "00c800"), (31, "00ba00"),
@@ -496,10 +570,10 @@ def update_loop(region):
             n = region.update()
             if n:
                 _, ref = region.frames()
-                print(f"[{datetime.now():%H:%M:%S}] {region.name}: +{n} frames, latest "
-                      f"{datetime.fromtimestamp(ref / 1000, timezone.utc):%H:%M}Z, {time.time() - started:.1f}s", flush=True)
+                log(f"[{datetime.now():%H:%M:%S}] {region.name}: +{n} frames, latest "
+                      f"{datetime.fromtimestamp(ref / 1000, timezone.utc):%H:%M}Z, {time.time() - started:.1f}s")
         except Exception as e:  # keep serving the last good data
-            print(f"{region.name} update failed: {e}", flush=True)
+            log(f"{region.name} update failed: {e}")
         time.sleep(POLL_S)
 
 
@@ -644,5 +718,6 @@ if __name__ == "__main__":
         if r.MODEL_DEG:
             r.model = ModelRain(r)
             threading.Thread(target=model_loop, args=(r.model,), daemon=True).start()
-    print(f"rainy {VERSION} on http://0.0.0.0:{PORT}", flush=True)
+    log(f"nowcast: {'pySTEPS S-PROG' if HAVE_PYSTEPS else 'simple (pySTEPS not installed)'}")
+    log(f"rainy {VERSION} on http://0.0.0.0:{PORT}")
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
