@@ -59,7 +59,7 @@
   #brandName { color: var(--logo); }
   .brand .logo { width: 22px; height: 22px; color: var(--logo); }
   body.sunny .brand .logo, body.sunny #brandName { color: var(--sun); }
-  .ico { width: 16px; height: 16px; vertical-align: -3px; margin-right: 4px; color: var(--logo); }
+  .ico { width: 21px; height: 21px; vertical-align: middle; margin: -4px 5px -3px -2px; color: var(--logo); }
   .ico.sun { color: var(--sun); }
   body.sunny .brand span { color: var(--sun); }
   .version { font-weight: 500; font-size: 11px; color: var(--muted); margin-left: 4px; }
@@ -106,6 +106,10 @@
   .hour { flex: 0 0 calc((min(100vw, 600px) - 32px) / 6.5); scroll-snap-align: start; display: flex; flex-direction: column;
     align-items: center; gap: 2px; padding: 6px 0 2px; border: 0; background: none; font: inherit; font-size: 11px;
     color: var(--muted); cursor: pointer; }
+  .hour.night { background: var(--night); }
+  .hour.night-start { border-radius: 12px 0 0 12px; }
+  .hour.night-end { border-radius: 0 12px 12px 0; }
+  .hour.night-start.night-end { border-radius: 12px; }
   .hour .tp { font-size: 13px; font-weight: 700; color: var(--fg); }
   .hour svg { width: 26px; height: 26px; }
   .hour .bar { width: 14px; height: 16px; display: flex; align-items: flex-end; background: var(--night); border-radius: 3px; overflow: hidden; }
@@ -171,7 +175,7 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
 "use strict";
-const VERSION = "v0.18";
+const VERSION = "v0.19";
 const FALLBACK = { lat: 53.5511, lon: 9.9937, name: "Hamburg" };
 const DWD_WMS = "https://maps.dwd.de/geoserver/dwd/wms";
 const EUM_WMS = "https://view.eumetsat.int/geoserver/ows";
@@ -1064,6 +1068,14 @@ function renderHours() {
   const rain = state.mode === "rain", three = state.hoursRange === "3d";
   const items = three ? hourBlocks(all, 4).slice(0, 18) : all.slice(0, 24);
   let lastDay = new Date(items[0].ts).getDay();
+  // Night = 0-7 h; a 4-hour block counts as night when most of its hours fall in that range.
+  const isNight = (h) => {
+    const start = new Date(h.ts).getHours(), len = three ? 4 : 1;
+    let n = 0;
+    for (let k = 0; k < len; k++) if ((start + k) % 24 < 7) n++;
+    return n * 2 > len;
+  };
+  const night = items.map(isNight);
   el.innerHTML = items.map((h, i) => {
     const d = new Date(h.ts);
     const newDay = d.getDay() !== lastDay;
@@ -1073,7 +1085,8 @@ function renderHours() {
     if (rain) { v = Math.sqrt(clamp(h.precip, 0, 8) / 8); color = h.precip >= 0.1 ? rgba(rainColor(h.precip)) : "transparent"; }
     else { v = h.isDay ? clamp(1 - h.cover / 100, 0, 1) : 0; color = "var(--sun)"; }
     const bar = v > 0.02 ? `<i style="height:${Math.max(3, v * 16).toFixed(1)}px;background:${color}"></i>` : "";
-    return `<button class="hour" data-ts="${h.ts}"><span>${label}</span>${weatherIcon(h)}` +
+    const cls = night[i] ? " night" + (night[i - 1] ? "" : " night-start") + (night[i + 1] ? "" : " night-end") : "";
+    return `<button class="hour${cls}" data-ts="${h.ts}"><span>${label}</span>${weatherIcon(h)}` +
       `<span class="tp">${Math.round(h.temp)}°</span><span class="bar">${bar}</span></button>`;
   }).join("");
 }
