@@ -250,7 +250,7 @@
 <script src="https://unpkg.com/@maplibre/maplibre-gl-leaflet@0.0.22/leaflet-maplibre-gl.js"></script>
 <script>
 "use strict";
-const VERSION = "v0.30";
+const VERSION = "v0.31";
 const FALLBACK = { lat: 53.5511, lon: 9.9937, name: "Hamburg" };
 const DWD_WMS = "https://maps.dwd.de/geoserver/dwd/wms";
 const EUM_WMS = "https://view.eumetsat.int/geoserver/ows";
@@ -715,7 +715,8 @@ function applySatSamples() {
         if (c != null) {
           const pt = state.point, base = fr.map.ts;
           c = evolve(c, interp(pt.t, pt.cover, base) / 100, interp(pt.t, pt.cover, base + fr.map.dt) / 100);
-          val = fr.isDay ? fr.map.w * (1 - c) + (1 - fr.map.w) * fr.model : 0;
+          const w = ncWeight(fr.map), model = state.point && state.point.t.length ? fr.model : 1 - c;
+          val = fr.isDay ? w * (1 - c) + (1 - w) * model : 0;
         }
       }
       if (val == null) continue;
@@ -876,6 +877,8 @@ function nowcastImage(f) {
   nowcast.cache.set(dt, url);
   return url;
 }
+// Weight of the shifted satellite image; without model data there is nothing to fade into, so it stays at 1.
+const ncWeight = (m) => (state.grid ? m.w : 1);
 function showNowcast(f) {
   const b = nowcast.base;
   if (!b || b.ts !== f.map.ts) {
@@ -893,7 +896,7 @@ function showNowcast(f) {
     if (nowcast.overlay._url !== url) nowcast.overlay.setUrl(url);
     nowcast.overlay.setBounds(bounds);
   }
-  nowcast.overlay.setOpacity(f.map.w);
+  nowcast.overlay.setOpacity(ncWeight(f.map));
 }
 function hideNowcast() { if (nowcast.overlay) nowcast.overlay.setOpacity(0); }
 
@@ -1233,7 +1236,7 @@ function renderFrame() {
   if (!f) return;
   const k = f.map.kind;
   if (k === "model") { hideImg(); hideNowcast(); showGrid(f.ts, state.mode === "rain" ? "rain" : "cloud"); }
-  else if (k === "nowcast") { hideImg(); showNowcast(f); showGrid(f.ts, "cloud", 1 - f.map.w); }
+  else if (k === "nowcast") { hideImg(); showNowcast(f); if (state.grid) showGrid(f.ts, "cloud", 1 - ncWeight(f.map)); else hideGrid(); }
   else {
     hideGrid(); hideNowcast();
     const m = resolveMap(f.map);
