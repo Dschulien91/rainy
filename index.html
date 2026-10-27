@@ -48,7 +48,7 @@
   #map { position: absolute; inset: 0 0 var(--sheet-h) 0; }
   .leaflet-container { background: var(--night); }
   .grid-overlay { filter: blur(14px); }
-  .radar-frame { transition: opacity 0.4s ease; filter: blur(2.5px); }
+  .radar-frame, .eu-frame { transition: opacity 0.4s ease; filter: blur(2.5px); }
   .sat-frame { transition: opacity 0.4s ease; filter: blur(3px); }
   /* dark map: lighten instead of covering, so sun tint reads as warm light and not olive */
   body.dark .sat-frame, body.dark .grid-overlay { mix-blend-mode: screen; }
@@ -237,17 +237,21 @@
   <div class="hours" id="hours" hidden></div>
   <div class="status">
     <span id="source"></span>
-    <span>Daten: <a href="https://www.dwd.de" target="_blank">DWD</a>, EUMETSAT, Bright Sky, Open-Meteo, Esri</span>
+    <span>Daten: <a href="https://www.dwd.de" target="_blank">DWD</a>, EUMETNET, EUMETSAT, Bright Sky, Open-Meteo, Esri</span>
   </div>
 </div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
 "use strict";
-const VERSION = "v0.26";
+const VERSION = "v0.27";
 const FALLBACK = { lat: 53.5511, lon: 9.9937, name: "Hamburg" };
 const DWD_WMS = "https://maps.dwd.de/geoserver/dwd/wms";
 const EUM_WMS = "https://view.eumetsat.int/geoserver/ows";
+// Own data server (Europe radar + nowcast). Local prototype: only used when the app itself is opened locally.
+const API_BASE = /^(localhost|127\.0\.0\.1|192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.)/.test(location.hostname)
+  ? `${location.protocol}//${location.hostname}:8771` : null;
+const isImgKind = (k) => k === "radar" || k === "sat" || k === "eu";
 const STEP = 15 * 60e3;                     // timeline step for everything except the 5-min radar view
 const RANGE_HOURS = { short: 2, long: 14 };
 const GRID = 8;                             // 8x8 Open-Meteo points for model maps; each point counts as one API call
@@ -396,6 +400,11 @@ const RENDER = {
     ctx.putImageData(data, 0, 0);
     return { canvas: c };
   },
+  // Europe radar from our own server: images come ready-colored in the rainy palette.
+  async eu(view, ts) {
+    const img = await loadImage(`${API_BASE}/api/radar/image?ts=${ts}&bbox=${view.bbox}&width=${view.w}&height=${view.h}`);
+    return { canvas: canvasFor(view, img)[0] };
+  },
   // EUMETSAT cloud mask (where clouds are, day and night) shaded with the 1 km infrared image (cloud texture).
   async sat(view, ts) {
     const irTs = Math.floor(ts / 600e3) * 600e3; // IR comes every 10 min
@@ -480,7 +489,7 @@ function preloadFrames() {
   const token = ++preloadToken;
   const s = cur();
   const order = [...s.frames.slice(s.idx), ...s.frames.slice(0, s.idx).reverse()]
-    .filter((f) => f.map.kind === "radar" || f.map.kind === "sat").map((f) => imgFrame(f.map.kind, f.map.ts, f.map.ref));
+    .filter((f) => isImgKind(f.map.kind)).map((f) => imgFrame(f.map.kind, f.map.ts, f.map.ref));
   let active = 0;
   const next = () => {
     if (token !== preloadToken) return;
@@ -793,6 +802,7 @@ async function cityZoom(place) {
     const d = await getJSON(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(place.city)}` +
       `&count=1&language=de&format=json` + (place.country ? `&countryCode=${place.country}` : ""));
     const pop = (d.results && d.results[0] && d.results[0].population) || 0;
+    if (!pop) return 11; // unknown size: a city-wide default
     return pop > 1e6 ? 10 : pop > 2e5 ? 11 : pop > 3e4 ? 12 : 13;
   } catch { return 11; }
 }
@@ -832,7 +842,16 @@ async function loadRadarPoint(loc) {
       const run = Date.parse(String(r.source || "").split("::")[2]);
       return { ts: Date.parse(r.timestamp), mmh: (center / 100) * 12, ref: isNaN(run) ? null : run }; // 0.01 mm / 5 min -> mm/h
     });
-  } catch { state.radarPoint = []; } // outside Germany: no radar
+    state.radarSource = "radar";
+  } catch { state.radarPoint = []; } // outside Germany: no DWD radar
+  if (!state.radarPoint.length && API_BASE) {
+    // Europe-wide OPERA radar with our own nowcast
+    try {
+      const d = await getJSON(`${API_BASE}/api/radar/point?lat=${loc.lat}&lon=${loc.lon}`);
+      state.radarPoint = (d.series || []).map((r) => ({ ts: r.ts, mmh: r.mmh, ref: r.ts > d.ref ? d.ref : null }));
+      state.radarSource = "eu";
+    } catch { state.radarPoint = []; }
+  }
 }
 // Newest available satellite cloud mask (the satellite runs ~20-30 min behind real time).
 async function loadSatLatest() {
@@ -864,7 +883,7 @@ function buildViews() {
 
   // rain, 2 h: 5-minute radar frames (or the model outside radar coverage)
   state.views["rain-short"] = finish(R.length
-    ? R.map((r) => ({ ts: r.ts, value: r.mmh, temp: temp(r.ts), map: { kind: "radar", ts: r.ts, ref: r.ref } }))
+    ? R.map((r) => ({ ts: r.ts, value: r.mmh, temp: temp(r.ts), map: { kind: state.radarSource, ts: r.ts, ref: r.ref } }))
     : steps(2).map((ts) => ({ ts, value: modelRain(ts), temp: temp(ts), map: { kind: "model" } })));
 
   // rain, 14 h: 15-minute steps; radar (averaged) while it lasts, then the model
@@ -872,7 +891,7 @@ function buildViews() {
     if (ts <= radarEnd) {
       const inStep = R.filter((r) => r.ts >= ts && r.ts < ts + STEP);
       const v = inStep.length ? inStep.reduce((a, r) => a + r.mmh, 0) / inStep.length : 0;
-      return { ts, value: v, temp: temp(ts), map: { kind: "radar", ts: inStep.length ? inStep[0].ts : ts, ref: inStep.length ? inStep[0].ref : null } };
+      return { ts, value: v, temp: temp(ts), map: { kind: state.radarSource, ts: inStep.length ? inStep[0].ts : ts, ref: inStep.length ? inStep[0].ref : null } };
     }
     return { ts, value: modelRain(ts), temp: temp(ts), map: { kind: "model" } };
   }));
@@ -918,11 +937,12 @@ function updateSource() {
   if (!f) return;
   const now = Date.now();
   let text = f.map.kind === "radar" ? (f.ts > now ? "Radar-Vorhersage (DWD)" : "Radar gemessen (DWD)")
+    : f.map.kind === "eu" ? (f.ts > now ? "Radar-Vorhersage (rainy, aus EUMETNET OPERA)" : "Radar gemessen (EUMETNET OPERA)")
     : f.map.kind === "sat" ? `Satellit (EUMETSAT) · Stand ${fmtTime(f.map.ts)}`
     : f.map.kind === "nowcast" ? `Satellit hochgerechnet${nowcast.motion ? " (Zug: " + nowcast.motion.source + ")" : ""}` +
       (f.map.w < 0.5 ? " + Modell" : "")
     : state.mode === "rain" ? "Modellvorhersage, ungenauer" : "Wolken-Vorhersage (Modell)";
-  const img = s.frames.filter((x) => x.map.kind === "radar" || x.map.kind === "sat");
+  const img = s.frames.filter((x) => isImgKind(x.map.kind));
   const keys = [...new Set(img.map((x) => frameKey(x.map.kind, x.map.ts, x.map.ref)))];
   const ready = keys.filter((k) => imgFrames.has(k) && frameReady(imgFrames.get(k))).length;
   if (ready < keys.length) text += ` · lade ${ready}/${keys.length}`;
@@ -1269,7 +1289,7 @@ function play() {
     if (s.idx >= s.frames.length - 1) { stop(); return; }
     // Hold the current frame (max ~2 s) until the next image has arrived, so playback never flickers.
     const m = s.frames[s.idx + 1].map;
-    const next = (m.kind === "radar" || m.kind === "sat") && imgFrame(m.kind, m.ts, m.ref);
+    const next = isImgKind(m.kind) && imgFrame(m.kind, m.ts, m.ref);
     if (next && !frameReady(next) && waited++ < 4) { loadImgFrame(next); return; }
     waited = 0;
     setIdx(s.idx + 1);
