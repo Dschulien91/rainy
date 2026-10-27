@@ -1,19 +1,26 @@
-"""rainy data server (local prototype).
+"""rainy data server.
 
-Pulls the pan-European EUMETNET OPERA radar composite (reflectivity, 1 km, every 5 min, CC BY 4.0),
-converts it to rain rate, computes a 2 h nowcast (optical flow + semi-Lagrangian extrapolation),
-and serves it to the app:
+Builds rain radar with a 2 h nowcast for regions where no official nowcast is freely available, and serves
+it to the app. Regions:
+  eu - EUMETNET OPERA composite (reflectivity, 1 km, every 5 min, CC BY 4.0), LAEA grid kept at 2 km
+  us - NOAA nowCOAST base reflectivity mosaic (public domain, every ~4 min), Web Mercator grid ~3 km
+Nowcast: dense optical flow (OpenCV Farneback) between two frames ~15 min apart, then semi-Lagrangian
+extrapolation in 5 min steps (same principle as pySTEPS' extrapolation nowcast).
 
-  GET /api/radar/frames                  -> {"frames": [{"ts": ms, "fc": bool}], "ref": ms}
-  GET /api/radar/image?ts=&bbox=&width=&height=   (bbox in EPSG:3857) -> PNG in the rainy palette
-  GET /api/radar/point?lat=&lon=         -> {"series": [{"ts": ms, "mmh": float}], "ref": ms} or {"series": []}
+Endpoints (all CORS-enabled, cache headers suitable for a CDN):
+  GET /api/health
+  GET /api/radar/frames?region=eu|us          -> {"frames": [{"ts": ms, "fc": bool}], "ref": ms}
+  GET /api/radar/image?region=&ts=&bbox=&width=&height=   (bbox in EPSG:3857) -> PNG in the rainy palette
+  GET /api/radar/point?lat=&lon=               -> {"region": "eu"|"us"|null, "series": [{"ts", "mmh"}], "ref": ms}
 
-Run:  python server/rainy_server.py   (port 8771)
-No identifying headers are sent to data sources.
+Run:  python server/rainy_server.py   (port from env PORT, default 8771)
+Requests to data sources carry a neutral User-Agent and no identifying information.
 """
 import io
 import json
 import math
+import os
+import re
 import threading
 import time
 import urllib.request
@@ -27,23 +34,14 @@ import numpy as np
 from PIL import Image
 from pyproj import Transformer
 
-VERSION = "server-v0.1"
-PORT = 8771
-BUCKET = "https://s3.waw3-1.cloudferro.com/openradar-24h"
-HISTORY = 12            # observed frames kept (1 h)
-FC_STEPS = 24           # nowcast steps of 5 min (2 h)
+VERSION = "server-v0.2"
+PORT = int(os.environ.get("PORT", "8771"))
+UA = "Mozilla/5.0"          # neutral, carries no identity
+HISTORY_MS = 60 * 60_000    # observed frames kept (1 h)
+FC_STEPS = 24               # nowcast steps of 5 min (2 h)
 STEP_MS = 5 * 60_000
 POLL_S = 60
-UA = "Mozilla/5.0"      # neutral, carries no identity
-
-# OPERA grid: LAEA, upper-left corner at (0, 0), 1 km source pixels; we keep 2 km
-LAEA = "+proj=laea +lat_0=55.0 +lon_0=10.0 +x_0=1950000.0 +y_0=-2100000.0 +units=m +ellps=WGS84"
-CELL = 2000.0
-NY, NX = 2200, 1900
-to_grid = Transformer.from_crs("EPSG:3857", LAEA, always_xy=True)
-ll_to_grid = Transformer.from_crs("EPSG:4326", LAEA, always_xy=True)
-
-NODATA = np.float32(-1.0)  # outside radar coverage
+NODATA = np.float32(-1.0)   # outside radar coverage
 
 # ---------- palette (same stops as the app, log interpolation) ----------
 STOPS = [(0.1, (154, 208, 255, 0.55)), (0.5, (75, 163, 255, 0.75)), (2, (47, 107, 245, 0.85)),
@@ -77,77 +75,53 @@ def colorize(rate):
     return LUT[idx]
 
 
-# ---------- data ----------
-def fetch(url, timeout=30):
+def dbz_to_rate(dbz):
+    """Marshall-Palmer Z = 200 R^1.6; echoes below 10 dBZ (~0.15 mm/h) count as dry."""
+    return np.where(dbz >= 10.0, (10 ** (dbz / 10.0) / 200.0) ** (1 / 1.6), 0.0).astype(np.float32)
+
+
+def fetch(url, timeout=40):
     req = urllib.request.Request(url, headers={"User-Agent": UA})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.read()
 
 
-def list_keys(day):
-    xml = fetch(f"{BUCKET}/?prefix={day:%Y/%m/%d}/OPERA/COMP/&max-keys=1000").decode()
-    keys = []
-    for part in xml.split("<Key>")[1:]:
-        k = part.split("</Key>")[0]
-        if k.endswith("@DBZH.h5"):
-            keys.append(k)
-    return keys
+# ---------- nowcast ----------
+def nowcast(prev, last, dt_ms, steps):
+    """Extrapolate `last` along the motion observed between `prev` and `last` (dt_ms apart)."""
+    ny, nx = last.shape
 
-
-def key_time(key):
-    stamp = key.split("OPERA@")[1].split("@")[0]  # 20261027T1355
-    return int(datetime.strptime(stamp, "%Y%m%dT%H%M").replace(tzinfo=timezone.utc).timestamp() * 1000)
-
-
-def load_rate(raw):
-    """OPERA DBZH (1 km) -> rain rate mm/h on the 2 km grid; NODATA outside coverage."""
-    with h5py.File(io.BytesIO(raw), "r") as f:
-        d = f["dataset1/data1/data"][:]
-        w = f["dataset1/data1/what"].attrs
-        gain, offset, nodata, undetect = (float(w[k]) for k in ("gain", "offset", "nodata", "undetect"))
-    nod = d == nodata
-    und = d == undetect
-    dbz = d * gain + offset
-    dbz[und | nod] = -32.0
-    rate = np.where(dbz >= 10.0, (10 ** (dbz / 10.0) / 200.0) ** (1 / 1.6), 0.0).astype(np.float32)  # Marshall-Palmer
-    rate = rate.reshape(NY, 2, NX, 2).mean(axis=(1, 3))        # 1 km -> 2 km
-    covered = (~nod).reshape(NY, 2, NX, 2).any(axis=(1, 3))
-    rate = cv2.medianBlur(rate, 3)                               # remove single-pixel clutter
-    rate[~covered] = NODATA
-    return rate
-
-
-def nowcast(prev, last, steps):
-    """Extrapolate `last` along the motion between `prev` and `last` (15 min apart)."""
     def img(r):
         v = np.where(r > 0, np.log1p(np.clip(r, 0, 50)), 0)
         return np.clip(v / math.log1p(50) * 255, 0, 255).astype(np.uint8)
-    small = (NX // 2, NY // 2)  # optical flow on 4 km for speed and stability
+    small = (nx // 2, ny // 2)  # flow on half resolution for speed and stability
     a = cv2.resize(img(prev), small, interpolation=cv2.INTER_AREA)
     b = cv2.resize(img(last), small, interpolation=cv2.INTER_AREA)
     flow = cv2.calcOpticalFlowFarneback(a, b, None, 0.5, 4, 25, 4, 7, 1.5, 0)
     flow = cv2.GaussianBlur(flow, (0, 0), 6)
-    flow = cv2.resize(flow, (NX, NY), interpolation=cv2.INTER_LINEAR) * 2.0  # back to 2 km pixels, per 15 min
-    flow /= 3.0                                                              # per 5 min step
-    gx, gy = np.meshgrid(np.arange(NX, dtype=np.float32), np.arange(NY, dtype=np.float32))
+    flow = cv2.resize(flow, (nx, ny), interpolation=cv2.INTER_LINEAR) * 2.0  # pixels per dt
+    flow *= STEP_MS / dt_ms                                                  # pixels per 5 min step
+    gx, gy = np.meshgrid(np.arange(nx, dtype=np.float32), np.arange(ny, dtype=np.float32))
     base = np.where(last < 0, 0, last).astype(np.float32)
     out = []
     for k in range(1, steps + 1):
-        mx = gx - flow[..., 0] * k
-        my = gy - flow[..., 1] * k
-        r = cv2.remap(base, mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
-        r[last < 0] = NODATA  # keep coverage outline stable
+        r = cv2.remap(base, gx - flow[..., 0] * k, gy - flow[..., 1] * k, cv2.INTER_LINEAR,
+                      borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        r[last < 0] = NODATA  # keep the coverage outline stable
         out.append(r)
     return out
 
 
-class Store:
+# ---------- regions ----------
+class Region:
+    name = ""
+    credit = ""
+
     def __init__(self):
         self.lock = threading.Lock()
-        self.obs = {}          # ts -> rate grid
-        self.fc = {}           # ts -> rate grid
-        self.ref = None
+        self.obs, self.fc, self.ref = {}, {}, None
 
+    # subclasses: list_times() -> {ts: source}, load(source) -> grid, to_pixels(x3857, y3857) -> (col, row)
     def frames(self):
         with self.lock:
             return ([{"ts": t, "fc": False} for t in sorted(self.obs)] +
@@ -157,80 +131,186 @@ class Store:
         with self.lock:
             return self.obs.get(ts) if ts in self.obs else self.fc.get(ts)
 
+    def update(self):
+        now = int(time.time() * 1000)
+        avail = {t: s for t, s in self.list_times().items() if t > now - HISTORY_MS}
+        new = [t for t in sorted(avail) if t not in self.obs]
+        for t in new:
+            g = self.load(avail[t])
+            with self.lock:
+                self.obs[t] = g
+        if not new:
+            return 0
+        with self.lock:
+            for t in list(self.obs):
+                if t not in avail:
+                    del self.obs[t]
+            times = sorted(self.obs)
+            last_t = times[-1]
+            prev_t = next((t for t in reversed(times) if last_t - t >= 14 * 60_000), times[0])
+            prev, last = self.obs[prev_t], self.obs[last_t]
+        if prev_t == last_t:
+            return len(new)
+        fc = nowcast(prev, last, last_t - prev_t, FC_STEPS)
+        with self.lock:
+            self.fc = {last_t + (i + 1) * STEP_MS: g for i, g in enumerate(fc)}
+            self.ref = last_t
+        return len(new)
 
-STORE = Store()
+
+class EuropeOpera(Region):
+    name, credit = "eu", "EUMETNET OPERA"
+    BUCKET = "https://s3.waw3-1.cloudferro.com/openradar-24h"
+    LAEA = "+proj=laea +lat_0=55.0 +lon_0=10.0 +x_0=1950000.0 +y_0=-2100000.0 +units=m +ellps=WGS84"
+    CELL, NY, NX = 2000.0, 2200, 1900
+
+    def __init__(self):
+        super().__init__()
+        self.tr = Transformer.from_crs("EPSG:3857", self.LAEA, always_xy=True)
+
+    def list_times(self):
+        now = datetime.now(timezone.utc)
+        days = [now] + ([now - timedelta(days=1)] if now.hour == 0 else [])
+        out = {}
+        for day in days:
+            xml = fetch(f"{self.BUCKET}/?prefix={day:%Y/%m/%d}/OPERA/COMP/&max-keys=1000").decode()
+            for key in re.findall(r"<Key>([^<]+@DBZH\.h5)</Key>", xml):
+                stamp = key.split("OPERA@")[1].split("@")[0]
+                out[int(datetime.strptime(stamp, "%Y%m%dT%H%M").replace(tzinfo=timezone.utc).timestamp() * 1000)] = key
+        return out
+
+    def load(self, key):
+        with h5py.File(io.BytesIO(fetch(f"{self.BUCKET}/{key}")), "r") as f:
+            d = f["dataset1/data1/data"][:]
+            w = f["dataset1/data1/what"].attrs
+            gain, offset, nodata, undetect = (float(w[k]) for k in ("gain", "offset", "nodata", "undetect"))
+        nod = d == nodata
+        dbz = d * gain + offset
+        dbz[(d == undetect) | nod] = -32.0
+        rate = dbz_to_rate(dbz).reshape(self.NY, 2, self.NX, 2).mean(axis=(1, 3))   # 1 km -> 2 km
+        covered = (~nod).reshape(self.NY, 2, self.NX, 2).any(axis=(1, 3))
+        rate = cv2.medianBlur(rate, 3)                                               # single-pixel clutter
+        rate[~covered] = NODATA
+        return rate
+
+    def to_pixels(self, x, y):
+        gx, gy = self.tr.transform(x, y)
+        return (np.asarray(gx) / self.CELL).astype(np.int32), (-np.asarray(gy) / self.CELL).astype(np.int32)
 
 
-def update_loop():
+class UsaNowcoast(Region):
+    name, credit = "us", "NOAA"
+    WMS = "https://nowcoast.noaa.gov/geoserver/observations/weather_radar/ows"
+    BBOX = (-14000000.0, 2700000.0, -7400000.0, 6500000.0)  # CONUS in EPSG:3857
+    NX, NY = 2200, 1267
+    RAMP = [(6, "599494"), (8, "3bb1b1"), (9, "1dcece"), (10, "00ecec"), (11, "00d9ee"), (13, "00c6f1"), (14, "00b3f3"),
+            (15, "01a0f6"), (16, "0078f6"), (18, "0050f6"), (19, "0028f6"), (20, "0000f6"), (21, "003fb8"), (23, "007f7b"),
+            (24, "00bf3d"), (25, "00ff00"), (26, "00f100"), (28, "00e300"), (29, "00d500"), (30, "00c800"), (31, "00ba00"),
+            (33, "00ac00"), (34, "009e00"), (35, "009000"), (36, "3fab00"), (38, "7fc700"), (39, "bfe300"), (40, "ffff00"),
+            (41, "f9ef00"), (43, "f3df00"), (44, "edcf00"), (45, "e7c000"), (46, "edb400"), (48, "f3a800"), (49, "f99c00"),
+            (50, "ff9000"), (51, "ff6c00"), (53, "ff4800"), (54, "ff2400"), (55, "ff0000"), (56, "f60000"), (58, "ed0000"),
+            (59, "e40000"), (60, "dc0000"), (61, "d50000"), (63, "ce0000"), (64, "c70000"), (65, "c00000"), (66, "cf003f"),
+            (68, "df007f"), (69, "ef00bf"), (70, "ff00ff"), (71, "e515f1"), (73, "cc2ae4"), (74, "b23fd6"), (75, "9955c9"),
+            (76, "747bce"), (78, "4fa1d4"), (79, "2ac7da"), (80, "05ede0")]
+
+    def __init__(self):
+        super().__init__()
+        self.ramp_rgb = np.array([[int(h[i:i + 2], 16) for i in (0, 2, 4)] for _, h in self.RAMP], np.int32)
+        self.ramp_dbz = np.array([d for d, _ in self.RAMP], np.float32)
+
+    def list_times(self):
+        xml = fetch(f"{self.WMS}?service=WMS&version=1.3.0&request=GetCapabilities").decode("utf-8", "ignore")
+        m = re.search(r"<Name>base_reflectivity_mosaic</Name>.*?<Dimension name=\"time\"[^>]*>([^<]*)", xml, re.S)
+        if not m:
+            return {}
+        return {int(datetime.strptime(t.strip(), "%Y-%m-%dT%H:%M:%S.000Z").replace(tzinfo=timezone.utc).timestamp() * 1000): t.strip()
+                for t in m.group(1).split(",") if t.strip()}
+
+    def load(self, t):
+        x0, y0, x1, y1 = self.BBOX
+        url = (f"{self.WMS}?service=WMS&version=1.3.0&request=GetMap&layers=base_reflectivity_mosaic&styles="
+               f"&crs=EPSG:3857&bbox={x0},{y0},{x1},{y1}&width={self.NX}&height={self.NY}&format=image/png&transparent=true&time={t}")
+        px = np.asarray(Image.open(io.BytesIO(fetch(url))).convert("RGBA"), np.int32)
+        rgb = px[..., :3].reshape(-1, 3)
+        packed = (rgb[:, 0] << 16) | (rgb[:, 1] << 8) | rgb[:, 2]
+        uniq, inv = np.unique(packed, return_inverse=True)
+        ucol = np.stack([(uniq >> 16) & 255, (uniq >> 8) & 255, uniq & 255], 1)
+        d2 = ((ucol[:, None, :] - self.ramp_rgb[None, :, :]) ** 2).sum(-1)
+        best = d2.argmin(1)
+        udbz = np.where(d2[np.arange(len(uniq)), best] <= 3 * 40 * 40, self.ramp_dbz[best], -32.0)  # nearest ramp colour
+        dbz = udbz[inv].reshape(self.NY, self.NX).astype(np.float32)
+        dbz[px[..., 3] < 100] = -32.0
+        return cv2.medianBlur(dbz_to_rate(dbz), 3)
+
+    def to_pixels(self, x, y):
+        x0, y0, x1, y1 = self.BBOX
+        col = ((np.asarray(x) - x0) / (x1 - x0) * self.NX).astype(np.int32)
+        row = ((y1 - np.asarray(y)) / (y1 - y0) * self.NY).astype(np.int32)
+        return col, row
+
+
+REGIONS = {r.name: r for r in (EuropeOpera(), UsaNowcoast())}
+ll_to_3857 = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
+
+
+def update_loop(region):
     while True:
+        started = time.time()
         try:
-            now = datetime.now(timezone.utc)
-            keys = list_keys(now) + (list_keys(now - timedelta(days=1)) if now.hour == 0 else [])
-            keys = sorted(keys, key=key_time)[-HISTORY:]
-            new = [k for k in keys if key_time(k) not in STORE.obs]
-            for k in new:
-                rate = load_rate(fetch(f"{BUCKET}/{k}"))
-                with STORE.lock:
-                    STORE.obs[key_time(k)] = rate
-            if new:
-                with STORE.lock:
-                    keep = {key_time(k) for k in keys}
-                    for t in list(STORE.obs):
-                        if t not in keep:
-                            del STORE.obs[t]
-                    times = sorted(STORE.obs)
-                    last_t = times[-1]
-                    prev_t = next((t for t in reversed(times) if last_t - t >= 15 * 60_000), times[0])
-                    prev, last = STORE.obs[prev_t], STORE.obs[last_t]
-                started = time.time()
-                fc = nowcast(prev, last, FC_STEPS)
-                with STORE.lock:
-                    STORE.fc = {last_t + (i + 1) * STEP_MS: g for i, g in enumerate(fc)}
-                    STORE.ref = last_t
-                print(f"[{datetime.now():%H:%M:%S}] +{len(new)} frames, latest {datetime.fromtimestamp(last_t / 1000, timezone.utc):%H:%M}Z, "
-                      f"nowcast {time.time() - started:.1f}s", flush=True)
+            n = region.update()
+            if n:
+                _, ref = region.frames()
+                print(f"[{datetime.now():%H:%M:%S}] {region.name}: +{n} frames, latest "
+                      f"{datetime.fromtimestamp(ref / 1000, timezone.utc):%H:%M}Z, {time.time() - started:.1f}s", flush=True)
         except Exception as e:  # keep serving the last good data
-            print("update failed:", e, flush=True)
+            print(f"{region.name} update failed: {e}", flush=True)
         time.sleep(POLL_S)
 
 
 # ---------- rendering ----------
-def render(grid, bbox, w, h):
+def render(region, grid, bbox, w, h):
     minx, miny, maxx, maxy = bbox
     xs = minx + (np.arange(w) + 0.5) / w * (maxx - minx)
     ys = maxy - (np.arange(h) + 0.5) / h * (maxy - miny)
     X, Y = np.meshgrid(xs, ys)
-    gx, gy = to_grid.transform(X, Y)
-    col = (gx / CELL).astype(np.int32)
-    row = (-gy / CELL).astype(np.int32)
-    inside = (col >= 0) & (col < NX) & (row >= 0) & (row < NY)
+    col, row = region.to_pixels(X, Y)
+    ny, nx = grid.shape
+    inside = (col >= 0) & (col < nx) & (row >= 0) & (row < ny)
     rate = np.zeros((h, w), np.float32)
     rate[inside] = grid[row[inside], col[inside]]
-    rgba = colorize(np.where(rate < 0, 0, rate))
     buf = io.BytesIO()
-    Image.fromarray(rgba, "RGBA").save(buf, "PNG", optimize=False, compress_level=3)
+    Image.fromarray(colorize(np.where(rate < 0, 0, rate)), "RGBA").save(buf, "PNG", compress_level=3)
     return buf.getvalue()
 
 
 def point_series(lat, lon):
-    gx, gy = ll_to_grid.transform(lon, lat)
-    col, row = int(gx / CELL), int(-gy / CELL)
-    if not (1 <= col < NX - 1 and 1 <= row < NY - 1):
-        return []
-    frames, _ = STORE.frames()
-    out = []
-    for fr in frames:
-        g = STORE.grid(fr["ts"])
-        if g is None:
+    x, y = ll_to_3857.transform(lon, lat)
+    for region in REGIONS.values():
+        col, row = (int(v) for v in region.to_pixels(x, y))
+        frames, ref = region.frames()
+        if not frames:
             continue
-        cell = g[row - 1:row + 2, col - 1:col + 2]
-        if (cell < 0).all():
-            return []  # no radar coverage here
-        out.append({"ts": fr["ts"], "mmh": round(float(cell[cell >= 0].mean()), 3)})
-    return out
+        g0 = region.grid(frames[0]["ts"])
+        ny, nx = g0.shape
+        if not (1 <= col < nx - 1 and 1 <= row < ny - 1):
+            continue
+        if (g0[row - 1:row + 2, col - 1:col + 2] < 0).all():
+            continue  # outside radar coverage
+        out = []
+        for fr in frames:
+            g = region.grid(fr["ts"])
+            if g is None:
+                continue
+            cell = g[row - 1:row + 2, col - 1:col + 2]
+            out.append({"ts": fr["ts"], "mmh": round(float(cell[cell >= 0].mean()) if (cell >= 0).any() else 0.0, 3)})
+        return region.name, out, ref
+    return None, [], None
 
 
 class Handler(BaseHTTPRequestHandler):
+    server_version = "rainy"
+    sys_version = ""
+
     def log_message(self, *a):
         pass
 
@@ -247,26 +327,31 @@ class Handler(BaseHTTPRequestHandler):
         u = urlparse(self.path)
         q = {k: v[0] for k, v in parse_qs(u.query).items()}
         try:
+            if u.path == "/api/health":
+                info = {name: {"frames": len(r.frames()[0]), "ref": r.ref} for name, r in REGIONS.items()}
+                body = {"version": VERSION, "regions": info, "openmeteo": os.environ.get("OPENMETEO") == "1"}
+                return self.send(200, json.dumps(body).encode(), "application/json", 10)
+            region = REGIONS.get(q.get("region", "eu"))
             if u.path == "/api/radar/frames":
-                frames, ref = STORE.frames()
-                return self.send(200, json.dumps({"frames": frames, "ref": ref, "version": VERSION}).encode(), "application/json", 30)
+                frames, ref = region.frames()
+                return self.send(200, json.dumps({"frames": frames, "ref": ref}).encode(), "application/json", 30)
             if u.path == "/api/radar/image":
-                grid = STORE.grid(int(q["ts"]))
+                grid = region.grid(int(q["ts"]))
                 if grid is None:
-                    return self.send(404, b"unknown frame", "text/plain")
+                    return self.send(404, b"unknown frame", "text/plain", 30)
                 bbox = [float(v) for v in q["bbox"].split(",")]
                 w, h = min(int(q["width"]), 1024), min(int(q["height"]), 1024)
-                return self.send(200, render(grid, bbox, w, h), "image/png", 600)
+                return self.send(200, render(region, grid, bbox, w, h), "image/png", 3600)
             if u.path == "/api/radar/point":
-                series = point_series(float(q["lat"]), float(q["lon"]))
-                _, ref = STORE.frames()
-                return self.send(200, json.dumps({"series": series, "ref": ref}).encode(), "application/json", 60)
+                name, series, ref = point_series(float(q["lat"]), float(q["lon"]))
+                return self.send(200, json.dumps({"region": name, "series": series, "ref": ref}).encode(), "application/json", 60)
             return self.send(404, b"not found", "text/plain")
         except Exception as e:
             return self.send(400, str(e).encode(), "text/plain", 0)
 
 
 if __name__ == "__main__":
-    threading.Thread(target=update_loop, daemon=True).start()
+    for r in REGIONS.values():
+        threading.Thread(target=update_loop, args=(r,), daemon=True).start()
     print(f"rainy {VERSION} on http://0.0.0.0:{PORT}", flush=True)
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()

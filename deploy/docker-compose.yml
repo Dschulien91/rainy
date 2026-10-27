@@ -1,0 +1,36 @@
+# rainy production stack: app + radar server + self-hosted Open-Meteo behind Caddy (automatic HTTPS).
+# Usage on the server (see deploy/README.md):  cp .env.example .env  &&  docker compose up -d
+volumes:
+  open-meteo-data:
+  caddy-data:
+
+services:
+  api:
+    build: ../server
+    restart: always
+    environment:
+      PORT: "8771"
+      OPENMETEO: "1"            # tells the app to use /om instead of the public Open-Meteo API
+
+  openmeteo:
+    image: ghcr.io/open-meteo/open-meteo
+    restart: always
+    volumes:
+      - open-meteo-data:/app/data
+    environment:
+      REMOTE_DATA_DIRECTORY: https://openmeteo.s3.amazonaws.com/data/   # Open-Meteo's open-data mirror
+      CACHE_SIZE: ${OPENMETEO_CACHE:-8GB}
+
+  caddy:
+    image: caddy:2
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ../:/srv/app:ro           # the app itself (index.html, icons, manifest)
+      - caddy-data:/data
+    depends_on: [api, openmeteo]

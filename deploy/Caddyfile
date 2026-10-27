@@ -1,0 +1,29 @@
+# One domain for everything: the app, /api (radar server) and /om (self-hosted Open-Meteo).
+# Caddy obtains and renews the HTTPS certificate automatically. No access logs are written.
+{$DOMAIN} {
+	encode zstd gzip
+	header {
+		-Server
+		Referrer-Policy no-referrer
+		X-Content-Type-Options nosniff
+	}
+
+	handle /api/* {
+		reverse_proxy api:8771
+	}
+
+	# Weather model API; responses may be cached briefly by a CDN in front of this server.
+	handle_path /om/* {
+		reverse_proxy openmeteo:8080
+		header Cache-Control "public, max-age=600"
+		header Access-Control-Allow-Origin "*"
+	}
+
+	handle {
+		root * /srv/app
+		# only serve the app files, never the server code or deployment files
+		@private path /server/* /deploy/* /tools/* /.git/* /*.md
+		respond @private 404
+		file_server
+	}
+}

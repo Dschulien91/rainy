@@ -12,6 +12,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="rainy">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
 <style>
   :root {
     --bg: #ffffff;
@@ -237,20 +238,31 @@
   <div class="hours" id="hours" hidden></div>
   <div class="status">
     <span id="source"></span>
-    <span>Daten: <a href="https://www.dwd.de" target="_blank">DWD</a>, EUMETNET, EUMETSAT, ECCC, NOAA, NASA, Bright Sky, Open-Meteo, Esri</span>
+    <span>Daten: <a href="https://www.dwd.de" target="_blank">DWD</a>, EUMETNET, EUMETSAT, ECCC, NOAA, NASA, Bright Sky, Open-Meteo, © OpenMapTiles, © OpenStreetMap, OpenFreeMap</span>
   </div>
 </div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<script src="https://unpkg.com/@maplibre/maplibre-gl-leaflet@0.0.22/leaflet-maplibre-gl.js"></script>
 <script>
 "use strict";
-const VERSION = "v0.28";
+const VERSION = "v0.29";
 const FALLBACK = { lat: 53.5511, lon: 9.9937, name: "Hamburg" };
 const DWD_WMS = "https://maps.dwd.de/geoserver/dwd/wms";
 const EUM_WMS = "https://view.eumetsat.int/geoserver/ows";
 // Own data server (Europe radar + nowcast). Local prototype: only used when the app itself is opened locally.
-const API_BASE = /^(localhost|127\.0\.0\.1|192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.)/.test(location.hostname)
-  ? `${location.protocol}//${location.hostname}:8771` : null;
+// Own data server: local development uses port 8771 next to the app; when the app is served from our own
+// domain (production), the server lives under the same origin (/api, /om). GitHub Pages has no server.
+const LOCAL_DEV = /^(localhost|127\.0\.0\.1|192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.)/.test(location.hostname);
+const API_BASE = LOCAL_DEV ? `${location.protocol}//${location.hostname}:8771`
+  : /github\.io$/.test(location.hostname) || location.protocol === "file:" ? null : location.origin;
+// Weather model API: our self-hosted Open-Meteo when the server reports one (no rate limits), else the public API.
+let OM_BASE = "https://api.open-meteo.com";
+const serverReady = API_BASE ? fetch(`${API_BASE}/api/health`).then((r) => r.json()).then((h) => {
+  if (h.openmeteo) OM_BASE = `${API_BASE}/om`;
+  return h;
+}).catch(() => null) : Promise.resolve(null);
 const isImgKind = (k) => k === "radar" || k === "sat" || k === "eu" || k === "ca" || k === "us";
 // Canada (ECCC GeoMet): rain rate in 14 discrete classes, observations every 6 min plus a 72 min nowcast.
 const CA_WMS = "https://geo.weather.gc.ca/geomet";
@@ -343,11 +355,26 @@ const map = L.map("map", { zoomControl: false, attributionControl: false, fadeAn
 map.createPane("weather").style.zIndex = 350;
 map.createPane("labels").style.zIndex = 450;
 map.getPane("labels").style.pointerEvents = "none";
-// Esri canvas basemap: base below the weather layer, labels above it.
-const esri = "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/";
-const tone = dark ? "World_Dark_Gray" : "World_Light_Gray";
-L.tileLayer(`${esri}${tone}_Base/MapServer/tile/{z}/{y}/{x}`, { maxZoom: 16 }).addTo(map);
-L.tileLayer(`${esri}${tone}_Reference/MapServer/tile/{z}/{y}/{x}`, { maxZoom: 16, pane: "labels" }).addTo(map);
+// Basemap: OpenFreeMap vector tiles (free, also for commercial use). The style is split in two so the
+// weather sits between the map (below) and the place names (above).
+(async function basemap() {
+  try {
+    const style = await (await fetch(`https://tiles.openfreemap.org/styles/${dark ? "dark" : "positron"}`)).json();
+    if (dark) { // lift the near-black OpenFreeMap dark style to the app's dark grey, water a shade darker
+      const tone = { background: "#2a2e35", water: "#1c1f24", landuse_residential: "#30343b", building: "#33373e", landcover_wood: "#2f3339", landuse_park: "#2f3339" };
+      for (const l of style.layers) if (tone[l.id]) l.paint[l.type === "background" ? "background-color" : "fill-color"] = tone[l.id];
+    }
+    // place names in the device language, falling back to the local name
+    const lang = (navigator.language || "de").slice(0, 2);
+    for (const l of style.layers) {
+      const tf = l.layout && l.layout["text-field"];
+      if (tf && JSON.stringify(tf).includes("name")) l.layout["text-field"] = ["coalesce", ["get", `name:${lang}`], ["get", "name"]];
+    }
+    const part = (keep) => ({ ...style, layers: style.layers.filter(keep) });
+    L.maplibreGL({ style: part((l) => l.type !== "symbol"), interactive: false }).addTo(map);
+    L.maplibreGL({ style: part((l) => l.type === "symbol"), interactive: false, pane: "labels" }).addTo(map);
+  } catch (err) { console.warn("basemap failed", err); }
+})();
 const youAreHere = L.circleMarker([FALLBACK.lat, FALLBACK.lon], {
   radius: 7, color: "#fff", weight: 3, fillColor: "#2f7bf5", fillOpacity: 1, pane: "labels",
 }).addTo(map);
@@ -485,8 +512,9 @@ const RENDER = {
     return repaintRates(view, await loadImage(url), usRate);
   },
   // Europe radar from our own server: images come ready-colored in the rainy palette.
-  async eu(view, ts) {
-    const img = await loadImage(`${API_BASE}/api/radar/image?ts=${ts}&bbox=${view.bbox}&width=${view.w}&height=${view.h}`);
+  async eu(view, ts, ref) {
+    const img = await loadImage(`${API_BASE}/api/radar/image?region=${state.radarRegion || "eu"}&ts=${ts}` +
+      `&ref=${ref || 0}&bbox=${view.bbox}&width=${view.w}&height=${view.h}`);
     return { canvas: canvasFor(view, img)[0] };
   },
   // EUMETSAT cloud mask (where clouds are, day and night) shaded with the 1 km infrared image (cloud texture).
@@ -857,7 +885,8 @@ async function loadGrid() {
     lons.push((w + (j + 0.5) * (e - w) / GRID).toFixed(3));
   }
   try {
-    const d = await getJSON(`https://api.open-meteo.com/v1/forecast?latitude=${lats}&longitude=${lons}` +
+    await serverReady;
+    const d = await getJSON(`${OM_BASE}/v1/forecast?latitude=${lats}&longitude=${lons}` +
       `&hourly=cloud_cover,precipitation,is_day&past_hours=2&forecast_hours=17&timeformat=unixtime`);
     const arr = Array.isArray(d) ? d : [d];
     state.grid = {
@@ -939,7 +968,8 @@ async function cityZoom(place) {
 
 // ---------- Data ----------
 async function loadPoint(loc) {
-  const d = await getJSON(`https://api.open-meteo.com/v1/forecast?latitude=${loc.lat}&longitude=${loc.lon}` +
+  await serverReady; // decides between our Open-Meteo and the public one
+  const d = await getJSON(`${OM_BASE}/v1/forecast?latitude=${loc.lat}&longitude=${loc.lon}` +
     `&minutely_15=temperature_2m,precipitation,cloud_cover,is_day` +
     `&past_minutely_15=8&forecast_minutely_15=64` +
     `&hourly=temperature_2m,precipitation,cloud_cover,is_day,weather_code,wind_speed_700hPa,wind_direction_700hPa` +
@@ -982,14 +1012,16 @@ async function loadRadarPoint(loc) {
       cc = (d.features && d.features[0] && d.features[0].properties.countrycode) || "";
     } catch {}
     if (cc === "CA") state.radarPoint = await caFrames().catch(() => []), state.radarSource = "ca";
-    else if (cc === "US") state.radarPoint = await usFrames().catch(() => []), state.radarSource = "us";
+    else if (cc === "US" && !API_BASE) state.radarPoint = await usFrames().catch(() => []), state.radarSource = "us";
   }
   if (!state.radarPoint.length && API_BASE) {
-    // Europe-wide OPERA radar with our own nowcast
+    // Our server: Europe (OPERA) and USA (NOAA) radar, each with our own 2 h nowcast
     try {
+      await serverReady;
       const d = await getJSON(`${API_BASE}/api/radar/point?lat=${loc.lat}&lon=${loc.lon}`);
       state.radarPoint = (d.series || []).map((r) => ({ ts: r.ts, mmh: r.mmh, ref: r.ts > d.ref ? d.ref : null }));
       state.radarSource = "eu";
+      state.radarRegion = d.region || "eu";
     } catch { state.radarPoint = []; }
   }
 }
@@ -1123,7 +1155,8 @@ function updateSource() {
   if (!f) return;
   const now = Date.now();
   let text = f.map.kind === "radar" ? (f.ts > now ? "Radar-Vorhersage (DWD)" : "Radar gemessen (DWD)")
-    : f.map.kind === "eu" ? (f.ts > now ? "Radar-Vorhersage (rainy, aus EUMETNET OPERA)" : "Radar gemessen (EUMETNET OPERA)")
+    : f.map.kind === "eu" ? (f.map.ref ? `Radar-Vorhersage (rainy, aus ${state.radarRegion === "us" ? "NOAA" : "EUMETNET OPERA"})`
+      : `Radar gemessen (${state.radarRegion === "us" ? "NOAA" : "EUMETNET OPERA"})`)
     : f.map.kind === "ca" ? (f.map.ref ? "Radar-Vorhersage (Environment Canada)" : "Radar gemessen (Environment Canada)")
     : f.map.kind === "us" ? "Radar gemessen (NOAA)"
     : f.map.kind === "sat" ? `Satellit (${state.satRegion === "meteosat" ? "EUMETSAT" : "NOAA GOES / NASA"}) · Stand ${fmtTime(f.map.ts)}`
@@ -1270,12 +1303,14 @@ function drawChart() {
   // Time axis
   ctx.fillStyle = col("--muted"); ctx.font = "11px system-ui, sans-serif"; ctx.textAlign = "center";
   const labelEvery = state.range === "short" ? 30 : 180; // minutes
+  // Label the first frame of every labelEvery-minute slot with the slot's round time (frame times may be irregular).
+  const slot = (ts) => { const d = new Date(ts); return Math.floor((d.getHours() * 60 + d.getMinutes()) / labelEvery); };
   frames.forEach((f, i) => {
-    const d = new Date(f.ts);
-    if ((d.getHours() * 60 + d.getMinutes()) % labelEvery === 0) {
-      ctx.fillText(fmtTime(f.ts), clamp(x(i), 16, W - 16), H - 3);
-      ctx.fillRect(x(i), top + plotH, 1, 3);
-    }
+    if (i === 0 || slot(f.ts) === slot(frames[i - 1].ts)) return;
+    const d = new Date(f.ts), mins = slot(f.ts) * labelEvery;
+    d.setHours(Math.floor(mins / 60), mins % 60, 0, 0);
+    ctx.fillText(fmtTime(d.getTime()), clamp(x(i), 16, W - 16), H - 3);
+    ctx.fillRect(x(i), top + plotH, 1, 3);
   });
 
   // "now" marker
@@ -1616,9 +1651,10 @@ function goTo(loc, name) {
 let favRange = "24h", favData = null, favDataKey = "";
 try { favRange = localStorage.getItem("rainy.favRange") || "24h"; } catch {}
 async function loadFavData(favs) {
+  await serverReady; // decides between our Open-Meteo and the public one
   const key = favs.map((f) => `${f.lat},${f.lon}`).join(";");
   if (favData && favDataKey === key && Date.now() - favData.at < 10 * 60e3) return favData.list;
-  const d = await getJSON(`https://api.open-meteo.com/v1/forecast?latitude=${favs.map((f) => f.lat)}&longitude=${favs.map((f) => f.lon)}` +
+  const d = await getJSON(`${OM_BASE}/v1/forecast?latitude=${favs.map((f) => f.lat)}&longitude=${favs.map((f) => f.lon)}` +
     `&hourly=temperature_2m,precipitation,cloud_cover,is_day,weather_code&forecast_hours=73&timeformat=unixtime`);
   const list = (Array.isArray(d) ? d : [d]).map((x) => x.hourly.time.map((t, i) => ({
     ts: t * 1000, temp: x.hourly.temperature_2m[i], precip: x.hourly.precipitation[i], cover: x.hourly.cloud_cover[i],
