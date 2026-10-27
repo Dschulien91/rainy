@@ -40,7 +40,8 @@
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
     font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; overflow: hidden; }
-  :root { --sheet-h: 345px; }
+  :root { --sheet-h: 268px; }
+  body.hours-open { --sheet-h: 362px; }
   #map { position: absolute; inset: 0 0 var(--sheet-h) 0; }
   .leaflet-container { background: var(--night); }
   .grid-overlay { filter: blur(14px); }
@@ -87,6 +88,10 @@
     font-size: 16px; cursor: pointer; }
   .chart-wrap { position: relative; flex: 1; min-width: 0; touch-action: none; cursor: ew-resize; }
   #chart { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .hours-toggle { flex: none; align-self: center; border: 0; background: var(--night); color: var(--muted); font: inherit;
+    font-size: 12px; font-weight: 700; padding: 3px 12px; border-radius: 999px; cursor: pointer; display: flex; gap: 6px; }
+  body.hours-open .hours-toggle .chev { transform: rotate(180deg); }
+  .hours[hidden] { display: none; }
   .hours { display: flex; overflow-x: auto; scroll-snap-type: x mandatory; margin: 0 -16px; padding: 0 16px;
     scrollbar-width: none; flex: none; border-top: 1px solid var(--line); }
   .hours::-webkit-scrollbar { display: none; }
@@ -113,7 +118,7 @@
   </symbol>
   <symbol id="sunIcon" viewBox="-2 -2 68 68">
     <path d="M53.00 32.00 L53.05 32.37 L53.08 32.74 L53.12 33.11 L53.14 33.48 L53.16 33.85 L53.17 34.22 L53.17 34.60 L53.16 34.97 L53.15 35.35 L53.12 35.72 L53.09 36.10 L53.05 36.47 L53.00 36.85 L52.94 37.22 L52.87 37.59 L52.79 37.96 L52.70 38.33 L52.61 38.70 L52.50 39.06 L52.38 39.42 L52.26 39.78 L52.12 40.13 L51.97 40.48 L51.82 40.82 L51.66 41.17 L51.49 41.50 L51.30 41.84 L51.11 42.16 L50.92 42.49 L50.71 42.80 L50.50 43.11 L50.28 43.42 L50.05 43.72 L49.81 44.01 L49.57 44.30 L49.32 44.59 L49.07 44.86 L48.81 45.13 L48.54 45.39 L48.27 45.65 L47.99 45.90 L47.71 46.15 L47.43 46.39 L47.14 46.62 L46.85 46.85 L46.55 47.07 L46.26 47.29 L45.95 47.50 L45.65 47.70 L45.34 47.90 L45.04 48.10 L44.73 48.29 L44.41 48.48 L44.10 48.66 L43.79 48.83 L43.47 49.01 L43.15 49.18 L42.84 49.34 L42.52 49.50 L42.20 49.66 L41.88 49.82 L41.55 49.97 L41.23 50.12 L40.91 50.26 L40.58 50.41 L40.26 50.55 L39.93 50.69 L39.60 50.82 L39.28 50.96 L38.95 51.09 L38.62 51.21 L38.28 51.34 L37.95 51.46 L37.61 51.58 L37.28 51.70 L36.94 51.81 L36.60 51.92 L36.26 52.03 L35.91 52.14 L35.57 52.24 L35.22 52.34 L34.87 52.43 L34.52 52.52 L34.17 52.60 L33.81 52.68 L33.45 52.76 L33.09 52.83 L32.73 52.89 L32.37 52.95 L32.00 53.00 L31.63 53.05 L31.26 53.08 L30.89 53.12 L30.52 53.14 L30.15 53.16 L29.78 53.17 L29.40 53.17 L29.03 53.16 L28.65 53.15 L28.28 53.12 L27.90 53.09 L27.53 53.05 L27.15 53.00 L26.78 52.94 L26.41 52.87 L26.04 52.79 L25.67 52.70 L25.30 52.61 L24.94 52.50 L24.58 52.38 L24.22 52.26 L23.87 52.12 L23.52 51.97 L23.18 51.82 L22.83 51.66 L22.50 51.49 L22.16 51.30 L21.84 51.11 L21.51 50.92 L21.20 50.71 L20.89 50.50 L20.58 50.28 L20.28 50.05 L19.99 49.81 L19.70 49.57 L19.41 49.32 L19.14 49.07 L18.87 48.81 L18.61 48.54 L18.35 48.27 L18.10 47.99 L17.85 47.71 L17.61 47.43 L17.38 47.14 L17.15 46.85 L16.93 46.55 L16.71 46.26 L16.50 45.95 L16.30 45.65 L16.10 45.34 L15.90 45.04 L15.71 44.73 L15.52 44.41 L15.34 44.10 L15.17 43.79 L14.99 43.47 L14.82 43.15 L14.66 42.84 L14.50 42.52 L14.34 42.20 L14.18 41.88 L14.03 41.55 L13.88 41.23 L13.74 40.91 L13.59 40.58 L13.45 40.26 L13.31 39.93 L13.18 39.60 L13.04 39.28 L12.91 38.95 L12.79 38.62 L12.66 38.28 L12.54 37.95 L12.42 37.61 L12.30 37.28 L12.19 36.94 L12.08 36.60 L11.97 36.26 L11.86 35.91 L11.76 35.57 L11.66 35.22 L11.57 34.87 L11.48 34.52 L11.40 34.17 L11.32 33.81 L11.24 33.45 L11.17 33.09 L11.11 32.73 L11.05 32.37 L11.00 32.00 L10.95 31.63 L10.92 31.26 L10.88 30.89 L10.86 30.52 L10.84 30.15 L10.83 29.78 L10.83 29.40 L10.84 29.03 L10.85 28.65 L10.88 28.28 L10.91 27.90 L10.95 27.53 L11.00 27.15 L11.06 26.78 L11.13 26.41 L11.21 26.04 L11.30 25.67 L11.39 25.30 L11.50 24.94 L11.62 24.58 L11.74 24.22 L11.88 23.87 L12.03 23.52 L12.18 23.18 L12.34 22.83 L12.51 22.50 L12.70 22.16 L12.89 21.84 L13.08 21.51 L13.29 21.20 L13.50 20.89 L13.72 20.58 L13.95 20.28 L14.19 19.99 L14.43 19.70 L14.68 19.41 L14.93 19.14 L15.19 18.87 L15.46 18.61 L15.73 18.35 L16.01 18.10 L16.29 17.85 L16.57 17.61 L16.86 17.38 L17.15 17.15 L17.45 16.93 L17.74 16.71 L18.05 16.50 L18.35 16.30 L18.66 16.10 L18.96 15.90 L19.27 15.71 L19.59 15.52 L19.90 15.34 L20.21 15.17 L20.53 14.99 L20.85 14.82 L21.16 14.66 L21.48 14.50 L21.80 14.34 L22.12 14.18 L22.45 14.03 L22.77 13.88 L23.09 13.74 L23.42 13.59 L23.74 13.45 L24.07 13.31 L24.40 13.18 L24.72 13.04 L25.05 12.91 L25.38 12.79 L25.72 12.66 L26.05 12.54 L26.39 12.42 L26.72 12.30 L27.06 12.19 L27.40 12.08 L27.74 11.97 L28.09 11.86 L28.43 11.76 L28.78 11.66 L29.13 11.57 L29.48 11.48 L29.83 11.40 L30.19 11.32 L30.55 11.24 L30.91 11.17 L31.27 11.11 L31.63 11.05 L32.00 11.00 L32.37 10.95 L32.74 10.92 L33.11 10.88 L33.48 10.86 L33.85 10.84 L34.22 10.83 L34.60 10.83 L34.97 10.84 L35.35 10.85 L35.72 10.88 L36.10 10.91 L36.47 10.95 L36.85 11.00 L37.22 11.06 L37.59 11.13 L37.96 11.21 L38.33 11.30 L38.70 11.39 L39.06 11.50 L39.42 11.62 L39.78 11.74 L40.13 11.88 L40.48 12.03 L40.82 12.18 L41.17 12.34 L41.50 12.51 L41.84 12.70 L42.16 12.89 L42.49 13.08 L42.80 13.29 L43.11 13.50 L43.42 13.72 L43.72 13.95 L44.01 14.19 L44.30 14.43 L44.59 14.68 L44.86 14.93 L45.13 15.19 L45.39 15.46 L45.65 15.73 L45.90 16.01 L46.15 16.29 L46.39 16.57 L46.62 16.86 L46.85 17.15 L47.07 17.45 L47.29 17.74 L47.50 18.05 L47.70 18.35 L47.90 18.66 L48.10 18.96 L48.29 19.27 L48.48 19.59 L48.66 19.90 L48.83 20.21 L49.01 20.53 L49.18 20.85 L49.34 21.16 L49.50 21.48 L49.66 21.80 L49.82 22.12 L49.97 22.45 L50.12 22.77 L50.26 23.09 L50.41 23.42 L50.55 23.74 L50.69 24.07 L50.82 24.40 L50.96 24.72 L51.09 25.05 L51.21 25.38 L51.34 25.72 L51.46 26.05 L51.58 26.39 L51.70 26.72 L51.81 27.06 L51.92 27.40 L52.03 27.74 L52.14 28.09 L52.24 28.43 L52.34 28.78 L52.43 29.13 L52.52 29.48 L52.60 29.83 L52.68 30.19 L52.76 30.55 L52.83 30.91 L52.89 31.27 L52.95 31.63 L53.00 32.00 Z" fill="none" stroke="currentColor" stroke-width="6" stroke-linejoin="round"/>
-    <circle cx="32" cy="32" r="9.5" fill="currentColor"/>
+    <path d="M41.50 32.00 L41.52 32.17 L41.54 32.33 L41.55 32.50 L41.56 32.67 L41.57 32.84 L41.58 33.01 L41.58 33.18 L41.57 33.35 L41.57 33.52 L41.56 33.69 L41.54 33.85 L41.52 34.02 L41.50 34.19 L41.47 34.36 L41.44 34.53 L41.41 34.70 L41.37 34.86 L41.32 35.03 L41.27 35.19 L41.22 35.36 L41.16 35.52 L41.10 35.68 L41.04 35.84 L40.97 35.99 L40.89 36.15 L40.81 36.30 L40.73 36.45 L40.65 36.60 L40.56 36.74 L40.46 36.89 L40.37 37.03 L40.27 37.17 L40.16 37.30 L40.06 37.44 L39.95 37.57 L39.84 37.69 L39.72 37.82 L39.60 37.94 L39.48 38.06 L39.36 38.18 L39.24 38.29 L39.11 38.40 L38.98 38.51 L38.85 38.61 L38.72 38.72 L38.58 38.82 L38.45 38.92 L38.31 39.01 L38.18 39.10 L38.04 39.19 L37.90 39.28 L37.76 39.37 L37.62 39.45 L37.47 39.54 L37.33 39.62 L37.19 39.69 L37.05 39.77 L36.90 39.84 L36.76 39.92 L36.61 39.99 L36.47 40.06 L36.32 40.13 L36.18 40.20 L36.03 40.26 L35.88 40.33 L35.74 40.39 L35.59 40.45 L35.44 40.51 L35.29 40.57 L35.14 40.63 L34.99 40.69 L34.84 40.75 L34.69 40.80 L34.54 40.86 L34.39 40.91 L34.23 40.96 L34.08 41.01 L33.93 41.06 L33.77 41.11 L33.61 41.16 L33.46 41.20 L33.30 41.24 L33.14 41.28 L32.98 41.32 L32.82 41.36 L32.66 41.39 L32.49 41.42 L32.33 41.45 L32.17 41.48 L32.00 41.50 L31.83 41.52 L31.67 41.54 L31.50 41.55 L31.33 41.56 L31.16 41.57 L30.99 41.58 L30.82 41.58 L30.65 41.57 L30.48 41.57 L30.31 41.56 L30.15 41.54 L29.98 41.52 L29.81 41.50 L29.64 41.47 L29.47 41.44 L29.30 41.41 L29.14 41.37 L28.97 41.32 L28.81 41.27 L28.64 41.22 L28.48 41.16 L28.32 41.10 L28.16 41.04 L28.01 40.97 L27.85 40.89 L27.70 40.81 L27.55 40.73 L27.40 40.65 L27.26 40.56 L27.11 40.46 L26.97 40.37 L26.83 40.27 L26.70 40.16 L26.56 40.06 L26.43 39.95 L26.31 39.84 L26.18 39.72 L26.06 39.60 L25.94 39.48 L25.82 39.36 L25.71 39.24 L25.60 39.11 L25.49 38.98 L25.39 38.85 L25.28 38.72 L25.18 38.58 L25.08 38.45 L24.99 38.31 L24.90 38.18 L24.81 38.04 L24.72 37.90 L24.63 37.76 L24.55 37.62 L24.46 37.47 L24.38 37.33 L24.31 37.19 L24.23 37.05 L24.16 36.90 L24.08 36.76 L24.01 36.61 L23.94 36.47 L23.87 36.32 L23.80 36.18 L23.74 36.03 L23.67 35.88 L23.61 35.74 L23.55 35.59 L23.49 35.44 L23.43 35.29 L23.37 35.14 L23.31 34.99 L23.25 34.84 L23.20 34.69 L23.14 34.54 L23.09 34.39 L23.04 34.23 L22.99 34.08 L22.94 33.93 L22.89 33.77 L22.84 33.61 L22.80 33.46 L22.76 33.30 L22.72 33.14 L22.68 32.98 L22.64 32.82 L22.61 32.66 L22.58 32.49 L22.55 32.33 L22.52 32.17 L22.50 32.00 L22.48 31.83 L22.46 31.67 L22.45 31.50 L22.44 31.33 L22.43 31.16 L22.42 30.99 L22.42 30.82 L22.43 30.65 L22.43 30.48 L22.44 30.31 L22.46 30.15 L22.48 29.98 L22.50 29.81 L22.53 29.64 L22.56 29.47 L22.59 29.30 L22.63 29.14 L22.68 28.97 L22.73 28.81 L22.78 28.64 L22.84 28.48 L22.90 28.32 L22.96 28.16 L23.03 28.01 L23.11 27.85 L23.19 27.70 L23.27 27.55 L23.35 27.40 L23.44 27.26 L23.54 27.11 L23.63 26.97 L23.73 26.83 L23.84 26.70 L23.94 26.56 L24.05 26.43 L24.16 26.31 L24.28 26.18 L24.40 26.06 L24.52 25.94 L24.64 25.82 L24.76 25.71 L24.89 25.60 L25.02 25.49 L25.15 25.39 L25.28 25.28 L25.42 25.18 L25.55 25.08 L25.69 24.99 L25.82 24.90 L25.96 24.81 L26.10 24.72 L26.24 24.63 L26.38 24.55 L26.53 24.46 L26.67 24.38 L26.81 24.31 L26.95 24.23 L27.10 24.16 L27.24 24.08 L27.39 24.01 L27.53 23.94 L27.68 23.87 L27.82 23.80 L27.97 23.74 L28.12 23.67 L28.26 23.61 L28.41 23.55 L28.56 23.49 L28.71 23.43 L28.86 23.37 L29.01 23.31 L29.16 23.25 L29.31 23.20 L29.46 23.14 L29.61 23.09 L29.77 23.04 L29.92 22.99 L30.07 22.94 L30.23 22.89 L30.39 22.84 L30.54 22.80 L30.70 22.76 L30.86 22.72 L31.02 22.68 L31.18 22.64 L31.34 22.61 L31.51 22.58 L31.67 22.55 L31.83 22.52 L32.00 22.50 L32.17 22.48 L32.33 22.46 L32.50 22.45 L32.67 22.44 L32.84 22.43 L33.01 22.42 L33.18 22.42 L33.35 22.43 L33.52 22.43 L33.69 22.44 L33.85 22.46 L34.02 22.48 L34.19 22.50 L34.36 22.53 L34.53 22.56 L34.70 22.59 L34.86 22.63 L35.03 22.68 L35.19 22.73 L35.36 22.78 L35.52 22.84 L35.68 22.90 L35.84 22.96 L35.99 23.03 L36.15 23.11 L36.30 23.19 L36.45 23.27 L36.60 23.35 L36.74 23.44 L36.89 23.54 L37.03 23.63 L37.17 23.73 L37.30 23.84 L37.44 23.94 L37.57 24.05 L37.69 24.16 L37.82 24.28 L37.94 24.40 L38.06 24.52 L38.18 24.64 L38.29 24.76 L38.40 24.89 L38.51 25.02 L38.61 25.15 L38.72 25.28 L38.82 25.42 L38.92 25.55 L39.01 25.69 L39.10 25.82 L39.19 25.96 L39.28 26.10 L39.37 26.24 L39.45 26.38 L39.54 26.53 L39.62 26.67 L39.69 26.81 L39.77 26.95 L39.84 27.10 L39.92 27.24 L39.99 27.39 L40.06 27.53 L40.13 27.68 L40.20 27.82 L40.26 27.97 L40.33 28.12 L40.39 28.26 L40.45 28.41 L40.51 28.56 L40.57 28.71 L40.63 28.86 L40.69 29.01 L40.75 29.16 L40.80 29.31 L40.86 29.46 L40.91 29.61 L40.96 29.77 L41.01 29.92 L41.06 30.07 L41.11 30.23 L41.16 30.39 L41.20 30.54 L41.24 30.70 L41.28 30.86 L41.32 31.02 L41.36 31.18 L41.39 31.34 L41.42 31.51 L41.45 31.67 L41.48 31.83 L41.50 32.00 Z" fill="currentColor"/>
   </symbol>
 </svg>
 <div id="map"></div>
@@ -143,7 +148,8 @@
     <button class="play" id="play" aria-label="Abspielen">▶</button>
     <div class="chart-wrap" id="chartWrap"><canvas id="chart"></canvas></div>
   </div>
-  <div class="hours" id="hours"></div>
+  <button class="hours-toggle" id="hoursToggle" aria-expanded="false"><span>24 Stunden</span><span class="chev">▾</span></button>
+  <div class="hours" id="hours" hidden></div>
   <div class="status">
     <span id="source"></span>
     <span>Daten: <a href="https://www.dwd.de" target="_blank">DWD</a>, EUMETSAT, Bright Sky, Open-Meteo, Esri</span>
@@ -153,7 +159,7 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
 "use strict";
-const VERSION = "v0.15";
+const VERSION = "v0.16";
 const FALLBACK = { lat: 53.5511, lon: 9.9937, name: "Hamburg" };
 const DWD_WMS = "https://maps.dwd.de/geoserver/dwd/wms";
 const EUM_WMS = "https://view.eumetsat.int/geoserver/ows";
@@ -972,29 +978,42 @@ function drawChart() {
 
 // ---------- Hourly strip ----------
 // Small outline weather icons (24 px grid) in the same style as the logo.
-const ICON_SUN = '<g stroke="#F5A700" stroke-width="2" stroke-linecap="round" fill="none"><circle cx="12" cy="12" r="4.2"/>' +
-  [0, 45, 90, 135, 180, 225, 270, 315].map((a) => {
+// Small outline weather icons (24 px grid) in the same style as the logo, with gradations:
+// cloudiness in five steps, 1-3 drops / flakes by intensity, thunderstorm, sleet, fog.
+const sunG = (t = "") => `<g transform="${t}" stroke="#F5A700" stroke-width="2" stroke-linecap="round" fill="none">` +
+  '<circle cx="12" cy="12" r="4.2"/>' + [0, 45, 90, 135, 180, 225, 270, 315].map((a) => {
     const r = (a * Math.PI) / 180, c = Math.cos(r), s = Math.sin(r);
-    return `<line x1="${12 + 7 * c}" y1="${12 + 7 * s}" x2="${12 + 9.3 * c}" y2="${12 + 9.3 * s}"/>`;
+    return `<line x1="${(12 + 7 * c).toFixed(2)}" y1="${(12 + 7 * s).toFixed(2)}" x2="${(12 + 9.3 * c).toFixed(2)}" y2="${(12 + 9.3 * s).toFixed(2)}"/>`;
   }).join("") + "</g>";
-const ICON_MOON = '<path d="M16 4.5a7.5 7.5 0 1 0 3.8 12.6A6.2 6.2 0 0 1 16 4.5z" fill="none" stroke="var(--muted)" stroke-width="2" stroke-linejoin="round"/>';
-const cloudPath = (dy = 0) => `<path d="M7.5 ${19 + dy}h9.2a3.8 3.8 0 0 0 .4-7.6A5.3 5.3 0 0 0 7 ${12.4 + dy}a3.4 3.4 0 0 0 .5 ${6.6}z" ` +
-  'fill="var(--bg)" stroke="var(--fg)" stroke-width="2" stroke-linejoin="round"/>';
-const drops = (n) => Array.from({ length: n }, (_, i) => {
-  const x = 12 + (i - (n - 1) / 2) * 3.6;
-  return `<line x1="${x}" y1="18.5" x2="${x - 1.2}" y2="${n > 2 ? 23 : 22}" stroke="var(--rain)" stroke-width="2" stroke-linecap="round"/>`;
-}).join("");
+const moonG = (t = "") => `<path transform="${t}" d="M16 4.5a7.5 7.5 0 1 0 3.8 12.6A6.2 6.2 0 0 1 16 4.5z" fill="none" ` +
+  'stroke="var(--muted)" stroke-width="2" stroke-linejoin="round"/>';
+const cloudG = (t = "", stroke = "var(--fg)") => `<path transform="${t}" d="M7.5 19h9.2a3.8 3.8 0 0 0 .4-7.6A5.3 5.3 0 0 0 7 12.4a3.4 3.4 0 0 0 .5 6.6z" ` +
+  `fill="var(--bg)" stroke="${stroke}" stroke-width="2" stroke-linejoin="round"/>`;
+const spread = (n, gap = 3.6) => Array.from({ length: n }, (_, i) => 12 + (i - (n - 1) / 2) * gap);
+const dropsG = (n) => spread(n).map((x) => `<line x1="${x}" y1="18.5" x2="${x - 1.2}" y2="22.5" stroke="var(--rain)" stroke-width="2" stroke-linecap="round"/>`).join("");
+const flakesG = (n) => spread(n, 4).map((x, i) => `<circle cx="${x}" cy="${20.5 + (i % 2) * 1.5}" r="1.2" fill="var(--fg)"/>`).join("");
+const boltG = '<path d="M12.8 16.5l-2.6 3.6h3l-2 3.4" fill="none" stroke="#F5A700" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>';
+const UP = "translate(0 -3)"; // cloud lifted to make room for precipitation below
+function skyG(h, lifted) {
+  const orb = (t) => (h.isDay ? sunG(t) : moonG(t)), c = h.cover, dy = lifted ? -3 : 0;
+  if (c < 15 && !lifted) return orb("");
+  if (c < 40) return orb(`translate(-2 ${-2 + dy}) scale(.85)`) + cloudG(`translate(8 ${8.5 + dy}) scale(.6)`);
+  if (c < 70) return orb(`translate(-3.5 ${-4 + dy}) scale(.75)`) + cloudG(`translate(2 ${1.5 + dy}) scale(.85)`);
+  if (c < 90) return orb(`translate(9 ${-1 + dy}) scale(.5)`) + cloudG(`translate(0 ${dy})`);
+  return cloudG(`translate(3 ${-3 + dy}) scale(.8)`, "var(--muted)") + cloudG(`translate(0 ${dy})`);
+}
 function weatherIcon(h) {
-  const c = h.code, rain = h.precip;
+  const c = h.code, mm = h.precip;
   let body;
-  if (c >= 95) body = cloudPath(-3) + '<path d="M12.5 17l-2.5 3.5h3l-2 3.5" fill="none" stroke="#F5A700" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>';
-  else if ((c >= 71 && c <= 77) || c === 85 || c === 86) body = cloudPath(-3) + [9, 12, 15].map((x, i) => `<circle cx="${x}" cy="${20 + (i % 2) * 2}" r="1.1" fill="var(--fg)"/>`).join("");
-  else if (rain >= 2.5 || c === 65 || c === 82) body = cloudPath(-3) + drops(3);
-  else if (rain >= 0.1 || (c >= 51 && c <= 67) || (c >= 80 && c <= 82)) body = cloudPath(-3) + drops(2);
+  const snow = (c >= 71 && c <= 77) || c === 85 || c === 86;
+  const sleet = c === 56 || c === 57 || c === 66 || c === 67;
+  const rainy = mm >= 0.1 || (c >= 51 && c <= 67) || (c >= 80 && c <= 82);
+  if (c >= 95) body = cloudG(UP) + boltG + (mm >= 0.1 ? dropsG(1).replace(/x1="12"/, 'x1="16.5"').replace(/x2="10.8"/, 'x2="15.3"') : "");
+  else if (snow) body = skyG(h, true) + flakesG(c === 75 || c === 86 ? 3 : c === 73 ? 2 : 1);
+  else if (sleet) body = skyG(h, true) + dropsG(1).replace(/x1="12"/, 'x1="10"').replace(/x2="10.8"/, 'x2="8.8"') + '<circle cx="15" cy="21" r="1.2" fill="var(--fg)"/>';
+  else if (rainy) body = skyG(h, true) + dropsG(mm >= 4 || c === 65 || c === 82 ? 3 : mm >= 1 || c === 63 || c === 81 ? 2 : 1);
   else if (c === 45 || c === 48) body = '<g stroke="var(--muted)" stroke-width="2" stroke-linecap="round"><line x1="4" y1="9" x2="20" y2="9"/><line x1="6" y1="13" x2="18" y2="13"/><line x1="4" y1="17" x2="20" y2="17"/></g>';
-  else if (h.cover < 20) body = h.isDay ? ICON_SUN : ICON_MOON;
-  else if (h.cover < 70) body = `<g transform="translate(-3.5 -4) scale(.75)">${h.isDay ? ICON_SUN : ICON_MOON}</g>` + `<g transform="translate(2 1.5) scale(.85)">${cloudPath()}</g>`;
-  else body = cloudPath(-1);
+  else body = skyG(h, false);
   return `<svg viewBox="0 0 24 24" aria-hidden="true">${body}</svg>`;
 }
 function renderHours() {
@@ -1010,6 +1029,18 @@ function renderHours() {
       `<span class="tp">${Math.round(h.temp)}°</span><span class="bar">${bar}</span></button>`;
   }).join("");
 }
+// Expand / collapse the hourly strip; the choice is remembered on this device.
+function setHoursOpen(open) {
+  document.body.classList.toggle("hours-open", open);
+  document.getElementById("hours").hidden = !open;
+  document.getElementById("hoursToggle").setAttribute("aria-expanded", open);
+  try { localStorage.setItem("rainy.hoursOpen", open ? "1" : "0"); } catch {}
+  map.invalidateSize();
+  drawChart();
+}
+document.getElementById("hoursToggle").addEventListener("click", () => setHoursOpen(!document.body.classList.contains("hours-open")));
+try { setHoursOpen(localStorage.getItem("rainy.hoursOpen") === "1"); } catch { setHoursOpen(false); }
+
 // Tap an hour: jump the timeline (and map) to it, switching to 14 h if needed.
 document.getElementById("hours").addEventListener("click", (e) => {
   const btn = e.target.closest(".hour");
