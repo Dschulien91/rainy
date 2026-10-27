@@ -113,6 +113,7 @@
   .fav .hours { margin: 0; padding: 0 4px; border-top: 0; }
   .fav .loading { color: var(--muted); font-size: 13px; padding: 14px 10px; }
   .pin { background: none; border: 0; filter: drop-shadow(0 2px 3px rgba(0,0,0,.4)); }
+  .place .tzhint { margin-left: 6px; font-size: 11px; color: var(--muted); }
   .place .pin-ico { width: 13px; height: 13px; vertical-align: -1px; margin-right: 3px; color: var(--muted); }
   .fab.spin { animation: spin 0.8s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
@@ -225,10 +226,6 @@
       <button id="modeRain" class="on" role="tab"><svg class="ico"><use href="#logo"/></svg>rainy</button>
       <button id="modeSun" role="tab"><svg class="ico sun"><use href="#sunIcon"/></svg>sunny</button>
     </div>
-    <div class="toggle" role="tablist">
-      <button id="rangeShort" class="on" role="tab">2 h</button>
-      <button id="rangeLong" role="tab">14 h</button>
-    </div>
   </div>
   <div class="chart-row">
     <button class="play" id="play" aria-label="Abspielen">▶</button>
@@ -250,7 +247,7 @@
 <script src="https://unpkg.com/@maplibre/maplibre-gl-leaflet@0.0.22/leaflet-maplibre-gl.js"></script>
 <script>
 "use strict";
-const VERSION = "v0.31";
+const VERSION = "v0.32";
 const FALLBACK = { lat: 53.5511, lon: 9.9937, name: "Hamburg" };
 const DWD_WMS = "https://maps.dwd.de/geoserver/dwd/wms";
 const EUM_WMS = "https://view.eumetsat.int/geoserver/ows";
@@ -331,7 +328,6 @@ const gibsUrl = (layer, view, ts) => `${GIBS_WMS}?SERVICE=WMS&VERSION=1.1.1&REQU
   `&SRS=EPSG:3857&BBOX=${view.bbox}&WIDTH=${view.w}&HEIGHT=${view.h}&FORMAT=image/png&TRANSPARENT=true` +
   `&TIME=${new Date(Math.floor(ts / 600e3) * 600e3).toISOString().slice(0, 19)}Z`;
 const STEP = 15 * 60e3;                     // timeline step for everything except the 5-min radar view
-const RANGE_HOURS = { short: 2, long: 14 };
 const GRID = 8;                             // 8x8 Open-Meteo points for model maps; each point counts as one API call
 const TREND = 0.5;                          // share of the model's cloud trend applied to the satellite nowcast
 const NOWCAST_MS = 4 * 3600e3;             // satellite cloud nowcast: full weight for 1 h, then fades into the model by 4 h
@@ -402,7 +398,26 @@ const pickedMarker = L.marker([0, 0], {
 });
 
 // ---------- Helpers ----------
-const fmtTime = (ts) => new Date(ts).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" });
+// All times are shown in the time zone of the place (from the weather model; fallback: by longitude).
+let PLACE_TZ;
+const DEVICE_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
+const tzFormats = {};
+function tzFormat(tz) {
+  const key = tz || "";
+  if (!tzFormats[key]) {
+    try { tzFormats[key] = new Intl.DateTimeFormat("de-DE", { timeZone: tz, hour: "2-digit", minute: "2-digit", weekday: "short", hourCycle: "h23" }); }
+    catch { tzFormats[key] = new Intl.DateTimeFormat("de-DE", { hour: "2-digit", minute: "2-digit", weekday: "short", hourCycle: "h23" }); }
+  }
+  return tzFormats[key];
+}
+function localParts(ts, tz = PLACE_TZ) {
+  const parts = tzFormat(tz).formatToParts(new Date(ts)), get = (t) => (parts.find((x) => x.type === t) || {}).value || "";
+  return { hour: +get("hour") % 24, minute: +get("minute"), wd: get("weekday").replace(".", "") };
+}
+const pad2 = (n) => String(n).padStart(2, "0");
+const fmtTime = (ts, tz = PLACE_TZ) => { const lp = localParts(ts, tz); return `${pad2(lp.hour)}:${pad2(lp.minute)}`; };
+// Without model data: a fixed offset from the longitude (Etc/GMT zones have inverted signs).
+const tzFromLon = (lon) => { const h = Math.round(lon / 15); return h === 0 ? "Etc/GMT" : `Etc/GMT${h > 0 ? "-" : "+"}${Math.abs(h)}`; };
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 function interp(times, values, t) {
   if (!times || !times.length) return null;
@@ -700,7 +715,7 @@ function satCloudAt(f, p) {
 }
 function applySatSamples() {
   let changed = false;
-  for (const key of ["sun-short", "sun-long"]) {
+  for (const key of ["sun-short"]) {
     const v = state.views[key];
     if (!v) continue;
     for (const fr of v.frames) {
@@ -1017,6 +1032,7 @@ async function loadPoint(loc) {
   const dl = d.daily;
   state.sunEvents = dl ? [...dl.sunrise.map((t) => ({ ts: t * 1000, type: "rise" })), ...dl.sunset.map((t) => ({ ts: t * 1000, type: "set" }))]
     .sort((a, b) => a.ts - b.ts) : [];
+  PLACE_TZ = d.timezone || tzFromLon(loc.lon);
   state.point = {
     loc, t: m.time.map((s) => s * 1000), temp: m.temperature_2m, precip: m.precipitation,
     cover: m.cloud_cover, isDay: m.is_day,
@@ -1149,19 +1165,9 @@ function buildViews() {
   }
   state.views["rain-short"] = finish(short);
 
-  // rain, 14 h: 15-minute steps; radar (averaged) while it lasts, then the model
-  state.views["rain-long"] = finish(steps(14).map((ts) => {
-    if (ts <= radarEnd) {
-      const inStep = R.filter((r) => r.ts >= ts && r.ts < ts + STEP);
-      const v = inStep.length ? inStep.reduce((a, r) => a + r.mmh, 0) / inStep.length : 0;
-      return { ts, value: v, temp: temp(ts), map: { kind: state.radarSource, ts: inStep.length ? inStep[0].ts : ts, ref: inStep.length ? inStep[0].ref : null } };
-    }
-    return { ts, value: modelRain(ts), temp: temp(ts), map: { kind: "model" } };
-  }));
-
   // sun: satellite up to now, model forecast afterwards
-  for (const range of ["short", "long"]) {
-    state.views[`sun-${range}`] = finish(steps(RANGE_HOURS[range]).map((ts) => {
+  {
+    state.views["sun-short"] = finish(steps(2).map((ts) => {
       const isDay = isDayAt(ts) ? 1 : 0;
       // Sun share = clear-sky share from the same cloud cover the map shows (the model's separate
       // sunshine-duration field often contradicts its own cloud cover).
@@ -1271,7 +1277,7 @@ function updateSource() {
 }
 
 function summary() {
-  const s = cur(), fr = s.frames.slice(s.nowIdx), h = RANGE_HOURS[state.range];
+  const s = cur(), fr = s.frames.slice(s.nowIdx), h = 2;
   if (!fr.length) return "Keine Daten";
   if (state.mode === "rain") {
     const wet = (f) => f.value >= 0.1;
@@ -1400,14 +1406,13 @@ function drawChart() {
 
   // Time axis
   ctx.fillStyle = col("--muted"); ctx.font = "11px system-ui, sans-serif"; ctx.textAlign = "center";
-  const labelEvery = state.range === "short" ? 30 : 180; // minutes
+  const labelEvery = 30; // minutes
   // Label the first frame of every labelEvery-minute slot with the slot's round time (frame times may be irregular).
-  const slot = (ts) => { const d = new Date(ts); return Math.floor((d.getHours() * 60 + d.getMinutes()) / labelEvery); };
+  const slot = (ts) => { const lp = localParts(ts); return Math.floor((lp.hour * 60 + lp.minute) / labelEvery); };
   frames.forEach((f, i) => {
     if (i === 0 || slot(f.ts) === slot(frames[i - 1].ts)) return;
-    const d = new Date(f.ts), mins = slot(f.ts) * labelEvery;
-    d.setHours(Math.floor(mins / 60), mins % 60, 0, 0);
-    ctx.fillText(fmtTime(d.getTime()), clamp(x(i), 16, W - 16), H - 3);
+    const mins = slot(f.ts) * labelEvery;
+    ctx.fillText(`${pad2(Math.floor(mins / 60))}:${pad2(mins % 60)}`, clamp(x(i), 16, W - 16), H - 3);
     ctx.fillRect(x(i), top + plotH, 1, 3);
   });
 
@@ -1495,23 +1500,23 @@ function hourBlocks(list, size) {
   return out;
 }
 // HTML for an hourly strip (24 hourly entries or 18 four-hour blocks).
-function stripHTML(all, three, rain) {
+function stripHTML(all, three, rain, tz = PLACE_TZ) {
   if (!all || !all.length) return "";
   const items = three ? hourBlocks(all, 4).slice(0, 18) : all.slice(0, 24);
-  let lastDay = new Date(items[0].ts).getDay();
+  let lastDay = localParts(items[0].ts, tz).wd;
   // Night = 23-7 h (sleeping hours); a 4-hour block counts as night when most of its hours fall in that range.
   const isNight = (h) => {
-    const start = new Date(h.ts).getHours(), len = three ? 4 : 1;
+    const start = localParts(h.ts, tz).hour, len = three ? 4 : 1;
     let n = 0;
     for (let k = 0; k < len; k++) { const hr = (start + k) % 24; if (hr >= 23 || hr < 7) n++; }
     return n * 2 > len;
   };
   const night = items.map(isNight);
   return items.map((h, i) => {
-    const d = new Date(h.ts);
-    const newDay = d.getDay() !== lastDay;
-    lastDay = d.getDay();
-    const label = i === 0 ? "Jetzt" : three ? `${WEEKDAYS[d.getDay()]} ${d.getHours()}h` : newDay ? `${WEEKDAYS[d.getDay()]} ${d.getHours()}h` : `${d.getHours()} Uhr`;
+    const lp = localParts(h.ts, tz);
+    const newDay = lp.wd !== lastDay;
+    lastDay = lp.wd;
+    const label = i === 0 ? "Jetzt" : three || newDay ? `${lp.wd} ${lp.hour}h` : `${lp.hour} Uhr`;
     let v, color;
     if (rain) { v = Math.sqrt(clamp(h.precip, 0, 8) / 8); color = h.precip >= 0.1 ? rgba(rainColor(h.precip)) : "transparent"; }
     else { v = h.isDay ? clamp(1 - h.cover / 100, 0, 1) : 0; color = "var(--sun)"; }
@@ -1557,17 +1562,15 @@ document.getElementById("hoursTabs").addEventListener("click", (e) => {
   setHours(b.classList.contains("on") ? null : b.dataset.range);
 });
 
-// Tap an hour: jump the timeline (and map) to it, switching to 14 h if needed.
+// Tap an hour: jump the map timeline to it (the map covers the next 2 hours; later hours live in the strip).
 document.getElementById("hours").addEventListener("click", (e) => {
   const btn = e.target.closest(".hour");
   if (!btn) return;
   const ts = +btn.dataset.ts;
-  if (ts > cur().frames[cur().frames.length - 1].ts && state.range === "short") { state.range = "long"; applyView(); }
   const fr = cur().frames;
   if (ts > fr[fr.length - 1].ts) {
-    const d = new Date(ts);
-    toast(`Die Karte reicht nur ${RANGE_HOURS.long} Stunden in die Zukunft. ` +
-      `Für ${WEEKDAYS[d.getDay()]} ${d.getHours()} Uhr gibt es nur die Vorhersage in der Leiste.`);
+    const lp = localParts(ts);
+    toast(`Die Karte zeigt die nächsten 2 Stunden. Für ${lp.wd} ${lp.hour} Uhr gibt es die Vorhersage hier in der Leiste.`);
     return;
   }
   hideToast();
@@ -1615,7 +1618,7 @@ function play() {
     if (next && !frameReady(next) && waited++ < 4) { loadImgFrame(next); return; }
     waited = 0;
     setIdx(s.idx + 1);
-  }, state.range === "short" && state.mode === "rain" ? 450 : 300);
+  }, state.mode === "rain" ? 450 : 300);
 }
 playBtn.addEventListener("click", () => (state.playing ? stop() : play()));
 
@@ -1628,8 +1631,6 @@ function applyView() {
   document.querySelector("#brandLogo use").setAttribute("href", state.mode === "sun" ? "#sunIcon" : "#logo");
   document.getElementById("modeRain").classList.toggle("on", state.mode === "rain");
   document.getElementById("modeSun").classList.toggle("on", state.mode === "sun");
-  document.getElementById("rangeShort").classList.toggle("on", state.range === "short");
-  document.getElementById("rangeLong").classList.toggle("on", state.range === "long");
   if (needsGrid()) loadGrid();
   if (needsNowcast()) { loadNowcastBase(); loadMotion(); }
   updateHeader();
@@ -1638,8 +1639,6 @@ function applyView() {
 }
 document.getElementById("modeRain").addEventListener("click", () => { state.mode = "rain"; applyView(); });
 document.getElementById("modeSun").addEventListener("click", () => { state.mode = "sun"; applyView(); });
-document.getElementById("rangeShort").addEventListener("click", () => { state.range = "short"; applyView(); });
-document.getElementById("rangeLong").addEventListener("click", () => { state.range = "long"; applyView(); });
 document.getElementById("refresh").addEventListener("click", refreshAll);
 document.getElementById("locate").addEventListener("click", async () => {
   const loc = (await getPosition()) || state.home;
@@ -1689,6 +1688,7 @@ async function setLocation(loc, picked, knownName) {
     const pointOk = await loadPoint(loc).then(() => true, (err) => { console.warn(err); return false; });
     await Promise.all([loadRadarPoint(loc), satP]);
     if (!pointOk) {
+      if (!(state.point && state.point.loc && sameLoc(state.point.loc, loc))) PLACE_TZ = tzFromLon(loc.lon);
       const same = state.point && state.point.loc && sameLoc(state.point.loc, loc);
       if (!same) state.point = { loc, t: [], temp: [], precip: [], cover: [], isDay: [] };
       if (!same) state.hours = [];
@@ -1738,7 +1738,8 @@ function renderPlace() {
   if (!loc) return;
   el.innerHTML = (state.picked ? '<svg class="pin-ico" viewBox="0 0 24 24"><path d="M12 22s-7-7.6-7-13a7 7 0 0 1 14 0c0 5.4-7 13-7 13z" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="9" r="2.4" fill="none" stroke="currentColor" stroke-width="2"/></svg>' : "") + esc(state.placeName || "") +
     `<button class="star-btn${isFav(loc) ? " on" : ""}" aria-label="Favorit">${STAR}</button>` +
-    (state.picked ? '<button class="back">× zurück</button>' : "");
+    (state.picked ? '<button class="back">× zurück</button>' : "") +
+    (PLACE_TZ && fmtTime(Date.now(), PLACE_TZ) !== fmtTime(Date.now(), DEVICE_TZ) ? `<span class="tzhint">Ortszeit ${fmtTime(Date.now())}</span>` : "");
   el.querySelector(".star-btn").addEventListener("click", () => toggleFav(state.loc, state.placeName));
   const back = el.querySelector(".back");
   if (back) back.addEventListener("click", () => document.getElementById("locate").click());
@@ -1758,11 +1759,11 @@ async function loadFavData(favs) {
   const key = favs.map((f) => `${f.lat},${f.lon}`).join(";");
   if (favData && favDataKey === key && Date.now() - favData.at < 10 * 60e3) return favData.list;
   const d = await getJSON(`${OM_BASE}/v1/forecast?latitude=${favs.map((f) => f.lat)}&longitude=${favs.map((f) => f.lon)}` +
-    `&hourly=temperature_2m,precipitation,cloud_cover,is_day,weather_code&forecast_hours=73&timeformat=unixtime`);
-  const list = (Array.isArray(d) ? d : [d]).map((x) => x.hourly.time.map((t, i) => ({
+    `&hourly=temperature_2m,precipitation,cloud_cover,is_day,weather_code&forecast_hours=73&timezone=auto&timeformat=unixtime`);
+  const list = (Array.isArray(d) ? d : [d]).map((x) => Object.assign(x.hourly.time.map((t, i) => ({
     ts: t * 1000, temp: x.hourly.temperature_2m[i], precip: x.hourly.precipitation[i], cover: x.hourly.cloud_cover[i],
     isDay: x.hourly.is_day[i], code: x.hourly.weather_code[i],
-  })));
+  })), { tz: x.timezone }));
   favData = { at: Date.now(), list }; favDataKey = key;
   return list;
 }
@@ -1781,7 +1782,7 @@ async function renderFavs() {
     `<button class="drag" aria-label="Verschieben">≡</button>` +
     `<button class="fav-name">${esc(f.name)}${hours ? `<small>${Math.round(hours[0].temp)}°</small>` : ""}</button>` +
     `<button class="fav-del" aria-label="Entfernen">${CLOSE}</button></div>` +
-    (hours ? `<div class="hours">${stripHTML(hours, three, rain)}</div>` : '<div class="loading">lädt …</div>') + "</div>";
+    (hours ? `<div class="hours">${stripHTML(hours, three, rain, hours.tz)}</div>` : '<div class="loading">lädt …</div>') + "</div>";
   el.innerHTML = favs.map((f, i) => card(f, i, favData && favDataKey === favs.map((x) => `${x.lat},${x.lon}`).join(";") ? favData.list[i] : null)).join("");
   try {
     const list = await loadFavData(favs);
