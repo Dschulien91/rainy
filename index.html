@@ -40,7 +40,8 @@
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
     font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; overflow: hidden; }
-  #map { position: absolute; inset: 0 0 var(--sheet-h, 250px) 0; }
+  :root { --sheet-h: 345px; }
+  #map { position: absolute; inset: 0 0 var(--sheet-h) 0; }
   .leaflet-container { background: var(--night); }
   .grid-overlay { filter: blur(14px); }
   .radar-frame { transition: opacity 0.4s ease; filter: blur(2.5px); }
@@ -62,13 +63,13 @@
   body.sunny .brand span { color: var(--sun); }
   .version { font-weight: 500; font-size: 11px; color: var(--muted); margin-left: 4px; }
 
-  .fab { position: absolute; right: 12px; bottom: calc(var(--sheet-h, 250px) + 12px); z-index: 1000;
+  .fab { position: absolute; right: 12px; bottom: calc(var(--sheet-h) + 12px); z-index: 1000;
     width: 44px; height: 44px; border-radius: 50%; border: 0; background: var(--bg); color: var(--fg);
     box-shadow: 0 2px 10px rgba(0,0,0,.2); font-size: 20px; cursor: pointer; }
   .fab.spin { animation: spin 0.8s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
 
-  .sheet { position: absolute; left: 0; right: 0; bottom: 0; height: var(--sheet-h, 250px); z-index: 1000;
+  .sheet { position: absolute; left: 0; right: 0; bottom: 0; height: var(--sheet-h); z-index: 1000;
     background: var(--bg); border-radius: 18px 18px 0 0; box-shadow: var(--shadow);
     padding: 12px 16px max(10px, env(safe-area-inset-bottom)); display: flex; flex-direction: column; gap: 8px; }
   .head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
@@ -86,6 +87,16 @@
     font-size: 16px; cursor: pointer; }
   .chart-wrap { position: relative; flex: 1; min-width: 0; touch-action: none; cursor: ew-resize; }
   #chart { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .hours { display: flex; overflow-x: auto; scroll-snap-type: x mandatory; margin: 0 -16px; padding: 0 16px;
+    scrollbar-width: none; flex: none; border-top: 1px solid var(--line); }
+  .hours::-webkit-scrollbar { display: none; }
+  .hour { flex: 0 0 calc((min(100vw, 600px) - 32px) / 6.5); scroll-snap-align: start; display: flex; flex-direction: column;
+    align-items: center; gap: 2px; padding: 6px 0 2px; border: 0; background: none; font: inherit; font-size: 11px;
+    color: var(--muted); cursor: pointer; }
+  .hour .tp { font-size: 13px; font-weight: 700; color: var(--fg); }
+  .hour svg { width: 26px; height: 26px; }
+  .hour .bar { width: 14px; height: 16px; display: flex; align-items: flex-end; background: var(--night); border-radius: 3px; overflow: hidden; }
+  .hour .bar i { display: block; width: 100%; border-radius: 3px; }
   .status { font-size: 11px; color: var(--muted); display: flex; justify-content: space-between; gap: 8px; }
   .status a { color: inherit; }
 </style>
@@ -101,13 +112,13 @@
     </g>
   </symbol>
   <symbol id="sunIcon" viewBox="-2 -2 68 68">
-    <path d="M53.00 32.00 L53.28 32.56 L53.54 33.13 L53.77 33.71 L53.98 34.31 L54.15 34.92 L54.28 35.53 L54.36 36.15 L54.40 36.76 L54.40 37.38 L54.34 37.99 L54.23 38.58 L54.06 39.17 L53.85 39.74 L53.59 40.29 L53.28 40.81 L52.92 41.32 L52.53 41.79 L52.10 42.24 L51.63 42.66 L51.14 43.05 L50.62 43.41 L50.09 43.75 L49.54 44.06 L48.99 44.34 L48.43 44.61 L47.88 44.86 L47.33 45.09 L46.79 45.32 L46.26 45.53 L45.75 45.75 L45.25 45.97 L44.78 46.19 L44.32 46.42 L43.88 46.67 L43.46 46.93 L43.05 47.21 L42.66 47.51 L42.28 47.83 L41.91 48.17 L41.55 48.54 L41.19 48.92 L40.83 49.33 L40.46 49.75 L40.09 50.18 L39.71 50.62 L39.32 51.07 L38.91 51.52 L38.49 51.97 L38.05 52.41 L37.58 52.83 L37.10 53.24 L36.59 53.62 L36.07 53.97 L35.53 54.28 L34.97 54.55 L34.39 54.78 L33.81 54.96 L33.21 55.09 L32.61 55.17 L32.00 55.20 L31.39 55.17 L30.79 55.09 L30.19 54.96 L29.61 54.78 L29.03 54.55 L28.47 54.28 L27.93 53.97 L27.41 53.62 L26.90 53.24 L26.42 52.83 L25.95 52.41 L25.51 51.97 L25.09 51.52 L24.68 51.07 L24.29 50.62 L23.91 50.18 L23.54 49.75 L23.17 49.33 L22.81 48.92 L22.45 48.54 L22.09 48.17 L21.72 47.83 L21.34 47.51 L20.95 47.21 L20.54 46.93 L20.12 46.67 L19.68 46.42 L19.22 46.19 L18.75 45.97 L18.25 45.75 L17.74 45.53 L17.21 45.32 L16.67 45.09 L16.12 44.86 L15.57 44.61 L15.01 44.34 L14.46 44.06 L13.91 43.75 L13.38 43.41 L12.86 43.05 L12.37 42.66 L11.90 42.24 L11.47 41.79 L11.08 41.32 L10.72 40.81 L10.41 40.29 L10.15 39.74 L9.94 39.17 L9.77 38.58 L9.66 37.99 L9.60 37.38 L9.60 36.76 L9.64 36.15 L9.72 35.53 L9.85 34.92 L10.02 34.31 L10.23 33.71 L10.46 33.13 L10.72 32.56 L11.00 32.00 L11.29 31.46 L11.60 30.93 L11.90 30.42 L12.21 29.92 L12.51 29.43 L12.80 28.96 L13.07 28.49 L13.32 28.03 L13.56 27.57 L13.77 27.11 L13.96 26.66 L14.12 26.19 L14.26 25.72 L14.38 25.24 L14.48 24.74 L14.56 24.23 L14.62 23.71 L14.67 23.17 L14.72 22.62 L14.77 22.05 L14.81 21.47 L14.87 20.87 L14.93 20.27 L15.01 19.66 L15.11 19.04 L15.24 18.43 L15.39 17.81 L15.58 17.21 L15.80 16.62 L16.05 16.05 L16.34 15.50 L16.67 14.98 L17.04 14.49 L17.45 14.03 L17.89 13.61 L18.36 13.23 L18.87 12.90 L19.41 12.61 L19.97 12.36 L20.55 12.16 L21.15 12.01 L21.76 11.90 L22.38 11.84 L23.01 11.81 L23.64 11.82 L24.27 11.86 L24.89 11.93 L25.51 12.03 L26.12 12.14 L26.71 12.27 L27.29 12.40 L27.86 12.53 L28.42 12.67 L28.96 12.80 L29.49 12.91 L30.00 13.01 L30.51 13.09 L31.01 13.15 L31.51 13.19 L32.00 13.20 L32.49 13.19 L32.99 13.15 L33.49 13.09 L34.00 13.01 L34.51 12.91 L35.04 12.80 L35.58 12.67 L36.14 12.53 L36.71 12.40 L37.29 12.27 L37.88 12.14 L38.49 12.03 L39.11 11.93 L39.73 11.86 L40.36 11.82 L40.99 11.81 L41.62 11.84 L42.24 11.90 L42.85 12.01 L43.45 12.16 L44.03 12.36 L44.59 12.61 L45.13 12.90 L45.64 13.23 L46.11 13.61 L46.55 14.03 L46.96 14.49 L47.33 14.98 L47.66 15.50 L47.95 16.05 L48.20 16.62 L48.42 17.21 L48.61 17.81 L48.76 18.43 L48.89 19.04 L48.99 19.66 L49.07 20.27 L49.13 20.87 L49.19 21.47 L49.23 22.05 L49.28 22.62 L49.33 23.17 L49.38 23.71 L49.44 24.23 L49.52 24.74 L49.62 25.24 L49.74 25.72 L49.88 26.19 L50.04 26.66 L50.23 27.11 L50.44 27.57 L50.68 28.03 L50.93 28.49 L51.20 28.96 L51.49 29.43 L51.79 29.92 L52.10 30.42 L52.40 30.93 L52.71 31.46 L53.00 32.00 Z" fill="none" stroke="currentColor" stroke-width="6" stroke-linejoin="round"/>
+    <path d="M53.00 32.00 L53.16 32.55 L53.29 33.12 L53.40 33.68 L53.48 34.26 L53.53 34.83 L53.53 35.41 L53.50 35.98 L53.42 36.55 L53.29 37.11 L53.12 37.66 L52.91 38.20 L52.66 38.71 L52.38 39.22 L52.06 39.70 L51.72 40.17 L51.36 40.62 L50.98 41.05 L50.59 41.47 L50.19 41.88 L49.80 42.27 L49.41 42.67 L49.03 43.06 L48.65 43.45 L48.30 43.84 L47.95 44.24 L47.62 44.65 L47.30 45.07 L47.00 45.50 L46.69 45.94 L46.40 46.40 L46.10 46.86 L45.81 47.33 L45.50 47.81 L45.19 48.28 L44.86 48.75 L44.51 49.21 L44.14 49.66 L43.75 50.09 L43.33 50.49 L42.89 50.86 L42.43 51.20 L41.94 51.50 L41.43 51.77 L40.90 51.99 L40.35 52.17 L39.80 52.31 L39.23 52.41 L38.65 52.48 L38.07 52.51 L37.50 52.51 L36.92 52.49 L36.35 52.45 L35.78 52.40 L35.22 52.34 L34.67 52.28 L34.13 52.22 L33.59 52.17 L33.06 52.13 L32.53 52.11 L32.00 52.10 L31.47 52.11 L30.94 52.13 L30.41 52.17 L29.87 52.22 L29.33 52.28 L28.78 52.34 L28.22 52.40 L27.65 52.45 L27.08 52.49 L26.50 52.51 L25.93 52.51 L25.35 52.48 L24.77 52.41 L24.20 52.31 L23.65 52.17 L23.10 51.99 L22.57 51.77 L22.06 51.50 L21.57 51.20 L21.11 50.86 L20.67 50.49 L20.25 50.09 L19.86 49.66 L19.49 49.21 L19.14 48.75 L18.81 48.28 L18.50 47.81 L18.19 47.33 L17.90 46.86 L17.60 46.40 L17.31 45.94 L17.00 45.50 L16.70 45.07 L16.38 44.65 L16.05 44.24 L15.70 43.84 L15.35 43.45 L14.97 43.06 L14.59 42.67 L14.20 42.27 L13.81 41.88 L13.41 41.47 L13.02 41.05 L12.64 40.62 L12.28 40.17 L11.94 39.70 L11.62 39.22 L11.34 38.71 L11.09 38.20 L10.88 37.66 L10.71 37.11 L10.58 36.55 L10.50 35.98 L10.47 35.41 L10.47 34.83 L10.52 34.26 L10.60 33.68 L10.71 33.12 L10.84 32.55 L11.00 32.00 L11.17 31.45 L11.35 30.92 L11.53 30.39 L11.71 29.87 L11.89 29.35 L12.05 28.84 L12.20 28.33 L12.33 27.82 L12.45 27.31 L12.56 26.79 L12.64 26.27 L12.72 25.74 L12.79 25.20 L12.85 24.65 L12.92 24.10 L12.99 23.53 L13.07 22.97 L13.16 22.40 L13.28 21.84 L13.42 21.28 L13.60 20.72 L13.80 20.18 L14.04 19.66 L14.32 19.15 L14.63 18.67 L14.98 18.22 L15.37 17.79 L15.78 17.40 L16.23 17.03 L16.70 16.70 L17.19 16.40 L17.70 16.12 L18.23 15.87 L18.75 15.64 L19.29 15.43 L19.82 15.24 L20.35 15.05 L20.87 14.86 L21.39 14.68 L21.89 14.49 L22.38 14.29 L22.87 14.08 L23.35 13.86 L23.82 13.62 L24.28 13.37 L24.74 13.10 L25.21 12.82 L25.67 12.53 L26.15 12.24 L26.63 11.94 L27.11 11.65 L27.61 11.37 L28.13 11.10 L28.65 10.85 L29.19 10.64 L29.73 10.45 L30.29 10.30 L30.86 10.19 L31.43 10.12 L32.00 10.10 L32.57 10.12 L33.14 10.19 L33.71 10.30 L34.27 10.45 L34.81 10.64 L35.35 10.85 L35.87 11.10 L36.39 11.37 L36.89 11.65 L37.37 11.94 L37.85 12.24 L38.33 12.53 L38.79 12.82 L39.26 13.10 L39.72 13.37 L40.18 13.62 L40.65 13.86 L41.13 14.08 L41.62 14.29 L42.11 14.49 L42.61 14.68 L43.13 14.86 L43.65 15.05 L44.18 15.24 L44.71 15.43 L45.25 15.64 L45.77 15.87 L46.30 16.12 L46.81 16.40 L47.30 16.70 L47.77 17.03 L48.22 17.40 L48.63 17.79 L49.02 18.22 L49.37 18.67 L49.68 19.15 L49.96 19.66 L50.20 20.18 L50.40 20.72 L50.58 21.28 L50.72 21.84 L50.84 22.40 L50.93 22.97 L51.01 23.53 L51.08 24.10 L51.15 24.65 L51.21 25.20 L51.28 25.74 L51.36 26.27 L51.44 26.79 L51.55 27.31 L51.67 27.82 L51.80 28.33 L51.95 28.84 L52.11 29.35 L52.29 29.87 L52.47 30.39 L52.65 30.92 L52.83 31.45 L53.00 32.00 Z" fill="none" stroke="currentColor" stroke-width="6" stroke-linejoin="round"/>
     <circle cx="32" cy="32" r="9.5" fill="currentColor"/>
   </symbol>
 </svg>
 <div id="map"></div>
 <div class="brand"><svg class="logo" id="brandLogo"><use href="#logo"/></svg><span id="brandName">rainy</span><span class="version" id="ver"></span></div>
-<button class="fab" id="refresh" title="Aktualisieren" aria-label="Aktualisieren" style="bottom:calc(var(--sheet-h, 250px) + 66px)">↻</button>
+<button class="fab" id="refresh" title="Aktualisieren" aria-label="Aktualisieren" style="bottom:calc(var(--sheet-h) + 66px)">↻</button>
 <button class="fab" id="locate" title="Mein Standort" aria-label="Mein Standort">◎</button>
 
 <div class="sheet">
@@ -132,6 +143,7 @@
     <button class="play" id="play" aria-label="Abspielen">▶</button>
     <div class="chart-wrap" id="chartWrap"><canvas id="chart"></canvas></div>
   </div>
+  <div class="hours" id="hours"></div>
   <div class="status">
     <span id="source"></span>
     <span>Daten: <a href="https://www.dwd.de" target="_blank">DWD</a>, EUMETSAT, Bright Sky, Open-Meteo, Esri</span>
@@ -141,13 +153,14 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
 "use strict";
-const VERSION = "v0.12";
+const VERSION = "v0.13";
 const FALLBACK = { lat: 53.5511, lon: 9.9937, name: "Hamburg" };
 const DWD_WMS = "https://maps.dwd.de/geoserver/dwd/wms";
 const EUM_WMS = "https://view.eumetsat.int/geoserver/ows";
 const STEP = 15 * 60e3;                     // timeline step for everything except the 5-min radar view
 const RANGE_HOURS = { short: 2, long: 14 };
 const GRID = 12;
+const TREND = 0.5;                          // share of the model's cloud trend applied to the satellite nowcast
 const NOWCAST_MS = 4 * 3600e3;             // satellite cloud nowcast: full weight for 1 h, then fades into the model by 4 h                            // 12x12 Open-Meteo points for model maps (clouds, rain > 2 h)
 
 document.getElementById("ver").textContent = VERSION;
@@ -517,6 +530,7 @@ function estimateShift(a, b, N, R) {
 // Cloudiness after applying the model's trend from c0 (at the satellite time) to c1: clouds thin out where
 // the model expects fewer, and new clouds form in clear areas where it expects more.
 function evolve(c, c0, c1) {
+  c1 = c0 + TREND * (c1 - c0);
   if (c1 < c0) return c0 > 0.05 ? c * (c1 / c0) : c;
   return c + (1 - c) * (c0 < 0.95 ? (c1 - c0) / (1 - c0) : 0);
 }
@@ -555,13 +569,13 @@ function nowcastImage(f) {
     for (let x = 0; x < v.w; x++, k++) {
       const m = b.mask[k];
       if (!m) continue;
-      const li = ((y / S) | 0) * lw + ((x / S) | 0), a0 = c0[li], a1 = c1[li], i4 = k * 4;
+      const li = ((y / S) | 0) * lw + ((x / S) | 0), a0 = c0[li], a1 = a0 + TREND * (c1[li] - a0), i4 = k * 4;
       const form = a1 > a0 && a0 < 0.95 ? (a1 - a0) / (1 - a0) : 0;
       let cloud;
       if (m === 2) { // cloud pixel: keep the satellite texture, thin it out or thicken it
         const alpha = src[i4 + 3] / 255;
         cloud = a1 < a0 ? (a0 > 0.05 ? alpha * (a1 / a0) : alpha) : alpha + (1 - alpha) * form * 0.5;
-      } else cloud = form * 0.75; // clear pixel: new cloud forms
+      } else cloud = form * 0.6; // clear pixel: new cloud forms
       const tint = day ? 0.2 * (1 - Math.min(1, cloud / 0.5)) : 0;
       const a = cloud + tint * (1 - cloud);
       if (a <= 0.01) continue;
@@ -688,11 +702,17 @@ function cityZoom(bbox) {
 async function loadPoint(loc) {
   const d = await getJSON(`https://api.open-meteo.com/v1/forecast?latitude=${loc.lat}&longitude=${loc.lon}` +
     `&minutely_15=temperature_2m,precipitation,cloud_cover,is_day` +
-    `&past_minutely_15=8&forecast_minutely_15=64&hourly=wind_speed_700hPa,wind_direction_700hPa` +
-    `&forecast_hours=2&timeformat=unixtime`);
+    `&past_minutely_15=8&forecast_minutely_15=64` +
+    `&hourly=temperature_2m,precipitation,cloud_cover,is_day,weather_code,wind_speed_700hPa,wind_direction_700hPa` +
+    `&forecast_hours=25&timeformat=unixtime`);
   const m = d.minutely_15;
   // Steering wind at ~3 km height: fallback for how clouds move when the satellite gives no usable motion.
-  state.wind = d.hourly ? { kmh: d.hourly.wind_speed_700hPa[0], from: d.hourly.wind_direction_700hPa[0] } : null;
+  const h = d.hourly;
+  state.wind = h ? { kmh: h.wind_speed_700hPa[0], from: h.wind_direction_700hPa[0] } : null;
+  state.hours = h ? h.time.map((t, i) => ({
+    ts: t * 1000, temp: h.temperature_2m[i], precip: h.precipitation[i], cover: h.cloud_cover[i],
+    isDay: h.is_day[i], code: h.weather_code[i],
+  })) : [];
   state.point = {
     t: m.time.map((s) => s * 1000), temp: m.temperature_2m, precip: m.precipitation,
     cover: m.cloud_cover, isDay: m.is_day,
@@ -950,7 +970,59 @@ function drawChart() {
   }
 }
 
+// ---------- Hourly strip ----------
+// Small outline weather icons (24 px grid) in the same style as the logo.
+const ICON_SUN = '<g stroke="#F5A700" stroke-width="2" stroke-linecap="round" fill="none"><circle cx="12" cy="12" r="4.2"/>' +
+  [0, 45, 90, 135, 180, 225, 270, 315].map((a) => {
+    const r = (a * Math.PI) / 180, c = Math.cos(r), s = Math.sin(r);
+    return `<line x1="${12 + 7 * c}" y1="${12 + 7 * s}" x2="${12 + 9.3 * c}" y2="${12 + 9.3 * s}"/>`;
+  }).join("") + "</g>";
+const ICON_MOON = '<path d="M16 4.5a7.5 7.5 0 1 0 3.8 12.6A6.2 6.2 0 0 1 16 4.5z" fill="none" stroke="var(--muted)" stroke-width="2" stroke-linejoin="round"/>';
+const cloudPath = (dy = 0) => `<path d="M7.5 ${19 + dy}h9.2a3.8 3.8 0 0 0 .4-7.6A5.3 5.3 0 0 0 7 ${12.4 + dy}a3.4 3.4 0 0 0 .5 ${6.6}z" ` +
+  'fill="var(--bg)" stroke="var(--fg)" stroke-width="2" stroke-linejoin="round"/>';
+const drops = (n) => Array.from({ length: n }, (_, i) => {
+  const x = 12 + (i - (n - 1) / 2) * 3.6;
+  return `<line x1="${x}" y1="18.5" x2="${x - 1.2}" y2="${n > 2 ? 23 : 22}" stroke="var(--rain)" stroke-width="2" stroke-linecap="round"/>`;
+}).join("");
+function weatherIcon(h) {
+  const c = h.code, rain = h.precip;
+  let body;
+  if (c >= 95) body = cloudPath(-3) + '<path d="M12.5 17l-2.5 3.5h3l-2 3.5" fill="none" stroke="#F5A700" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>';
+  else if ((c >= 71 && c <= 77) || c === 85 || c === 86) body = cloudPath(-3) + [9, 12, 15].map((x, i) => `<circle cx="${x}" cy="${20 + (i % 2) * 2}" r="1.1" fill="var(--fg)"/>`).join("");
+  else if (rain >= 2.5 || c === 65 || c === 82) body = cloudPath(-3) + drops(3);
+  else if (rain >= 0.1 || (c >= 51 && c <= 67) || (c >= 80 && c <= 82)) body = cloudPath(-3) + drops(2);
+  else if (c === 45 || c === 48) body = '<g stroke="var(--muted)" stroke-width="2" stroke-linecap="round"><line x1="4" y1="9" x2="20" y2="9"/><line x1="6" y1="13" x2="18" y2="13"/><line x1="4" y1="17" x2="20" y2="17"/></g>';
+  else if (h.cover < 20) body = h.isDay ? ICON_SUN : ICON_MOON;
+  else if (h.cover < 70) body = `<g transform="translate(-3.5 -4) scale(.75)">${h.isDay ? ICON_SUN : ICON_MOON}</g>` + `<g transform="translate(2 1.5) scale(.85)">${cloudPath()}</g>`;
+  else body = cloudPath(-1);
+  return `<svg viewBox="0 0 24 24" aria-hidden="true">${body}</svg>`;
+}
+function renderHours() {
+  const el = document.getElementById("hours"), list = state.hours || [];
+  const rain = state.mode === "rain";
+  el.innerHTML = list.slice(0, 24).map((h, i) => {
+    const label = i === 0 ? "Jetzt" : new Date(h.ts).getHours() + " Uhr";
+    let v, color;
+    if (rain) { v = Math.sqrt(clamp(h.precip, 0, 8) / 8); color = h.precip >= 0.1 ? rgba(rainColor(h.precip)) : "transparent"; }
+    else { v = h.isDay ? clamp(1 - h.cover / 100, 0, 1) : 0; color = "var(--sun)"; }
+    const bar = v > 0.02 ? `<i style="height:${Math.max(3, v * 16).toFixed(1)}px;background:${color}"></i>` : "";
+    return `<button class="hour" data-ts="${h.ts}"><span>${label}</span>${weatherIcon(h)}` +
+      `<span class="tp">${Math.round(h.temp)}°</span><span class="bar">${bar}</span></button>`;
+  }).join("");
+}
+// Tap an hour: jump the timeline (and map) to it, switching to 14 h if needed.
+document.getElementById("hours").addEventListener("click", (e) => {
+  const btn = e.target.closest(".hour");
+  if (!btn) return;
+  const ts = +btn.dataset.ts;
+  if (ts > cur().frames[cur().frames.length - 1].ts && state.range === "short") { state.range = "long"; applyView(); }
+  const fr = cur().frames;
+  if (ts > fr[fr.length - 1].ts) return;
+  setIdx(Math.max(0, fr.findIndex((f) => f.ts >= ts)));
+});
+
 function updateHeader() {
+  renderHours();
   document.getElementById("summary").textContent = summary();
   const p = state.point;
   const t = p && interp(p.t, p.temp, Date.now());
