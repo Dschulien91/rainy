@@ -237,21 +237,79 @@
   <div class="hours" id="hours" hidden></div>
   <div class="status">
     <span id="source"></span>
-    <span>Daten: <a href="https://www.dwd.de" target="_blank">DWD</a>, EUMETNET, EUMETSAT, Bright Sky, Open-Meteo, Esri</span>
+    <span>Daten: <a href="https://www.dwd.de" target="_blank">DWD</a>, EUMETNET, EUMETSAT, ECCC, NOAA, NASA, Bright Sky, Open-Meteo, Esri</span>
   </div>
 </div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
 "use strict";
-const VERSION = "v0.27";
+const VERSION = "v0.28";
 const FALLBACK = { lat: 53.5511, lon: 9.9937, name: "Hamburg" };
 const DWD_WMS = "https://maps.dwd.de/geoserver/dwd/wms";
 const EUM_WMS = "https://view.eumetsat.int/geoserver/ows";
 // Own data server (Europe radar + nowcast). Local prototype: only used when the app itself is opened locally.
 const API_BASE = /^(localhost|127\.0\.0\.1|192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.)/.test(location.hostname)
   ? `${location.protocol}//${location.hostname}:8771` : null;
-const isImgKind = (k) => k === "radar" || k === "sat" || k === "eu";
+const isImgKind = (k) => k === "radar" || k === "sat" || k === "eu" || k === "ca" || k === "us";
+// Canada (ECCC GeoMet): rain rate in 14 discrete classes, observations every 6 min plus a 72 min nowcast.
+const CA_WMS = "https://geo.weather.gc.ca/geomet";
+const CA_CLASSES = { "98cbfe": 0.3, "0098fe": 1.4, "00fe66": 2.8, "00cb00": 5.7, "009800": 9.8, "006600": 13.9,
+  "fefe00": 19.6, "fecb00": 27.7, "fe9800": 40, "fe6600": 56.6, "fe0000": 80, "fe0298": 112, "9833cb": 158, "660098": 250 };
+// USA (NOAA nowCOAST): base reflectivity mosaic as a dBZ colour ramp, observations only (~every 4 min).
+const US_WMS = "https://nowcoast.noaa.gov/geoserver/observations/weather_radar/ows";
+const US_RAMP = [[6, "599494"], [8, "3bb1b1"], [9, "1dcece"], [10, "00ecec"], [11, "00d9ee"], [13, "00c6f1"], [14, "00b3f3"],
+  [15, "01a0f6"], [16, "0078f6"], [18, "0050f6"], [19, "0028f6"], [20, "0000f6"], [21, "003fb8"], [23, "007f7b"], [24, "00bf3d"],
+  [25, "00ff00"], [26, "00f100"], [28, "00e300"], [29, "00d500"], [30, "00c800"], [31, "00ba00"], [33, "00ac00"], [34, "009e00"],
+  [35, "009000"], [36, "3fab00"], [38, "7fc700"], [39, "bfe300"], [40, "ffff00"], [41, "f9ef00"], [43, "f3df00"], [44, "edcf00"],
+  [45, "e7c000"], [46, "edb400"], [48, "f3a800"], [49, "f99c00"], [50, "ff9000"], [51, "ff6c00"], [53, "ff4800"], [54, "ff2400"],
+  [55, "ff0000"], [56, "f60000"], [58, "ed0000"], [59, "e40000"], [60, "dc0000"], [61, "d50000"], [63, "ce0000"], [64, "c70000"],
+  [65, "c00000"], [66, "cf003f"], [68, "df007f"], [69, "ef00bf"], [70, "ff00ff"], [71, "e515f1"], [73, "cc2ae4"], [74, "b23fd6"],
+  [75, "9955c9"], [76, "747bce"], [78, "4fa1d4"], [79, "2ac7da"], [80, "05ede0"]];
+const dbzToRate = (dbz) => (dbz < 10 ? 0 : Math.pow(Math.pow(10, dbz / 10) / 200, 1 / 1.6)); // Marshall-Palmer
+// Nearest legend colour -> rain rate, cached per pixel colour (sources draw anti-aliased / interpolated colours).
+function nearestRate(table) {
+  const entries = Object.entries(table).map(([hex, v]) => [parseInt(hex.slice(0, 2), 16), parseInt(hex.slice(2, 4), 16), parseInt(hex.slice(4, 6), 16), v]);
+  const cache = new Map();
+  return (r, g, b) => {
+    const key = (r << 16) | (g << 8) | b;
+    let v = cache.get(key);
+    if (v === undefined) {
+      let best = 1e9; v = 0;
+      for (const [er, eg, eb, ev] of entries) {
+        const d = (er - r) ** 2 + (eg - g) ** 2 + (eb - b) ** 2;
+        if (d < best) { best = d; v = ev; }
+      }
+      if (best > 3 * 40 * 40) v = 0; // not a legend colour (e.g. coverage outline)
+      cache.set(key, v);
+    }
+    return v;
+  };
+}
+const caRate = nearestRate(CA_CLASSES);
+const usRate = nearestRate(Object.fromEntries(US_RAMP.map(([dbz, hex]) => [hex, dbzToRate(dbz)])));
+// Repaint a source image in the rainy palette; keeps a per-pixel rate index for sampling the timeline.
+function repaintRates(view, img, rateOf) {
+  const [c, ctx] = canvasFor(view, img);
+  const data = ctx.getImageData(0, 0, view.w, view.h), px = data.data;
+  const rates = new Float32Array(view.w * view.h);
+  for (let i = 0, p = 0; i < px.length; i += 4, p++) {
+    const v = px[i + 3] > 100 ? rateOf(px[i], px[i + 1], px[i + 2]) : 0;
+    rates[p] = v;
+    const col = v >= 0.1 && rainColor(v);
+    if (col) { px[i] = col[0]; px[i + 1] = col[1]; px[i + 2] = col[2]; px[i + 3] = col[3] * 255; }
+    else px[i + 3] = 0;
+  }
+  ctx.putImageData(data, 0, 0);
+  return { canvas: c, rates };
+}
+// Satellite by region: Meteosat (EUMETSAT) for Europe/Africa, GOES via NASA GIBS for the Americas.
+const GIBS_WMS = "https://gibs.earthdata.nasa.gov/wms/epsg3857/best/wms.cgi";
+const satRegion = (lon) => (lon < -105 ? "goes-west" : lon < -30 ? "goes-east" : "meteosat");
+const GOES_LAYER = { "goes-east": "GOES-East_ABI_Band13_Clean_Infrared", "goes-west": "GOES-West_ABI_Band13_Clean_Infrared" };
+const gibsUrl = (layer, view, ts) => `${GIBS_WMS}?SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap&LAYERS=${layer}&STYLES=` +
+  `&SRS=EPSG:3857&BBOX=${view.bbox}&WIDTH=${view.w}&HEIGHT=${view.h}&FORMAT=image/png&TRANSPARENT=true` +
+  `&TIME=${new Date(Math.floor(ts / 600e3) * 600e3).toISOString().slice(0, 19)}Z`;
 const STEP = 15 * 60e3;                     // timeline step for everything except the 5-min radar view
 const RANGE_HOURS = { short: 2, long: 14 };
 const GRID = 8;                             // 8x8 Open-Meteo points for model maps; each point counts as one API call
@@ -387,9 +445,17 @@ function canvasFor(view, img) {
 }
 
 const RENDER = {
-  // DWD radar composite, repainted in the rainy palette.
+  // DWD radar composite, repainted in the rainy palette. With our server available, the Europe radar fills
+  // everything outside Germany underneath, so panning across the border stays seamless.
   async radar(view, ts, ref) {
-    const img = await loadImage(wmsUrl(DWD_WMS, "dwd:Niederschlagsradar", view, ts, ref));
+    if (API_BASE && view.zoom <= 6) { // continent-wide view: the Europe image alone is plenty (DWD is slow for large areas)
+      const eu = await loadImage(`${API_BASE}/api/radar/image?ts=${ts}&bbox=${view.bbox}&width=${view.w}&height=${view.h}`).catch(() => null);
+      if (eu) return { canvas: canvasFor(view, eu)[0] };
+    }
+    const [img, eu] = await Promise.all([
+      loadImage(wmsUrl(DWD_WMS, "dwd:Niederschlagsradar", view, ts, ref)),
+      API_BASE ? loadImage(`${API_BASE}/api/radar/image?ts=${ts}&bbox=${view.bbox}&width=${view.w}&height=${view.h}`).catch(() => null) : null,
+    ]);
     const [c, ctx] = canvasFor(view, img);
     const data = ctx.getImageData(0, 0, view.w, view.h), px = data.data;
     for (let i = 0; i < px.length; i += 4) {
@@ -398,7 +464,25 @@ const RENDER = {
       else px[i + 3] = 0; // no rain, no-data area, coverage outline
     }
     ctx.putImageData(data, 0, 0);
-    return { canvas: c };
+    if (!eu) return { canvas: c };
+    const [out, octx] = canvasFor(view, eu); // Europe underneath, DWD on top
+    octx.drawImage(c, 0, 0);
+    return { canvas: out };
+  },
+  // Canada (ECCC): observations, or the official nowcast for future frames.
+  async ca(view, ts, ref) {
+    const layer = ref ? "Radar_1km_RainPrecipRate-Extrapolation" : "RADAR_1KM_RRAI";
+    const url = `${CA_WMS}?service=WMS&version=1.3.0&request=GetMap&layers=${layer}&styles=Radar-Rain_Dis-14colors` +
+      `&crs=EPSG:3857&bbox=${view.bbox}&width=${view.w}&height=${view.h}&format=image/png&transparent=true` +
+      `&time=${new Date(ts).toISOString().slice(0, 19)}Z` + (ref ? `&DIM_REFERENCE_TIME=${new Date(ref).toISOString().slice(0, 19)}Z` : "");
+    return repaintRates(view, await loadImage(url), caRate);
+  },
+  // USA (NOAA nowCOAST): reflectivity converted to rain rate.
+  async us(view, ts) {
+    const url = `${US_WMS}?service=WMS&version=1.3.0&request=GetMap&layers=base_reflectivity_mosaic&styles=` +
+      `&crs=EPSG:3857&bbox=${view.bbox}&width=${view.w}&height=${view.h}&format=image/png&transparent=true` +
+      `&time=${new Date(ts).toISOString()}`;
+    return repaintRates(view, await loadImage(url), usRate);
   },
   // Europe radar from our own server: images come ready-colored in the rainy palette.
   async eu(view, ts) {
@@ -407,6 +491,8 @@ const RENDER = {
   },
   // EUMETSAT cloud mask (where clouds are, day and night) shaded with the 1 km infrared image (cloud texture).
   async sat(view, ts) {
+    const region = satRegion(L.CRS.EPSG3857.unproject(L.point((view.nw.x + view.se.x) / 2, (view.nw.y + view.se.y) / 2)).lng);
+    if (region !== "meteosat") return goesSat(view, ts, region);
     const irTs = Math.floor(ts / 600e3) * 600e3; // IR comes every 10 min
     const [clm, ir] = await Promise.all([
       loadImage(wmsUrl(EUM_WMS, "msg_fes:clm", view, ts)),
@@ -436,6 +522,32 @@ const RENDER = {
 };
 
 const frameKey = (kind, ts, ref) => `${kind}:${ts}` + (ref ? `@${ref}` : "");
+// GOES clean-IR (NASA GIBS): grey = warm surface, brighter grey / colour-enhanced = colder cloud tops.
+async function goesSat(view, ts, region) {
+  const img = await loadImage(gibsUrl(GOES_LAYER[region], view, ts));
+  const [c, ctx] = canvasFor(view, img);
+  const data = ctx.getImageData(0, 0, view.w, view.h), px = data.data;
+  const day = isDayAt(ts) ? 1 : 0;
+  const mask = new Uint8Array(view.w * view.h);
+  for (let i = 0, p = 0; i < px.length; i += 4, p++) {
+    if (px[i + 3] < 128) { px[i + 3] = 0; continue; }
+    const r = px[i], g = px[i + 1], b = px[i + 2];
+    const colored = Math.max(r, g, b) - Math.min(r, g, b) > 30;
+    const t = colored ? 1 : clamp((r - 140) / 80, 0, 1); // cloudiness from IR brightness
+    const cloud = t > 0.15;
+    mask[p] = cloud ? 2 : 1;
+    if (cloud) {
+      px[i] = CLOUD_RGB[0]; px[i + 1] = CLOUD_RGB[1]; px[i + 2] = CLOUD_RGB[2];
+      px[i + 3] = Math.round((0.45 + 0.5 * t) * 255);
+    } else {
+      px[i] = SUN_RGB[0]; px[i + 1] = SUN_RGB[1]; px[i + 2] = SUN_RGB[2];
+      px[i + 3] = Math.round(0.2 * 255 * day);
+    }
+  }
+  ctx.putImageData(data, 0, 0);
+  return { canvas: c, mask };
+}
+
 function imgFrame(kind, ts, ref) {
   const key = frameKey(kind, ts, ref);
   if (!imgFrames.has(key)) imgFrames.set(key, { key, kind, ts, ref, overlay: null, viewId: 0, pending: null, pendingView: 0 });
@@ -454,7 +566,8 @@ function loadImgFrame(f) {
     if (!f.overlay) {
       f.overlay = L.imageOverlay(url, view.bounds, { pane: "weather", className: `${f.kind}-frame`, opacity: 0 }).addTo(map);
     } else { f.overlay.setUrl(url); f.overlay.setBounds(view.bounds); }
-    f.viewId = view.id; f.pending = null; f.mask = res.mask; f.view = view;
+    f.viewId = view.id; f.pending = null; f.mask = res.mask; f.rates = res.rates; f.view = view;
+    if (res.rates) sampleRadarFrame(f);
     if (shownKey === f.key) setVisibleFrame(f);
     if (f.kind === "sat" && applySatSamples()) { updateHeader(); drawChart(); }
   }).catch(() => {
@@ -462,6 +575,23 @@ function loadImgFrame(f) {
     if (f.pendingView === view.id) { f.pending = null; f.viewId = view.id; }
   });
   return f.pending;
+}
+// Canada / USA: the rain timeline is read from the loaded radar images at the location (3x3 pixel mean).
+function sampleRadarFrame(f) {
+  const v = f.view, p = projectLoc(state.loc);
+  const x = Math.round(((p.x - v.nw.x) / (v.se.x - v.nw.x)) * v.w), y = Math.round(((v.nw.y - p.y) / (v.nw.y - v.se.y)) * v.h);
+  let sum = 0, n = 0;
+  for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+    const xx = x + dx, yy = y + dy;
+    if (xx < 0 || yy < 0 || xx >= v.w || yy >= v.h) continue;
+    sum += f.rates[yy * v.w + xx]; n++;
+  }
+  if (!n) return;
+  const r = state.radarPoint.find((q) => q.ts === f.ts && (q.ref || null) === (f.ref || null));
+  if (!r || r.mmh === sum / n) return;
+  r.mmh = sum / n;
+  clearTimeout(sampleRadarFrame.timer);
+  sampleRadarFrame.timer = setTimeout(() => { buildViews(); updateHeader(); drawChart(); }, 250);
 }
 function setVisibleFrame(f) {
   if (!f.overlay) return;
@@ -844,6 +974,16 @@ async function loadRadarPoint(loc) {
     });
     state.radarSource = "radar";
   } catch { state.radarPoint = []; } // outside Germany: no DWD radar
+  if (!state.radarPoint.length && loc.lon < -50 && loc.lat > 15) {
+    // North America: country decides the source (Canada has an official nowcast, the USA observations only)
+    let cc = "";
+    try {
+      const d = await getJSON(`https://photon.komoot.io/reverse?lat=${loc.lat}&lon=${loc.lon}&lang=en`);
+      cc = (d.features && d.features[0] && d.features[0].properties.countrycode) || "";
+    } catch {}
+    if (cc === "CA") state.radarPoint = await caFrames().catch(() => []), state.radarSource = "ca";
+    else if (cc === "US") state.radarPoint = await usFrames().catch(() => []), state.radarSource = "us";
+  }
   if (!state.radarPoint.length && API_BASE) {
     // Europe-wide OPERA radar with our own nowcast
     try {
@@ -853,8 +993,52 @@ async function loadRadarPoint(loc) {
     } catch { state.radarPoint = []; }
   }
 }
-// Newest available satellite cloud mask (the satellite runs ~20-30 min behind real time).
-async function loadSatLatest() {
+// Frame lists from the WMS capabilities (time dimension); values are filled in from the images.
+async function wmsTimes(url) {
+  const xml = await (await fetch(url)).text();
+  const m = xml.match(/<Dimension name="time"[^>]*>([^<]*)</);
+  if (!m) return [];
+  const v = m[1].trim();
+  if (v.includes("/")) { // start/end/period
+    const [a, b, per] = v.split("/");
+    const step = (parseInt((per.match(/(\d+)M/) || [0, 5])[1], 10)) * 60e3;
+    const out = [];
+    for (let t = Date.parse(a); t <= Date.parse(b); t += step) out.push(t);
+    return out;
+  }
+  return v.split(",").map((t) => Date.parse(t));
+}
+async function caFrames() {
+  const caps = (layer) => `${CA_WMS}?service=WMS&version=1.3.0&request=GetCapabilities&layer=${layer}`;
+  const [obs, fc] = await Promise.all([wmsTimes(caps("RADAR_1KM_RRAI")), wmsTimes(caps("Radar_1km_RainPrecipRate-Extrapolation"))]);
+  const now = Date.now(), ref = fc[0];
+  return [...obs.filter((t) => t > now - 3600e3).map((t) => ({ ts: t, mmh: 0, ref: null })),
+    ...fc.filter((t) => t > obs[obs.length - 1]).map((t) => ({ ts: t, mmh: 0, ref }))];
+}
+async function usFrames() {
+  const obs = await wmsTimes(`${US_WMS}?service=WMS&version=1.3.0&request=GetCapabilities`);
+  return obs.filter((t) => t > Date.now() - 3600e3).map((t) => ({ ts: t, mmh: 0, ref: null }));
+}
+
+// Newest available satellite image: Meteosat from EUMETSAT's capabilities (~20-30 min behind),
+// GOES by probing NASA GIBS backwards in 10 min steps (~1 h behind).
+async function loadSatLatest(loc) {
+  const region = satRegion((loc || state.loc).lon);
+  state.satRegion = region;
+  if (region !== "meteosat") {
+    const p = projectLoc(loc || state.loc), d = 20000;
+    const view = { w: 8, h: 8, bbox: `${p.x - d},${p.y - d},${p.x + d},${p.y + d}` };
+    for (let k = 3; k <= 12; k++) {
+      const ts = Math.floor(Date.now() / 600e3) * 600e3 - k * 600e3;
+      try {
+        const img = await loadImage(gibsUrl(GOES_LAYER[region], view, ts));
+        const px = canvasFor(view, img)[1].getImageData(0, 0, 8, 8).data;
+        if (px.some((v, i) => i % 4 === 3 && v > 0)) { state.satLatest = ts; return; }
+      } catch {}
+    }
+    state.satLatest = null;
+    return;
+  }
   try {
     const r = await fetch(`https://view.eumetsat.int/geoserver/msg_fes/clm/ows?service=WMS&version=1.3.0&request=GetCapabilities`);
     const m = (await r.text()).match(/<Dimension name="time"[^>]*>[^<]*\/([0-9T:.\-]+Z)\/PT15M/);
@@ -882,9 +1066,11 @@ function buildViews() {
   const old = { ...state.views };
 
   // rain, 2 h: 5-minute radar frames (or the model outside radar coverage)
-  state.views["rain-short"] = finish(R.length
-    ? R.map((r) => ({ ts: r.ts, value: r.mmh, temp: temp(r.ts), map: { kind: state.radarSource, ts: r.ts, ref: r.ref } }))
-    : steps(2).map((ts) => ({ ts, value: modelRain(ts), temp: temp(ts), map: { kind: "model" } })));
+  const short = R.map((r) => ({ ts: r.ts, value: r.mmh, temp: temp(r.ts), map: { kind: state.radarSource, ts: r.ts, ref: r.ref } }));
+  for (const ts of steps(2)) { // continue with the model where the radar (or its nowcast) ends
+    if (ts > (R.length ? Math.max(R[R.length - 1].ts, now) : -Infinity)) short.push({ ts, value: modelRain(ts), temp: temp(ts), map: { kind: "model" } });
+  }
+  state.views["rain-short"] = finish(short);
 
   // rain, 14 h: 15-minute steps; radar (averaged) while it lasts, then the model
   state.views["rain-long"] = finish(steps(14).map((ts) => {
@@ -938,7 +1124,9 @@ function updateSource() {
   const now = Date.now();
   let text = f.map.kind === "radar" ? (f.ts > now ? "Radar-Vorhersage (DWD)" : "Radar gemessen (DWD)")
     : f.map.kind === "eu" ? (f.ts > now ? "Radar-Vorhersage (rainy, aus EUMETNET OPERA)" : "Radar gemessen (EUMETNET OPERA)")
-    : f.map.kind === "sat" ? `Satellit (EUMETSAT) · Stand ${fmtTime(f.map.ts)}`
+    : f.map.kind === "ca" ? (f.map.ref ? "Radar-Vorhersage (Environment Canada)" : "Radar gemessen (Environment Canada)")
+    : f.map.kind === "us" ? "Radar gemessen (NOAA)"
+    : f.map.kind === "sat" ? `Satellit (${state.satRegion === "meteosat" ? "EUMETSAT" : "NOAA GOES / NASA"}) · Stand ${fmtTime(f.map.ts)}`
     : f.map.kind === "nowcast" ? `Satellit hochgerechnet${nowcast.motion ? " (Zug: " + nowcast.motion.source + ")" : ""}` +
       (f.map.w < 0.5 ? " + Modell" : "")
     : state.mode === "rain" ? "Modellvorhersage, ungenauer" : "Wolken-Vorhersage (Modell)";
@@ -1358,7 +1546,8 @@ async function setLocation(loc, picked, knownName) {
   placeEl.textContent = picked ? "📍 Ort wird geladen …" : knownName || "…";
   const nameP = knownName ? Promise.resolve(knownName) : reverseGeocode(loc, picked).then((p) => p.name);
   try {
-    const satP = state.satLatest && Date.now() - state.satLatest < 45 * 60e3 ? null : loadSatLatest();
+    const fresh = state.satLatest && state.satRegion === satRegion(loc.lon) && Date.now() - state.satLatest < 45 * 60e3;
+    const satP = fresh ? null : loadSatLatest(loc);
     const pointOk = await loadPoint(loc).then(() => true, (err) => { console.warn(err); return false; });
     await Promise.all([loadRadarPoint(loc), satP]);
     if (!pointOk) {
