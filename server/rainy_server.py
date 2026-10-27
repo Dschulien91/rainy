@@ -4,6 +4,8 @@ Builds rain radar with a 2 h nowcast for regions where no official nowcast is fr
 it to the app. Regions:
   eu - EUMETNET OPERA composite (reflectivity, 1 km, every 5 min, CC BY 4.0), LAEA grid kept at 2 km
   us - NOAA nowCOAST base reflectivity mosaic (public domain, every ~4 min), Web Mercator grid ~3 km
+  sat - EUMETSAT H SAF satellite rain estimate (MTG, every 10 min, ~25 min old), Europe/Africa/Atlantic, ~8 km;
+        fills the map where no radar exists (shown fainter in the app)
 Nowcast: dense optical flow (OpenCV Farneback) between two frames ~30 min apart, then semi-Lagrangian
 extrapolation in 5 min steps with smoothing that grows with lead time (small cells are not predictable for
 long, as in S-PROG/pySTEPS). Chosen by backtests (server/tune_nowcast.py): +10-25 % CSI at 60-120 min vs. the
@@ -13,7 +15,8 @@ Endpoints (all CORS-enabled, cache headers suitable for a CDN):
   GET /api/health
   GET /api/radar/frames?region=eu|us          -> {"frames": [{"ts": ms, "fc": bool}], "ref": ms}
   GET /api/radar/image?region=&ts=&bbox=&width=&height=   (bbox in EPSG:3857) -> PNG in the rainy palette
-  GET /api/radar/point?lat=&lon=               -> {"region": "eu"|"us"|null, "series": [{"ts", "mmh"}], "ref": ms}
+  GET /api/radar/point?lat=&lon=               -> {"region": "eu"|"us"|"sat"|null, "series": [{"ts", "mmh"}], "ref": ms}
+  GET /api/radar/mask?bbox=&width=&height=     -> PNG, opaque where radar coverage exists (for the "no data" hatching)
 
 Run:  python server/rainy_server.py   (port from env PORT, default 8771)
 Requests to data sources carry a neutral User-Agent and no identifying information.
@@ -36,7 +39,7 @@ import numpy as np
 from PIL import Image
 from pyproj import Transformer
 
-VERSION = "server-v0.5"
+VERSION = "server-v0.6"
 PORT = int(os.environ.get("PORT", "8771"))
 UA = "Mozilla/5.0"          # neutral, carries no identity
 HISTORY_MS = 60 * 60_000    # observed frames kept (1 h)
@@ -105,19 +108,19 @@ def fetch(url, timeout=40):
 
 
 # ---------- nowcast ----------
-def nowcast(prev, last, dt_ms, steps, smooth=1.0):
+def nowcast(prev, last, dt_ms, steps, smooth=1.0, down=2):
     """Extrapolate `last` along the motion observed between `prev` and `last` (dt_ms apart)."""
     ny, nx = last.shape
 
     def img(r):
         v = np.where(r > 0, np.log1p(np.clip(r, 0, 50)), 0)
         return np.clip(v / math.log1p(50) * 255, 0, 255).astype(np.uint8)
-    small = (nx // 2, ny // 2)  # flow on half resolution for speed and stability
+    small = (nx // down, ny // down)  # flow on reduced resolution for speed and stability
     a = cv2.resize(img(prev), small, interpolation=cv2.INTER_AREA)
     b = cv2.resize(img(last), small, interpolation=cv2.INTER_AREA)
     flow = cv2.calcOpticalFlowFarneback(a, b, None, 0.5, 4, 25, 4, 7, 1.5, 0)
     flow = cv2.GaussianBlur(flow, (0, 0), 6)
-    flow = cv2.resize(flow, (nx, ny), interpolation=cv2.INTER_LINEAR) * 2.0  # pixels per dt
+    flow = cv2.resize(flow, (nx, ny), interpolation=cv2.INTER_LINEAR) * float(down)  # pixels per dt
     flow *= STEP_MS / dt_ms                                                  # pixels per 5 min step
     gx, gy = np.meshgrid(np.arange(nx, dtype=np.float32), np.arange(ny, dtype=np.float32))
     base = np.where(last < 0, 0, last).astype(np.float32)
@@ -136,6 +139,8 @@ def nowcast(prev, last, dt_ms, steps, smooth=1.0):
 class Region:
     name = ""
     credit = ""
+    SMOOTH = 1.0      # nowcast smoothing in grid pixels (tuned at ~2-3 km)
+    FLOW_DOWN = 2     # optical flow is computed at grid resolution / FLOW_DOWN
 
     def __init__(self):
         self.lock = threading.Lock()
@@ -156,7 +161,7 @@ class Region:
         avail = {t: s for t, s in self.list_times().items() if t > now - HISTORY_MS}
         new = [t for t in sorted(avail) if t not in self.obs]
         for t in new:
-            g = self.load(avail[t])
+            g = self.load(avail[t]).astype(np.float16)  # half the memory; plenty precise for rain rates
             with self.lock:
                 self.obs[t] = g
         if not new:
@@ -171,9 +176,9 @@ class Region:
             prev, last = self.obs[prev_t], self.obs[last_t]
         if prev_t == last_t:
             return len(new)
-        fc = nowcast(prev, last, last_t - prev_t, FC_STEPS)
+        fc = nowcast(prev.astype(np.float32), last.astype(np.float32), last_t - prev_t, FC_STEPS, self.SMOOTH, self.FLOW_DOWN)
         with self.lock:
-            self.fc = {last_t + (i + 1) * STEP_MS: g for i, g in enumerate(fc)}
+            self.fc = {last_t + (i + 1) * STEP_MS: g.astype(np.float16) for i, g in enumerate(fc)}
             self.ref = last_t
         return len(new)
 
@@ -182,7 +187,8 @@ class EuropeOpera(Region):
     name, credit = "eu", "EUMETNET OPERA"
     BUCKET = "https://s3.waw3-1.cloudferro.com/openradar-24h"
     LAEA = "+proj=laea +lat_0=55.0 +lon_0=10.0 +x_0=1950000.0 +y_0=-2100000.0 +units=m +ellps=WGS84"
-    CELL, NY, NX = 2000.0, 2200, 1900
+    CELL, NY, NX = 1000.0, 4400, 3800   # full 1 km resolution
+    SMOOTH, FLOW_DOWN = 2.0, 4          # same physical scales as the backtested 2 km setup
 
     def __init__(self):
         super().__init__()
@@ -207,10 +213,8 @@ class EuropeOpera(Region):
         nod = d == nodata
         dbz = d * gain + offset
         dbz[(d == undetect) | nod] = -32.0
-        rate = dbz_to_rate(dbz).reshape(self.NY, 2, self.NX, 2).mean(axis=(1, 3))   # 1 km -> 2 km
-        covered = (~nod).reshape(self.NY, 2, self.NX, 2).any(axis=(1, 3))
-        rate = cv2.medianBlur(rate, 3)                                               # single-pixel clutter
-        rate[~covered] = NODATA
+        rate = cv2.medianBlur(dbz_to_rate(dbz), 3)   # removes single-pixel clutter
+        rate[nod] = NODATA
         return rate
 
     def to_pixels(self, x, y):
@@ -269,7 +273,51 @@ class UsaNowcoast(Region):
         return col, row
 
 
-REGIONS = {r.name: r for r in (EuropeOpera(), UsaNowcoast())}
+class SatelliteRain(Region):
+    """EUMETSAT H SAF blended satellite rain rate (h40b, MTG FCI + microwave). Coarse, but available everywhere
+    on the Meteosat disc; used only where no radar exists."""
+    name, credit = "sat", "EUMETSAT H SAF"
+    WMS = "https://view.eumetsat.int/geoserver/ows"
+    BBOX = (-6679169.0, -4865942.0, 6679169.0, 11818999.0)  # 60W-60E, 40S-72N in EPSG:3857
+    NX, NY = 1670, 2085                                     # ~8 km
+    SMOOTH, FLOW_DOWN = 0.5, 1
+    # legend intervals (upper bounds in mm/h) -> representative rate
+    CLASSES = [("ccffcc", 0.8), ("99e699", 3), ("66cc66", 5.5), ("33b333", 8.5), ("3399cc", 12.5), ("3366ff", 17.5),
+               ("0000ff", 22.5), ("6600cc", 27.5), ("9933cc", 35), ("cc0099", 45), ("800080", 60)]
+
+    def __init__(self):
+        super().__init__()
+        self.rgb = np.array([[int(h[i:i + 2], 16) for i in (0, 2, 4)] for h, _ in self.CLASSES], np.int32)
+        self.val = np.array([v for _, v in self.CLASSES], np.float32)
+
+    def list_times(self):
+        xml = fetch(f"{self.WMS[:-4]}/mtg_fd/h40b/ows?service=WMS&version=1.3.0&request=GetCapabilities").decode("utf-8", "ignore")
+        m = re.search(r'<Dimension name="time"[^>]*>[^<]*/([0-9T:.\-]+Z)/PT10M', xml)
+        if not m:
+            return {}
+        end = int(datetime.strptime(m.group(1)[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc).timestamp() * 1000)
+        return {end - k * 600_000: end - k * 600_000 for k in range(7)}
+
+    def load(self, t):
+        x0, y0, x1, y1 = self.BBOX
+        stamp = datetime.fromtimestamp(t / 1000, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        url = (f"{self.WMS}?service=WMS&version=1.1.1&request=GetMap&layers=mtg_fd:h40b&styles=&srs=EPSG:3857"
+               f"&bbox={x0},{y0},{x1},{y1}&width={self.NX}&height={self.NY}&format=image/png&transparent=true&time={stamp}")
+        px = np.asarray(Image.open(io.BytesIO(fetch(url, timeout=90))).convert("RGBA"), np.int32)
+        rate = np.zeros((self.NY, self.NX), np.float32)
+        wet = px[..., 3] > 100                       # only the (few) rain pixels need colour matching
+        rgb = px[wet][:, :3]
+        d2 = ((rgb[:, None, :] - self.rgb[None]) ** 2).sum(-1)
+        best = d2.argmin(-1)
+        rate[wet] = np.where(d2.min(-1) <= 3 * 30 * 30, self.val[best], 0.0)
+        return rate
+
+    def to_pixels(self, x, y):
+        x0, y0, x1, y1 = self.BBOX
+        return (np.asarray(x) - x0) / (x1 - x0) * self.NX - 0.5, (y1 - np.asarray(y)) / (y1 - y0) * self.NY - 0.5
+
+
+REGIONS = {r.name: r for r in (EuropeOpera(), UsaNowcoast(), SatelliteRain())}
 ll_to_3857 = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
 
 
@@ -288,17 +336,63 @@ def update_loop(region):
 
 
 # ---------- rendering ----------
-def render(region, grid, bbox, w, h):
+def view_coords(bbox, w, h):
     minx, miny, maxx, maxy = bbox
     xs = minx + (np.arange(w) + 0.5) / w * (maxx - minx)
     ys = maxy - (np.arange(h) + 0.5) / h * (maxy - miny)
-    X, Y = np.meshgrid(xs, ys)
-    col, row = region.to_pixels(X, Y)
-    # bilinear interpolation between radar pixels: smooth edges instead of blocks
-    rate = cv2.remap(np.where(grid < 0, 0, grid).astype(np.float32), col.astype(np.float32), row.astype(np.float32),
-                     cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+    return np.meshgrid(xs, ys)
+
+
+def sample(region, grid, X, Y):
+    """Bilinear interpolation between grid pixels (smooth edges instead of blocks); returns rate and coverage."""
+    col, row = (v.astype(np.float32) for v in region.to_pixels(X, Y))
+    g = grid.astype(np.float32)
+    rate = cv2.remap(np.where(g < 0, 0, g), col, row, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+    cov = cv2.remap((g >= 0).astype(np.float32), col, row, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+    return rate, cov > 0.5
+
+
+def nearest_grid(region, ts, tol_ms=16 * 60_000):
+    frames, _ = region.frames()
+    if not frames:
+        return None
+    best = min(frames, key=lambda f: abs(f["ts"] - ts))
+    return region.grid(best["ts"]) if abs(best["ts"] - ts) <= tol_ms else None
+
+
+def render(region, grid, bbox, w, h, ts):
+    X, Y = view_coords(bbox, w, h)
+    rate, cov = sample(region, grid, X, Y)
+    rgba = colorize(rate)
+    sat = REGIONS["sat"]
+    if region is not sat and not cov.all():
+        sgrid = nearest_grid(sat, ts)
+        if sgrid is not None:  # satellite estimate where the radar sees nothing, drawn fainter
+            srate, _ = sample(sat, sgrid, X, Y)
+            srgba = colorize(srate)
+            srgba[..., 3] = (srgba[..., 3] * 0.65).astype(np.uint8)
+            rgba[~cov] = srgba[~cov]
+    elif region is sat:
+        rgba[..., 3] = (rgba[..., 3] * 0.65).astype(np.uint8)
     buf = io.BytesIO()
-    Image.fromarray(colorize(np.where(rate < 0, 0, rate)), "RGBA").save(buf, "PNG", compress_level=3)
+    Image.fromarray(rgba, "RGBA").save(buf, "PNG", compress_level=3)
+    return buf.getvalue()
+
+
+def coverage_mask(bbox, w, h):
+    """Opaque where any radar (Europe from OPERA's real coverage, CONUS box for the USA) exists."""
+    X, Y = view_coords(bbox, w, h)
+    cov = np.zeros((h, w), bool)
+    eu = REGIONS["eu"]
+    frames, _ = eu.frames()
+    if frames:
+        cov |= sample(eu, eu.grid(frames[0]["ts"]), X, Y)[1]
+    x0, y0, x1, y1 = UsaNowcoast.BBOX
+    cov |= (X >= x0) & (X <= x1) & (Y >= y0) & (Y <= y1)
+    img = np.zeros((h, w, 4), np.uint8)
+    img[cov] = (0, 0, 0, 255)
+    buf = io.BytesIO()
+    Image.fromarray(img, "RGBA").save(buf, "PNG", compress_level=3)
     return buf.getvalue()
 
 
@@ -363,7 +457,11 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send(404, b"unknown frame", "text/plain", 30)
                 bbox = [float(v) for v in q["bbox"].split(",")]
                 w, h = min(int(q["width"]), 1024), min(int(q["height"]), 1024)
-                return self.send(200, render(region, grid, bbox, w, h), "image/png", 3600)
+                return self.send(200, render(region, grid, bbox, w, h, int(q["ts"])), "image/png", 3600)
+            if u.path == "/api/radar/mask":
+                bbox = [float(v) for v in q["bbox"].split(",")]
+                w, h = min(int(q["width"]), 1024), min(int(q["height"]), 1024)
+                return self.send(200, coverage_mask(bbox, w, h), "image/png", 600)
             if u.path == "/api/radar/point":
                 name, series, ref = point_series(float(q["lat"]), float(q["lon"]))
                 return self.send(200, json.dumps({"region": name, "series": series, "ref": ref}).encode(), "application/json", 60)
