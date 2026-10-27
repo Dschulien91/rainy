@@ -66,7 +66,8 @@
   body.sunny .brand span { color: var(--sun); }
   .version { font-weight: 500; font-size: 11px; color: var(--muted); margin-left: 4px; }
 
-  .fab { position: absolute; right: 12px; bottom: calc(var(--sheet-h) + 12px); z-index: 1000;
+  .fab { position: absolute; right: 12px; bottom: calc(var(--sheet-h) + 12px + var(--i, 0) * 54px); z-index: 1000;
+    display: flex; align-items: center; justify-content: center; padding: 0;
     width: 44px; height: 44px; border-radius: 50%; border: 0; background: var(--bg); color: var(--fg);
     box-shadow: 0 2px 10px rgba(0,0,0,.2); font-size: 20px; cursor: pointer; }
   .toast { position: absolute; left: 50%; top: calc(max(12px, env(safe-area-inset-top)) + 52px); z-index: 1100;
@@ -74,6 +75,40 @@
     font-size: 13px; font-weight: 600; line-height: 1.35; padding: 10px 14px; border-radius: 12px;
     box-shadow: 0 4px 16px rgba(0,0,0,.25); opacity: 0; pointer-events: none; transition: opacity .25s, transform .25s; }
   .toast.show { opacity: 1; transform: translate(-50%, 0); }
+  .fab svg { width: 22px; height: 22px; display: block; }
+  .panel { position: fixed; inset: 0; z-index: 2000; background: var(--bg); display: flex; flex-direction: column;
+    padding: max(12px, env(safe-area-inset-top)) 16px max(12px, env(safe-area-inset-bottom)); }
+  .panel[hidden] { display: none; }
+  .panel-head { display: flex; align-items: center; gap: 10px; }
+  .panel-head h2 { flex: 1; margin: 0; font-size: 22px; }
+  .icon-btn { flex: none; width: 40px; height: 40px; border: 0; border-radius: 50%; background: var(--night); color: var(--fg);
+    display: flex; align-items: center; justify-content: center; cursor: pointer; padding: 0; }
+  .icon-btn svg { width: 20px; height: 20px; }
+  .search-input { flex: 1; min-width: 0; font: inherit; font-size: 16px; padding: 10px 14px; border-radius: 12px;
+    border: 1px solid var(--line); background: var(--night); color: var(--fg); }
+  .results { list-style: none; margin: 10px 0 0; padding: 0; overflow: auto; }
+  .results li { display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--line); }
+  .results .r-go { flex: 1; text-align: left; border: 0; background: none; color: var(--fg); font: inherit; padding: 12px 4px; cursor: pointer; }
+  .results .r-sub { display: block; font-size: 12px; color: var(--muted); }
+  .results .hint { color: var(--muted); padding: 14px 4px; border: 0; }
+  .star-btn { border: 0; background: none; color: var(--sun); cursor: pointer; padding: 6px; display: flex; }
+  .star-btn svg { width: 22px; height: 22px; }
+  .star-btn.on path { fill: currentColor; }
+  .place .star-btn { display: inline-flex; vertical-align: -4px; padding: 0 4px; background: none; color: var(--sun); margin-left: 4px; }
+  .place .star-btn svg { width: 16px; height: 16px; }
+  .fav-controls { margin-top: 12px; }
+  .fav-list { flex: 1; overflow: auto; margin: 12px -16px 0; padding: 0 16px; }
+  .fav { border: 1px solid var(--line); border-radius: 14px; margin-bottom: 10px; background: var(--bg); overflow: hidden; }
+  .fav.dragging { box-shadow: 0 8px 24px rgba(0,0,0,.3); position: relative; z-index: 2; }
+  .fav-head { display: flex; align-items: center; gap: 6px; padding: 8px 6px 0 4px; }
+  .fav-name { flex: 1; min-width: 0; text-align: left; border: 0; background: none; color: var(--fg); font: inherit;
+    font-weight: 700; font-size: 15px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 4px; }
+  .fav-name small { font-weight: 400; color: var(--muted); margin-left: 6px; }
+  .drag { flex: none; border: 0; background: none; color: var(--muted); cursor: grab; padding: 6px 8px; touch-action: none; font-size: 18px; line-height: 1; }
+  .fav-del { flex: none; border: 0; background: none; color: var(--muted); cursor: pointer; padding: 6px; display: flex; }
+  .fav-del svg { width: 16px; height: 16px; }
+  .fav .hours { margin: 0; padding: 0 4px; border-top: 0; }
+  .fav .loading { color: var(--muted); font-size: 13px; padding: 14px 10px; }
   .fab.spin { animation: spin 0.8s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
 
@@ -141,8 +176,36 @@
 <div id="map"></div>
 <div class="toast" id="toast" role="status"></div>
 <div class="brand"><svg class="logo" id="brandLogo"><use href="#logo"/></svg><span id="brandName">rainy</span><span class="version" id="ver"></span></div>
-<button class="fab" id="refresh" title="Aktualisieren" aria-label="Aktualisieren" style="bottom:calc(var(--sheet-h) + 66px)">↻</button>
-<button class="fab" id="locate" title="Mein Standort" aria-label="Mein Standort">◎</button>
+<button class="fab" id="favs" title="Favoriten" aria-label="Favoriten" style="--i:3"><svg viewBox="0 0 24 24"><path d="M12 3.5l2.6 5.3 5.8.8-4.2 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.2-4.1 5.8-.8z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg></button>
+<button class="fab" id="search" title="Ort suchen" aria-label="Ort suchen" style="--i:2"><svg viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="10.5" cy="10.5" r="6"/><line x1="15" y1="15" x2="20" y2="20"/></g></svg></button>
+<button class="fab" id="refresh" title="Aktualisieren" aria-label="Aktualisieren" style="--i:1"><svg viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/><path d="M19.5 4.5v4.5H15"/></g></svg></button>
+<button class="fab" id="locate" title="Mein Standort" aria-label="Mein Standort" style="--i:0"><svg viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="12" cy="12" r="6.5"/><circle cx="12" cy="12" r="1.8" fill="currentColor"/><line x1="12" y1="2.5" x2="12" y2="5"/><line x1="12" y1="19" x2="12" y2="21.5"/><line x1="2.5" y1="12" x2="5" y2="12"/><line x1="19" y1="12" x2="21.5" y2="12"/></g></svg></button>
+
+<div class="panel" id="searchPanel" hidden>
+  <div class="panel-head">
+    <input class="search-input" id="searchInput" type="search" placeholder="Ort suchen …" autocomplete="off" enterkeyhint="search">
+    <button class="icon-btn" id="searchClose" aria-label="Schließen"><svg viewBox="0 0 24 24"><g stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></g></svg></button>
+  </div>
+  <ul class="results" id="results"></ul>
+</div>
+
+<div class="panel" id="favPanel" hidden>
+  <div class="panel-head">
+    <h2>Favoriten</h2>
+    <button class="icon-btn" id="favClose" aria-label="Schließen"><svg viewBox="0 0 24 24"><g stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></g></svg></button>
+  </div>
+  <div class="head fav-controls">
+    <div class="toggle" role="tablist">
+      <button id="favRain" role="tab"><svg class="ico"><use href="#logo"/></svg>rainy</button>
+      <button id="favSun" role="tab"><svg class="ico sun"><use href="#sunIcon"/></svg>sunny</button>
+    </div>
+    <div class="toggle" role="tablist">
+      <button id="fav24" role="tab">24 h</button>
+      <button id="fav3d" role="tab">3 Tage</button>
+    </div>
+  </div>
+  <div class="fav-list" id="favList"></div>
+</div>
 
 <div class="sheet">
   <div class="head">
@@ -180,7 +243,7 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
 "use strict";
-const VERSION = "v0.22";
+const VERSION = "v0.23";
 const FALLBACK = { lat: 53.5511, lon: 9.9937, name: "Hamburg" };
 const DWD_WMS = "https://maps.dwd.de/geoserver/dwd/wms";
 const EUM_WMS = "https://view.eumetsat.int/geoserver/ows";
@@ -1076,10 +1139,9 @@ function hourBlocks(list, size) {
   }
   return out;
 }
-function renderHours() {
-  const el = document.getElementById("hours"), all = state.hours || [];
-  if (!all.length) return;
-  const rain = state.mode === "rain", three = state.hoursRange === "3d";
+// HTML for an hourly strip (24 hourly entries or 18 four-hour blocks).
+function stripHTML(all, three, rain) {
+  if (!all || !all.length) return "";
   const items = three ? hourBlocks(all, 4).slice(0, 18) : all.slice(0, 24);
   let lastDay = new Date(items[0].ts).getDay();
   // Night = 23-7 h (sleeping hours); a 4-hour block counts as night when most of its hours fall in that range.
@@ -1090,7 +1152,7 @@ function renderHours() {
     return n * 2 > len;
   };
   const night = items.map(isNight);
-  el.innerHTML = items.map((h, i) => {
+  return items.map((h, i) => {
     const d = new Date(h.ts);
     const newDay = d.getDay() !== lastDay;
     lastDay = d.getDay();
@@ -1106,6 +1168,9 @@ function renderHours() {
     return `<button class="hour${cls}" data-ts="${h.ts}">${marks}<span>${label}</span>${weatherIcon(h)}` +
       `<span class="tp">${Math.round(h.temp)}°</span><span class="bar">${bar}</span></button>`;
   }).join("");
+}
+function renderHours() {
+  document.getElementById("hours").innerHTML = stripHTML(state.hours, state.hoursRange === "3d", state.mode === "rain");
 }
 // Short message over the map; it stays until hideToast().
 function toast(text) {
@@ -1271,13 +1336,8 @@ async function setLocation(loc, picked, knownName) {
   const name = await nameP;
   if (req !== locRequest) return;
   state.placeName = name;
-  placeEl.textContent = picked ? "📍 " + name : name;
-  if (picked) {
-    const back = document.createElement("button");
-    back.textContent = "× zurück";
-    back.addEventListener("click", () => document.getElementById("locate").click());
-    placeEl.append(back);
-  } else {
+  renderPlace();
+  if (!picked) {
     try { localStorage.setItem("rainy.last", JSON.stringify({ lat: loc.lat, lon: loc.lon, name, zoom: map.getZoom() })); } catch {}
   }
   if (needsGrid()) loadGrid();
@@ -1286,6 +1346,181 @@ async function setLocation(loc, picked, knownName) {
   renderFrame();
   preloadFrames();
 }
+
+// ---------- Favorites ----------
+const STAR = '<svg viewBox="0 0 24 24"><path d="M12 3.5l2.6 5.3 5.8.8-4.2 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.2-4.1 5.8-.8z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>';
+const CLOSE = '<svg viewBox="0 0 24 24"><g stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></g></svg>';
+const esc = (t) => String(t).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+function loadFavs() { try { return JSON.parse(localStorage.getItem("rainy.favs")) || []; } catch { return []; } }
+function saveFavs(f) { try { localStorage.setItem("rainy.favs", JSON.stringify(f)); } catch {} }
+const sameLoc = (a, b) => Math.abs(a.lat - b.lat) < 0.01 && Math.abs(a.lon - b.lon) < 0.01;
+const isFav = (loc) => loadFavs().some((f) => sameLoc(f, loc));
+function toggleFav(loc, name) {
+  let f = loadFavs();
+  if (f.some((x) => sameLoc(x, loc))) f = f.filter((x) => !sameLoc(x, loc));
+  else f.push({ name, lat: +loc.lat.toFixed(4), lon: +loc.lon.toFixed(4) });
+  saveFavs(f);
+  renderPlace();
+}
+// Place line in the sheet: name, favorite star, and "back" when a spot was picked.
+function renderPlace() {
+  const el = document.getElementById("place"), loc = state.loc;
+  if (!loc) return;
+  el.innerHTML = (state.picked ? "📍 " : "") + esc(state.placeName || "") +
+    `<button class="star-btn${isFav(loc) ? " on" : ""}" aria-label="Favorit">${STAR}</button>` +
+    (state.picked ? '<button class="back">× zurück</button>' : "");
+  el.querySelector(".star-btn").addEventListener("click", () => toggleFav(state.loc, state.placeName));
+  const back = el.querySelector(".back");
+  if (back) back.addEventListener("click", () => document.getElementById("locate").click());
+}
+// Jump the map to a place and show its forecast.
+function goTo(loc, name) {
+  map.setView([loc.lat, loc.lon], Math.max(map.getZoom(), 11));
+  pickedMarker.setLatLng([loc.lat, loc.lon]).addTo(map);
+  setLocation({ lat: loc.lat, lon: loc.lon }, true, name);
+}
+
+// Favorites panel: all favorites stacked, each with its own strip; strips scroll together for comparison.
+let favRange = "24h", favData = null, favDataKey = "";
+try { favRange = localStorage.getItem("rainy.favRange") || "24h"; } catch {}
+async function loadFavData(favs) {
+  const key = favs.map((f) => `${f.lat},${f.lon}`).join(";");
+  if (favData && favDataKey === key && Date.now() - favData.at < 10 * 60e3) return favData.list;
+  const d = await getJSON(`https://api.open-meteo.com/v1/forecast?latitude=${favs.map((f) => f.lat)}&longitude=${favs.map((f) => f.lon)}` +
+    `&hourly=temperature_2m,precipitation,cloud_cover,is_day,weather_code&forecast_hours=73&timeformat=unixtime`);
+  const list = (Array.isArray(d) ? d : [d]).map((x) => x.hourly.time.map((t, i) => ({
+    ts: t * 1000, temp: x.hourly.temperature_2m[i], precip: x.hourly.precipitation[i], cover: x.hourly.cloud_cover[i],
+    isDay: x.hourly.is_day[i], code: x.hourly.weather_code[i],
+  })));
+  favData = { at: Date.now(), list }; favDataKey = key;
+  return list;
+}
+async function renderFavs() {
+  const favs = loadFavs(), el = document.getElementById("favList");
+  const rain = state.mode === "rain", three = favRange === "3d";
+  document.getElementById("favRain").classList.toggle("on", rain);
+  document.getElementById("favSun").classList.toggle("on", !rain);
+  document.getElementById("fav24").classList.toggle("on", !three);
+  document.getElementById("fav3d").classList.toggle("on", three);
+  if (!favs.length) {
+    el.innerHTML = '<p class="loading">Noch keine Favoriten. Tippe auf den Stern neben dem Ortsnamen oder suche einen Ort mit der Lupe.</p>';
+    return;
+  }
+  const card = (f, i, hours) => `<div class="fav" data-i="${i}"><div class="fav-head">` +
+    `<button class="drag" aria-label="Verschieben">≡</button>` +
+    `<button class="fav-name">${esc(f.name)}${hours ? `<small>${Math.round(hours[0].temp)}°</small>` : ""}</button>` +
+    `<button class="fav-del" aria-label="Entfernen">${CLOSE}</button></div>` +
+    (hours ? `<div class="hours">${stripHTML(hours, three, rain)}</div>` : '<div class="loading">lädt …</div>') + "</div>";
+  el.innerHTML = favs.map((f, i) => card(f, i, favData && favDataKey === favs.map((x) => `${x.lat},${x.lon}`).join(";") ? favData.list[i] : null)).join("");
+  try {
+    const list = await loadFavData(favs);
+    if (document.getElementById("favPanel").hidden) return;
+    el.innerHTML = favs.map((f, i) => card(f, i, list[i])).join("");
+  } catch { el.querySelectorAll(".loading").forEach((x) => (x.textContent = "Daten konnten nicht geladen werden")); }
+}
+function openFavs() { document.getElementById("favPanel").hidden = false; renderFavs(); }
+function closeFavs() { document.getElementById("favPanel").hidden = true; }
+document.getElementById("favs").addEventListener("click", openFavs);
+document.getElementById("favClose").addEventListener("click", closeFavs);
+document.getElementById("favRain").addEventListener("click", () => { state.mode = "rain"; applyView(); renderFavs(); });
+document.getElementById("favSun").addEventListener("click", () => { state.mode = "sun"; applyView(); renderFavs(); });
+for (const [id, r] of [["fav24", "24h"], ["fav3d", "3d"]]) {
+  document.getElementById(id).addEventListener("click", () => {
+    favRange = r;
+    try { localStorage.setItem("rainy.favRange", r); } catch {}
+    renderFavs();
+  });
+}
+const favList = document.getElementById("favList");
+favList.addEventListener("click", (e) => {
+  const cardEl = e.target.closest(".fav");
+  if (!cardEl) return;
+  const favs = loadFavs(), f = favs[+cardEl.dataset.i];
+  if (e.target.closest(".fav-name")) { closeFavs(); goTo(f, f.name); }
+  else if (e.target.closest(".fav-del")) { favs.splice(+cardEl.dataset.i, 1); saveFavs(favs); renderFavs(); renderPlace(); }
+});
+// Scroll all strips together so the same hours line up.
+let syncing = false;
+favList.addEventListener("scroll", (e) => {
+  if (syncing || !e.target.classList || !e.target.classList.contains("hours")) return;
+  syncing = true;
+  favList.querySelectorAll(".hours").forEach((h) => { if (h !== e.target) h.scrollLeft = e.target.scrollLeft; });
+  requestAnimationFrame(() => (syncing = false));
+}, true);
+// Drag & drop reordering via the ≡ handle (works with touch and mouse).
+favList.addEventListener("pointerdown", (e) => {
+  const handle = e.target.closest(".drag");
+  if (!handle) return;
+  e.preventDefault();
+  const cardEl = handle.closest(".fav");
+  cardEl.classList.add("dragging");
+  // The card moves to the slot under the finger while dragging.
+  const move = (ev) => {
+    const others = [...favList.querySelectorAll(".fav")].filter((c) => c !== cardEl);
+    const before = others.find((o) => { const r = o.getBoundingClientRect(); return ev.clientY < r.top + r.height / 2; });
+    if (before) { if (cardEl.nextElementSibling !== before) favList.insertBefore(cardEl, before); }
+    else if (favList.lastElementChild !== cardEl) favList.appendChild(cardEl);
+  };
+  const up = () => {
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", up);
+    window.removeEventListener("pointercancel", up);
+    cardEl.classList.remove("dragging");
+    const favs = loadFavs(), order = [...favList.querySelectorAll(".fav")].map((c) => +c.dataset.i);
+    saveFavs(order.map((i) => favs[i]));
+    if (favData) favData.list = order.map((i) => favData.list[i]);
+    favDataKey = loadFavs().map((x) => `${x.lat},${x.lon}`).join(";");
+    renderFavs();
+  };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", up);
+  window.addEventListener("pointercancel", up);
+});
+
+// ---------- Search ----------
+const searchInput = document.getElementById("searchInput"), results = document.getElementById("results");
+let searchTimer = null, lastResults = [];
+function openSearch() {
+  document.getElementById("searchPanel").hidden = false;
+  searchInput.value = ""; results.innerHTML = "";
+  setTimeout(() => searchInput.focus(), 50);
+}
+function closeSearch() { document.getElementById("searchPanel").hidden = true; searchInput.blur(); }
+function renderResults() {
+  if (!lastResults.length) { results.innerHTML = searchInput.value.trim().length >= 2 ? '<li class="hint">Nichts gefunden</li>' : ""; return; }
+  results.innerHTML = lastResults.map((r, i) => {
+    const sub = [r.admin1, r.country].filter(Boolean).join(", ");
+    return `<li data-i="${i}"><button class="r-go">${esc(r.name)}<span class="r-sub">${esc(sub)}</span></button>` +
+      `<button class="star-btn${isFav({ lat: r.latitude, lon: r.longitude }) ? " on" : ""}" aria-label="Favorit">${STAR}</button></li>`;
+  }).join("");
+}
+searchInput.addEventListener("input", () => {
+  clearTimeout(searchTimer);
+  const q = searchInput.value.trim();
+  if (q.length < 2) { lastResults = []; renderResults(); return; }
+  searchTimer = setTimeout(async () => {
+    try {
+      const d = await getJSON(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(q)}&count=10&language=de&format=json`);
+      if (searchInput.value.trim() !== q) return;
+      lastResults = d.results || [];
+    } catch { lastResults = []; }
+    renderResults();
+  }, 300);
+});
+searchInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && lastResults[0]) results.querySelector(".r-go").click();
+  if (e.key === "Escape") closeSearch();
+});
+results.addEventListener("click", (e) => {
+  const li = e.target.closest("li[data-i]");
+  if (!li) return;
+  const r = lastResults[+li.dataset.i], loc = { lat: r.latitude, lon: r.longitude };
+  if (e.target.closest(".star-btn")) { toggleFav(loc, r.name); renderResults(); return; }
+  closeSearch();
+  goTo(loc, r.name);
+});
+document.getElementById("search").addEventListener("click", openSearch);
+document.getElementById("searchClose").addEventListener("click", closeSearch);
 
 // Reload everything: point data, radar and satellite frames, model grid.
 async function refreshAll() {
