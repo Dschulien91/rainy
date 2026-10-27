@@ -67,6 +67,11 @@
   .fab { position: absolute; right: 12px; bottom: calc(var(--sheet-h) + 12px); z-index: 1000;
     width: 44px; height: 44px; border-radius: 50%; border: 0; background: var(--bg); color: var(--fg);
     box-shadow: 0 2px 10px rgba(0,0,0,.2); font-size: 20px; cursor: pointer; }
+  .toast { position: absolute; left: 50%; top: calc(max(12px, env(safe-area-inset-top)) + 52px); z-index: 1100;
+    transform: translate(-50%, -8px); width: max-content; max-width: calc(100% - 32px); background: var(--fg); color: var(--bg);
+    font-size: 13px; font-weight: 600; line-height: 1.35; padding: 10px 14px; border-radius: 12px;
+    box-shadow: 0 4px 16px rgba(0,0,0,.25); opacity: 0; pointer-events: none; transition: opacity .25s, transform .25s; }
+  .toast.show { opacity: 1; transform: translate(-50%, 0); }
   .fab.spin { animation: spin 0.8s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
 
@@ -94,7 +99,6 @@
   .hours-tabs button.on { background: var(--fg); color: var(--bg); }
   .hours-tabs .chev { display: inline-block; font-size: 10px; }
   .hours-tabs button.on .chev { transform: rotate(180deg); }
-  .hour .ev { font-size: 11px; font-weight: 700; color: var(--sun); }
   .hours[hidden] { display: none; }
   .hours { display: flex; overflow-x: auto; scroll-snap-type: x mandatory; margin: 0 -16px; padding: 0 16px;
     scrollbar-width: none; flex: none; border-top: 1px solid var(--line); }
@@ -126,6 +130,7 @@
   </symbol>
 </svg>
 <div id="map"></div>
+<div class="toast" id="toast" role="status"></div>
 <div class="brand"><svg class="logo" id="brandLogo"><use href="#logo"/></svg><span id="brandName">rainy</span><span class="version" id="ver"></span></div>
 <button class="fab" id="refresh" title="Aktualisieren" aria-label="Aktualisieren" style="bottom:calc(var(--sheet-h) + 66px)">↻</button>
 <button class="fab" id="locate" title="Mein Standort" aria-label="Mein Standort">◎</button>
@@ -166,7 +171,7 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
 "use strict";
-const VERSION = "v0.17";
+const VERSION = "v0.18";
 const FALLBACK = { lat: 53.5511, lon: 9.9937, name: "Hamburg" };
 const DWD_WMS = "https://maps.dwd.de/geoserver/dwd/wms";
 const EUM_WMS = "https://view.eumetsat.int/geoserver/ows";
@@ -1043,9 +1048,6 @@ function weatherIcon(h) {
   return `<svg viewBox="0 0 24 24" aria-hidden="true">${body}</svg>`;
 }
 const WEEKDAYS = ["So", "Mo", "Di", "Mi", "Do", "Fr", "Sa"];
-const sunEventIcon = (rise) => '<svg viewBox="0 0 24 24" aria-hidden="true"><g fill="none" stroke="#F5A700" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
-  '<path d="M7 18a5 5 0 0 1 10 0"/><line x1="3" y1="18" x2="21" y2="18"/><line x1="4.5" y1="14" x2="6" y2="14.8"/><line x1="19.5" y1="14" x2="18" y2="14.8"/>' +
-  (rise ? '<path d="M12 10V4M9.5 6.5L12 4l2.5 2.5"/>' : '<path d="M12 4v6M9.5 7.5L12 10l2.5-2.5"/>') + "</g></svg>";
 // 4-hour blocks for the 3-day view: worst weather code, mean cloud cover and rain, mean temperature.
 function hourBlocks(list, size) {
   const out = [];
@@ -1059,18 +1061,11 @@ function hourBlocks(list, size) {
 function renderHours() {
   const el = document.getElementById("hours"), all = state.hours || [];
   if (!all.length) return;
-  const rain = state.mode === "rain", three = state.hoursRange === "3d", step = three ? 4 : 1;
-  let items = three ? hourBlocks(all, 4).slice(0, 18) : all.slice(0, 24);
-  const end = items[items.length - 1].ts + step * 3600e3, now = Date.now();
-  const events = (state.sunEvents || []).filter((e) => e.ts > now && e.ts < end).map((e) => ({ ts: e.ts, event: e.type }));
-  items = [...items, ...events].sort((x, y) => x.ts - y.ts);
+  const rain = state.mode === "rain", three = state.hoursRange === "3d";
+  const items = three ? hourBlocks(all, 4).slice(0, 18) : all.slice(0, 24);
   let lastDay = new Date(items[0].ts).getDay();
   el.innerHTML = items.map((h, i) => {
     const d = new Date(h.ts);
-    if (h.event) {
-      return `<button class="hour" data-ts="${h.ts}"><span>${fmtTime(h.ts)}</span>${sunEventIcon(h.event === "rise")}` +
-        `<span class="ev">${h.event === "rise" ? "Aufgang" : "Untergang"}</span><span class="bar" style="visibility:hidden"></span></button>`;
-    }
     const newDay = d.getDay() !== lastDay;
     lastDay = d.getDay();
     const label = i === 0 ? "Jetzt" : three ? `${WEEKDAYS[d.getDay()]} ${d.getHours()}h` : newDay ? `${WEEKDAYS[d.getDay()]} ${d.getHours()}h` : `${d.getHours()} Uhr`;
@@ -1081,6 +1076,14 @@ function renderHours() {
     return `<button class="hour" data-ts="${h.ts}"><span>${label}</span>${weatherIcon(h)}` +
       `<span class="tp">${Math.round(h.temp)}°</span><span class="bar">${bar}</span></button>`;
   }).join("");
+}
+// Short message over the map.
+function toast(text) {
+  const el = document.getElementById("toast");
+  el.textContent = text;
+  el.classList.add("show");
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => el.classList.remove("show"), 4000);
 }
 // Hourly strip: closed, "24h" (hourly) or "3d" (4-hour steps); tapping the open tab closes it. Remembered per device.
 function setHours(range) {
@@ -1112,7 +1115,12 @@ document.getElementById("hours").addEventListener("click", (e) => {
   const ts = +btn.dataset.ts;
   if (ts > cur().frames[cur().frames.length - 1].ts && state.range === "short") { state.range = "long"; applyView(); }
   const fr = cur().frames;
-  if (ts > fr[fr.length - 1].ts) return;
+  if (ts > fr[fr.length - 1].ts) {
+    const d = new Date(ts);
+    toast(`Die Karte reicht nur ${RANGE_HOURS.long} Stunden in die Zukunft. ` +
+      `Für ${WEEKDAYS[d.getDay()]} ${d.getHours()} Uhr gibt es nur die Vorhersage in der Leiste.`);
+    return;
+  }
   setIdx(Math.max(0, fr.findIndex((f) => f.ts >= ts)));
 });
 
