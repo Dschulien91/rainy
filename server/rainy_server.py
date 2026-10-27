@@ -34,7 +34,7 @@ import numpy as np
 from PIL import Image
 from pyproj import Transformer
 
-VERSION = "server-v0.2"
+VERSION = "server-v0.3"
 PORT = int(os.environ.get("PORT", "8771"))
 UA = "Mozilla/5.0"          # neutral, carries no identity
 HISTORY_MS = 60 * 60_000    # observed frames kept (1 h)
@@ -42,6 +42,22 @@ FC_STEPS = 24               # nowcast steps of 5 min (2 h)
 STEP_MS = 5 * 60_000
 POLL_S = 60
 NODATA = np.float32(-1.0)   # outside radar coverage
+# Self-hosted Open-Meteo. In production Caddy routes /om to it; locally this server proxies /om when it runs.
+OPENMETEO_URL = os.environ.get("OPENMETEO_URL", "http://127.0.0.1:8080")
+_om_state = {"at": 0.0, "ok": False}
+
+
+def openmeteo_available():
+    if os.environ.get("OPENMETEO") == "1":
+        return True
+    if time.time() - _om_state["at"] > 60:
+        try:
+            urllib.request.urlopen(f"{OPENMETEO_URL}/v1/forecast?latitude=0&longitude=0&hourly=temperature_2m&forecast_hours=1", timeout=3).read()
+            _om_state["ok"] = True
+        except Exception:
+            _om_state["ok"] = False
+        _om_state["at"] = time.time()
+    return _om_state["ok"]
 
 # ---------- palette (same stops as the app, log interpolation) ----------
 STOPS = [(0.1, (154, 208, 255, 0.55)), (0.5, (75, 163, 255, 0.75)), (2, (47, 107, 245, 0.85)),
@@ -327,9 +343,12 @@ class Handler(BaseHTTPRequestHandler):
         u = urlparse(self.path)
         q = {k: v[0] for k, v in parse_qs(u.query).items()}
         try:
+            if u.path.startswith("/om/"):  # local stand-in for the production /om route
+                with urllib.request.urlopen(f"{OPENMETEO_URL}{self.path[3:]}", timeout=60) as r:
+                    return self.send(r.status, r.read(), r.headers.get("Content-Type", "application/json"), 600)
             if u.path == "/api/health":
                 info = {name: {"frames": len(r.frames()[0]), "ref": r.ref} for name, r in REGIONS.items()}
-                body = {"version": VERSION, "regions": info, "openmeteo": os.environ.get("OPENMETEO") == "1"}
+                body = {"version": VERSION, "regions": info, "openmeteo": openmeteo_available()}
                 return self.send(200, json.dumps(body).encode(), "application/json", 10)
             region = REGIONS.get(q.get("region", "eu"))
             if u.path == "/api/radar/frames":
