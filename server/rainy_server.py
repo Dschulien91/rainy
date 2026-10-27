@@ -36,7 +36,7 @@ import numpy as np
 from PIL import Image
 from pyproj import Transformer
 
-VERSION = "server-v0.4"
+VERSION = "server-v0.5"
 PORT = int(os.environ.get("PORT", "8771"))
 UA = "Mozilla/5.0"          # neutral, carries no identity
 HISTORY_MS = 60 * 60_000    # observed frames kept (1 h)
@@ -215,7 +215,7 @@ class EuropeOpera(Region):
 
     def to_pixels(self, x, y):
         gx, gy = self.tr.transform(x, y)
-        return (np.asarray(gx) / self.CELL).astype(np.int32), (-np.asarray(gy) / self.CELL).astype(np.int32)
+        return np.asarray(gx) / self.CELL - 0.5, -np.asarray(gy) / self.CELL - 0.5  # fractional pixel centres
 
 
 class UsaNowcoast(Region):
@@ -264,8 +264,8 @@ class UsaNowcoast(Region):
 
     def to_pixels(self, x, y):
         x0, y0, x1, y1 = self.BBOX
-        col = ((np.asarray(x) - x0) / (x1 - x0) * self.NX).astype(np.int32)
-        row = ((y1 - np.asarray(y)) / (y1 - y0) * self.NY).astype(np.int32)
+        col = (np.asarray(x) - x0) / (x1 - x0) * self.NX - 0.5
+        row = (y1 - np.asarray(y)) / (y1 - y0) * self.NY - 0.5
         return col, row
 
 
@@ -294,10 +294,9 @@ def render(region, grid, bbox, w, h):
     ys = maxy - (np.arange(h) + 0.5) / h * (maxy - miny)
     X, Y = np.meshgrid(xs, ys)
     col, row = region.to_pixels(X, Y)
-    ny, nx = grid.shape
-    inside = (col >= 0) & (col < nx) & (row >= 0) & (row < ny)
-    rate = np.zeros((h, w), np.float32)
-    rate[inside] = grid[row[inside], col[inside]]
+    # bilinear interpolation between radar pixels: smooth edges instead of blocks
+    rate = cv2.remap(np.where(grid < 0, 0, grid).astype(np.float32), col.astype(np.float32), row.astype(np.float32),
+                     cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
     buf = io.BytesIO()
     Image.fromarray(colorize(np.where(rate < 0, 0, rate)), "RGBA").save(buf, "PNG", compress_level=3)
     return buf.getvalue()
@@ -306,7 +305,7 @@ def render(region, grid, bbox, w, h):
 def point_series(lat, lon):
     x, y = ll_to_3857.transform(lon, lat)
     for region in REGIONS.values():
-        col, row = (int(v) for v in region.to_pixels(x, y))
+        col, row = (int(round(float(v))) for v in region.to_pixels(x, y))
         frames, ref = region.frames()
         if not frames:
             continue

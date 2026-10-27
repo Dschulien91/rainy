@@ -49,7 +49,8 @@
   #map { position: absolute; inset: 0 0 var(--sheet-h) 0; }
   .leaflet-container { background: var(--night); }
   .grid-overlay { filter: blur(14px); }
-  .radar-frame, .eu-frame { transition: opacity 0.4s ease; filter: blur(2.5px); }
+  .radar-frame { transition: opacity 0.4s ease; filter: blur(2.5px); }
+  .eu-frame, .srvus-frame { transition: opacity 0.4s ease; filter: blur(1px); } /* already interpolated by the server */
   .sat-frame { transition: opacity 0.4s ease; filter: blur(3px); }
   /* dark map: lighten instead of covering, so sun tint reads as warm light and not olive */
   .place button { border: 0; background: var(--night); color: var(--fg); border-radius: 999px;
@@ -226,6 +227,7 @@
       <button id="modeRain" class="on" role="tab"><svg class="ico"><use href="#logo"/></svg>rainy</button>
       <button id="modeSun" role="tab"><svg class="ico sun"><use href="#sunIcon"/></svg>sunny</button>
     </div>
+    <div class="toggle" aria-label="Zeitraum der Karte"><button class="on" tabindex="-1" style="cursor:default">2 h</button></div>
   </div>
   <div class="chart-row">
     <button class="play" id="play" aria-label="Abspielen">▶</button>
@@ -247,7 +249,7 @@
 <script src="https://unpkg.com/@maplibre/maplibre-gl-leaflet@0.0.22/leaflet-maplibre-gl.js"></script>
 <script>
 "use strict";
-const VERSION = "v0.32";
+const VERSION = "v0.33";
 const FALLBACK = { lat: 53.5511, lon: 9.9937, name: "Hamburg" };
 const DWD_WMS = "https://maps.dwd.de/geoserver/dwd/wms";
 const EUM_WMS = "https://view.eumetsat.int/geoserver/ows";
@@ -1151,18 +1153,18 @@ function buildViews() {
   const modelRain = (ts) => Math.max(0, interp(p.t, p.precip, ts) * 4); // mm per 15 min -> mm/h
   const radarEnd = R.length ? R[R.length - 1].ts : -Infinity;
   const steps = (hours) => Array.from({ length: 4 + hours * 4 + 1 }, (_, i) => start + i * STEP);
-  const finish = (frames) => {
-    const nowIdx = Math.max(0, frames.findLastIndex((f) => f.ts <= now));
+  // timelines start at "now" (the newest observation) and run 2 h ahead
+  const finish = (all) => {
+    const frames = all.slice(Math.max(0, all.findLastIndex((f) => f.ts <= now)));
     const split = frames.findIndex((f, i) => i > 0 && f.map.kind !== frames[i - 1].map.kind);
-    return { frames, nowIdx, idx: nowIdx, split };
+    return { frames, nowIdx: 0, idx: 0, split };
   };
   const old = { ...state.views };
 
   // rain, 2 h: 5-minute radar frames (or the model outside radar coverage)
-  const short = R.map((r) => ({ ts: r.ts, value: r.mmh, temp: temp(r.ts), map: { kind: state.radarSource, ts: r.ts, ref: r.ref } }));
-  for (const ts of steps(2)) { // continue with the model where the radar (or its nowcast) ends
-    if (ts > (R.length ? Math.max(R[R.length - 1].ts, now) : -Infinity)) short.push({ ts, value: modelRain(ts), temp: temp(ts), map: { kind: "model" } });
-  }
+  // radar where available (never mixed with the model); the model only where there is no radar at all
+  const short = R.length ? R.map((r) => ({ ts: r.ts, value: r.mmh, temp: temp(r.ts), map: { kind: state.radarSource, ts: r.ts, ref: r.ref } }))
+    : steps(2).map((ts) => ({ ts, value: modelRain(ts), temp: temp(ts), map: { kind: "model" } }));
   state.views["rain-short"] = finish(short);
 
   // sun: satellite up to now, model forecast afterwards
