@@ -1,5 +1,7 @@
 numpy
+scipy
 h5py
 pyproj
 pillow
 opencv-python-headless
+pysteps

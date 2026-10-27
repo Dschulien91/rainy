@@ -10,6 +10,10 @@ Nowcast: dense optical flow (OpenCV Farneback) between two frames ~30 min apart,
 extrapolation in 5 min steps with smoothing that grows with lead time (small cells are not predictable for
 long, as in S-PROG/pySTEPS). Chosen by backtests (server/tune_nowcast.py): +10-25 % CSI at 60-120 min vs. the
 first version, and better than persistence over the full 2 h in Europe and the USA.
+Second hour: the radar nowcast is blended with the precipitation forecast of the best national weather model
+for each place (self-hosted Open-Meteo "best match": ICON-D2, AROME, HARMONIE, UKV, HRRR, ...), because the radar
+cannot see showers that have not formed yet. Every model snapshot is logged (model_log/) so that the blend
+weights can be verified fairly later (only model runs that were available at the forecast time).
 
 Endpoints (all CORS-enabled, cache headers suitable for a CDN):
   GET /api/health
@@ -28,6 +32,7 @@ import os
 import re
 import threading
 import time
+import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -39,7 +44,7 @@ import numpy as np
 from PIL import Image
 from pyproj import Transformer
 
-VERSION = "server-v0.6"
+VERSION = "server-v0.7"
 PORT = int(os.environ.get("PORT", "8771"))
 UA = "Mozilla/5.0"          # neutral, carries no identity
 HISTORY_MS = 60 * 60_000    # observed frames kept (1 h)
@@ -135,16 +140,165 @@ def nowcast(prev, last, dt_ms, steps, smooth=1.0, down=2):
     return out
 
 
+# ---------- weather model rain for the second hour ----------
+MODEL_REFRESH_S = 15 * 60
+MODEL_MAX_AGE_MS = 3 * 3600_000
+MODEL_LOG_DIR = os.environ.get("MODEL_LOG_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "model_log"))
+MODEL_LOG_KEEP_S = 48 * 3600
+# radar weight: radar only for the first hour, then fading to an even mix at 2 h (to be tuned with the logs)
+BLEND_START_MIN, BLEND_END_MIN, BLEND_END_W = 60, 120, 0.5
+
+
+def radar_weight(lead_min):
+    if lead_min <= BLEND_START_MIN:
+        return 1.0
+    f = min(1.0, (lead_min - BLEND_START_MIN) / (BLEND_END_MIN - BLEND_START_MIN))
+    return 1.0 - f * (1.0 - BLEND_END_W)
+
+
+class ModelRain:
+    """Precipitation forecast (15 min steps) of the best national model per place, on a coarse lat/lon grid over a
+    radar region, from the self-hosted Open-Meteo. Only grid points inside the radar coverage are requested."""
+    BATCH = 2000
+    MAP_DOWN = 8  # model -> radar resampling is computed on a coarser grid and scaled up (the model is smooth)
+
+    def __init__(self, region):
+        self.region, self.deg = region, region.MODEL_DEG
+        self.lock = threading.Lock()
+        self.times = self.rate = None   # times: (T,) ms at the middle of each 15 min interval; rate: (T, nlat, nlon) mm/h
+        self.issued = 0
+        self.points = self.lats = self.lons = self.maps = None
+
+    def _setup(self, g):
+        ny, nx = g.shape
+        # bounding box of the radar grid in lat/lon, from its edges
+        e = np.linspace(0, 1, 200)
+        cols = np.concatenate([e * nx, e * nx, np.zeros(200), np.full(200, nx)])
+        rows = np.concatenate([np.zeros(200), np.full(200, ny), e * ny, e * ny])
+        lon, lat = self.region.pixel_lonlat(cols, rows)
+        d = self.deg
+        self.lats = np.arange(math.floor(lat.min() / d) * d, lat.max() + d, d)
+        self.lons = np.arange(math.floor(lon.min() / d) * d, lon.max() + d, d)
+        la, lo = np.meshgrid(self.lats, self.lons, indexing="ij")
+        x, y = ll_to_3857.transform(lo.ravel(), np.clip(la.ravel(), -85, 85))
+        col, row = (np.round(v).astype(np.int64) for v in self.region.to_pixels(x, y))
+        ok = (col >= 0) & (col < nx) & (row >= 0) & (row < ny)
+        ok[ok] = g[row[ok], col[ok]] >= 0
+        self.points = np.flatnonzero(ok)
+        # where each (reduced) radar pixel lies in the model grid
+        sy, sx = ny // self.MAP_DOWN, nx // self.MAP_DOWN
+        rc, rr = np.meshgrid((np.arange(sx) + 0.5) * nx / sx - 0.5, (np.arange(sy) + 0.5) * ny / sy - 0.5)
+        lon, lat = self.region.pixel_lonlat(rc.ravel(), rr.ravel())
+        self.maps = (((lon - self.lons[0]) / d).reshape(sy, sx).astype(np.float32),
+                     ((lat - self.lats[0]) / d).reshape(sy, sx).astype(np.float32))
+
+    def refresh(self):
+        g = self.region.latest()
+        if g is None:
+            return 0
+        if self.points is None:
+            self._setup(g)
+        la, lo = np.meshgrid(self.lats, self.lons, indexing="ij")
+        la, lo = la.ravel()[self.points], lo.ravel()[self.points]
+        vals, times = None, None
+        for i in range(0, len(self.points), self.BATCH):
+            body = urllib.parse.urlencode({
+                "latitude": ",".join(f"{v:.3f}" for v in la[i:i + self.BATCH]),
+                "longitude": ",".join(f"{v:.3f}" for v in lo[i:i + self.BATCH]),
+                "minutely_15": "precipitation", "past_minutely_15": "1", "forecast_minutely_15": "14",
+                "timeformat": "unixtime"}).encode()
+            req = urllib.request.Request(f"{OPENMETEO_URL}/v1/forecast", data=body,
+                                         headers={"Content-Type": "application/x-www-form-urlencoded"})
+            with urllib.request.urlopen(req, timeout=600) as r:
+                d = json.loads(r.read())
+            d = d if isinstance(d, list) else [d]
+            if times is None:
+                times = np.array(d[0]["minutely_15"]["time"], np.int64) * 1000 - 450_000  # value = sum of the previous 15 min
+                vals = np.zeros((len(times), len(self.points)), np.float32)
+            for j, e in enumerate(d):
+                vals[:, i + j] = [v or 0.0 for v in e["minutely_15"]["precipitation"]]
+        rate = np.zeros((len(times), len(self.lats) * len(self.lons)), np.float32)
+        rate[:, self.points] = vals * 4.0  # mm per 15 min -> mm/h
+        rate = rate.reshape(len(times), len(self.lats), len(self.lons))
+        issued = int(time.time() * 1000)
+        with self.lock:
+            self.times, self.rate, self.issued = times, rate, issued
+        self._log(issued, times, rate)
+        return len(self.points)
+
+    def _log(self, issued, times, rate):
+        try:
+            os.makedirs(MODEL_LOG_DIR, exist_ok=True)
+            np.savez_compressed(os.path.join(MODEL_LOG_DIR, f"{self.region.name}_{issued}.npz"), times=times,
+                                rate=rate.astype(np.float16), lat0=self.lats[0], lon0=self.lons[0], deg=self.deg)
+            for f in os.listdir(MODEL_LOG_DIR):
+                fp = os.path.join(MODEL_LOG_DIR, f)
+                if time.time() - os.path.getmtime(fp) > MODEL_LOG_KEEP_S:
+                    os.remove(fp)
+        except OSError as e:
+            print(f"model log failed: {e}", flush=True)
+
+    def field(self, ts, shape, times=None, rate=None):
+        """Model rain rate at time ts on the radar grid (default: the latest model data), or None."""
+        if rate is None:
+            with self.lock:
+                times, rate = self.times, self.rate
+        if rate is None or not times[0] <= ts <= times[-1]:
+            return None
+        k = min(int(np.searchsorted(times, ts, side="right")) - 1, len(times) - 2)
+        f = (ts - times[k]) / (times[k + 1] - times[k])
+        m = ((1 - f) * rate[k] + f * rate[k + 1]).astype(np.float32)
+        small = cv2.remap(m, self.maps[0], self.maps[1], cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        return cv2.resize(small, (shape[1], shape[0]), interpolation=cv2.INTER_LINEAR)
+
+    def blend(self, fc, ref, times=None, rate=None, weight=radar_weight):
+        """Mix the radar nowcast with the model rain, more so the longer the lead time."""
+        if rate is None:
+            with self.lock:
+                times, rate, issued = self.times, self.rate, self.issued
+            if rate is None or ref - issued > MODEL_MAX_AGE_MS:
+                return fc
+        for i, g in enumerate(fc):
+            w = weight((i + 1) * STEP_MS / 60_000)
+            if w >= 1:
+                continue
+            m = self.field(ref + (i + 1) * STEP_MS, g.shape, times, rate)
+            if m is None:
+                continue
+            cov = g >= 0
+            g[cov] = w * g[cov] + (1 - w) * m[cov]
+        return fc
+
+
+def model_loop(model):
+    while True:
+        started = time.time()
+        try:
+            if openmeteo_available():
+                n = model.refresh()
+                if n:
+                    print(f"[{datetime.now():%H:%M:%S}] {model.region.name}: model rain for {n} points, {time.time() - started:.0f}s", flush=True)
+        except Exception as e:
+            print(f"{model.region.name} model update failed: {e}", flush=True)
+        time.sleep(max(60, MODEL_REFRESH_S - (time.time() - started)) if model.rate is not None else 60)
+
+
 # ---------- regions ----------
 class Region:
     name = ""
     credit = ""
     SMOOTH = 1.0      # nowcast smoothing in grid pixels (tuned at ~2-3 km)
     FLOW_DOWN = 2     # optical flow is computed at grid resolution / FLOW_DOWN
+    MODEL_DEG = None  # lat/lon spacing of the weather model rain used for blending (None: no blending)
 
     def __init__(self):
         self.lock = threading.Lock()
         self.obs, self.fc, self.ref = {}, {}, None
+        self.model = None
+
+    def latest(self):
+        with self.lock:
+            return self.obs[max(self.obs)] if self.obs else None
 
     # subclasses: list_times() -> {ts: source}, load(source) -> grid, to_pixels(x3857, y3857) -> (col, row)
     def frames(self):
@@ -177,6 +331,8 @@ class Region:
         if prev_t == last_t:
             return len(new)
         fc = nowcast(prev.astype(np.float32), last.astype(np.float32), last_t - prev_t, FC_STEPS, self.SMOOTH, self.FLOW_DOWN)
+        if self.model:
+            fc = self.model.blend(fc, last_t)
         with self.lock:
             self.fc = {last_t + (i + 1) * STEP_MS: g.astype(np.float16) for i, g in enumerate(fc)}
             self.ref = last_t
@@ -189,10 +345,15 @@ class EuropeOpera(Region):
     LAEA = "+proj=laea +lat_0=55.0 +lon_0=10.0 +x_0=1950000.0 +y_0=-2100000.0 +units=m +ellps=WGS84"
     CELL, NY, NX = 1000.0, 4400, 3800   # full 1 km resolution
     SMOOTH, FLOW_DOWN = 2.0, 4          # same physical scales as the backtested 2 km setup
+    MODEL_DEG = 0.15
 
     def __init__(self):
         super().__init__()
         self.tr = Transformer.from_crs("EPSG:3857", self.LAEA, always_xy=True)
+        self.to_ll = Transformer.from_crs(self.LAEA, "EPSG:4326", always_xy=True)
+
+    def pixel_lonlat(self, col, row):
+        return self.to_ll.transform((np.asarray(col) + 0.5) * self.CELL, -(np.asarray(row) + 0.5) * self.CELL)
 
     def list_times(self):
         now = datetime.now(timezone.utc)
@@ -227,6 +388,7 @@ class UsaNowcoast(Region):
     WMS = "https://nowcoast.noaa.gov/geoserver/observations/weather_radar/ows"
     BBOX = (-14000000.0, 2700000.0, -7400000.0, 6500000.0)  # CONUS in EPSG:3857
     NX, NY = 2200, 1267
+    MODEL_DEG = 0.2
     RAMP = [(6, "599494"), (8, "3bb1b1"), (9, "1dcece"), (10, "00ecec"), (11, "00d9ee"), (13, "00c6f1"), (14, "00b3f3"),
             (15, "01a0f6"), (16, "0078f6"), (18, "0050f6"), (19, "0028f6"), (20, "0000f6"), (21, "003fb8"), (23, "007f7b"),
             (24, "00bf3d"), (25, "00ff00"), (26, "00f100"), (28, "00e300"), (29, "00d500"), (30, "00c800"), (31, "00ba00"),
@@ -271,6 +433,12 @@ class UsaNowcoast(Region):
         col = (np.asarray(x) - x0) / (x1 - x0) * self.NX - 0.5
         row = (y1 - np.asarray(y)) / (y1 - y0) * self.NY - 0.5
         return col, row
+
+    def pixel_lonlat(self, col, row):
+        x0, y0, x1, y1 = self.BBOX
+        x = x0 + (np.asarray(col) + 0.5) / self.NX * (x1 - x0)
+        y = y1 - (np.asarray(row) + 0.5) / self.NY * (y1 - y0)
+        return ll_to_3857.transform(x, y, direction="INVERSE")
 
 
 class SatelliteRain(Region):
@@ -317,8 +485,8 @@ class SatelliteRain(Region):
         return (np.asarray(x) - x0) / (x1 - x0) * self.NX - 0.5, (y1 - np.asarray(y)) / (y1 - y0) * self.NY - 0.5
 
 
-REGIONS = {r.name: r for r in (EuropeOpera(), UsaNowcoast(), SatelliteRain())}
 ll_to_3857 = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
+REGIONS = {r.name: r for r in (EuropeOpera(), UsaNowcoast(), SatelliteRain())}
 
 
 def update_loop(region):
@@ -473,5 +641,8 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     for r in REGIONS.values():
         threading.Thread(target=update_loop, args=(r,), daemon=True).start()
+        if r.MODEL_DEG:
+            r.model = ModelRain(r)
+            threading.Thread(target=model_loop, args=(r.model,), daemon=True).start()
     print(f"rainy {VERSION} on http://0.0.0.0:{PORT}", flush=True)
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()

@@ -3,6 +3,7 @@
 volumes:
   open-meteo-data:
   caddy-data:
+  model-log:
 
 services:
   api:
@@ -11,6 +12,10 @@ services:
     environment:
       PORT: "8771"
       OPENMETEO: "1"            # tells the app to use /om instead of the public Open-Meteo API
+      OPENMETEO_URL: http://openmeteo:8080   # model rain for blending the second hour of the nowcast
+      MODEL_LOG_DIR: /app/model_log
+    volumes:
+      - model-log:/app/model_log           # model snapshots for verify_blend.py
 
   openmeteo:
     image: ghcr.io/open-meteo/open-meteo
