@@ -250,7 +250,7 @@
 <script src="https://unpkg.com/@maplibre/maplibre-gl-leaflet@0.0.22/leaflet-maplibre-gl.js"></script>
 <script>
 "use strict";
-const VERSION = "v0.34";
+const VERSION = "v0.35";
 const FALLBACK = { lat: 53.5511, lon: 9.9937, name: "Hamburg" };
 const DWD_WMS = "https://maps.dwd.de/geoserver/dwd/wms";
 const EUM_WMS = "https://view.eumetsat.int/geoserver/ows";
@@ -357,7 +357,11 @@ const imgFrames = new Map();
 // ---------- Map ----------
 const dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
 document.body.classList.toggle("dark", dark);
-const map = L.map("map", { zoomControl: false, attributionControl: false, fadeAnimation: false })
+// Zoom out at most to about "all of Europe on a phone screen"; no repeated copies of the world.
+const map = L.map("map", {
+  zoomControl: false, attributionControl: false, fadeAnimation: false,
+  minZoom: 3, maxZoom: 13, maxBounds: [[-85, -200], [85, 200]], maxBoundsViscosity: 1,
+})
   .setView([FALLBACK.lat, FALLBACK.lon], 10);
 map.createPane("weather").style.zIndex = 350;
 map.createPane("labels").style.zIndex = 450;
