@@ -243,7 +243,7 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
 "use strict";
-const VERSION = "v0.23";
+const VERSION = "v0.24";
 const FALLBACK = { lat: 53.5511, lon: 9.9937, name: "Hamburg" };
 const DWD_WMS = "https://maps.dwd.de/geoserver/dwd/wms";
 const EUM_WMS = "https://view.eumetsat.int/geoserver/ows";
@@ -965,12 +965,14 @@ function drawChart() {
     ctx.fillStyle = col("--night");
     frames.forEach((f, i) => { if (!f.isDay) ctx.fillRect(i * bw, top, bw + 0.5, plotH); });
   }
-  // Rain intensity guides: light 0.5, moderate 2, heavy 8 mm/h (evenly spaced on the sqrt scale)
+  // Guides: rain light 0.5 / moderate 2 / heavy 8 mm/h (evenly spaced on the sqrt scale);
+  // sun share (clear-sky share), evenly spaced like the rain guides: wolkig 1/3, heiter 2/3, sonnig = clear.
   const guideLabels = [];
-  if (rain) {
+  {
     ctx.lineWidth = 1;
-    for (const [mmh, label] of [[0.5, "leicht"], [2, "mittel"], [8, "stark"]]) {
-      const gy = Math.round(top + plotH - Math.sqrt(mmh / 8) * plotH) + 0.5;
+    const guides = rain ? [[0.5, "leicht"], [2, "mittel"], [8, "stark"]] : [[1 / 3, "wolkig"], [2 / 3, "heiter"], [1, "sonnig"]];
+    for (const [v, label] of guides) {
+      const gy = Math.round(top + plotH - (rain ? Math.sqrt(v / 8) : v) * plotH) + 0.5;
       ctx.strokeStyle = col("--line"); ctx.setLineDash([2, 3]);
       ctx.beginPath(); ctx.moveTo(0, gy); ctx.lineTo(W, gy); ctx.stroke();
       ctx.setLineDash([]);
@@ -1031,7 +1033,7 @@ function drawChart() {
     const iMax = frames.reduce((a, f, i) => (f.temp > frames[a].temp ? i : a), 0);
     const iMin = frames.reduce((a, f, i) => (f.temp < frames[a].temp ? i : a), 0);
     for (const i of new Set([iMax, iMin])) {
-      const lx = clamp(x(i), rain ? 48 : 14, W - 14); // keep clear of the guide labels
+      const lx = clamp(x(i), 48, W - 14); // keep clear of the guide labels
       ctx.fillText(Math.round(frames[i].temp) + "°", lx, i === iMax ? ty(frames[i].temp) - 5 : ty(frames[i].temp) + 13);
     }
   }
@@ -1039,10 +1041,11 @@ function drawChart() {
   // Guide labels on top, with a backdrop for legibility
   ctx.font = "10px system-ui, sans-serif"; ctx.textAlign = "left";
   for (const [label, gy] of guideLabels) {
+    const ly = gy + 1; // labels sit just below their line, clear of the time bubble and of each other
     ctx.fillStyle = col("--bg");
-    ctx.fillRect(0, gy - 11, ctx.measureText(label).width + 6, 11);
+    ctx.fillRect(0, ly, ctx.measureText(label).width + 6, 11);
     ctx.fillStyle = col("--muted");
-    ctx.fillText(label, 3, gy - 2);
+    ctx.fillText(label, 3, ly + 9);
   }
 
   // Time axis
