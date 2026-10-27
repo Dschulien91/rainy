@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="referrer" content="no-referrer">
 <title>rainy</title>
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -243,7 +244,7 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
 "use strict";
-const VERSION = "v0.25";
+const VERSION = "v0.26";
 const FALLBACK = { lat: 53.5511, lon: 9.9937, name: "Hamburg" };
 const DWD_WMS = "https://maps.dwd.de/geoserver/dwd/wms";
 const EUM_WMS = "https://view.eumetsat.int/geoserver/ows";
@@ -370,9 +371,9 @@ function makeView(pad = 0.5) {
     h: clamp(Math.round((nw.y - se.y) * k * 1.2), 32, 900),
   };
 }
-const wmsUrl = (base, layer, view, ts) => `${base}?service=WMS&version=1.1.1&request=GetMap&layers=${layer}&styles=` +
+const wmsUrl = (base, layer, view, ts, ref) => `${base}?service=WMS&version=1.1.1&request=GetMap&layers=${layer}&styles=` +
   `&format=image/png&transparent=true&srs=EPSG:3857&width=${view.w}&height=${view.h}` +
-  `&bbox=${view.bbox}&time=${new Date(ts).toISOString()}`;
+  `&bbox=${view.bbox}&time=${new Date(ts).toISOString()}` + (ref ? `&DIM_REFERENCE_TIME=${new Date(ref).toISOString()}` : "");
 function canvasFor(view, img) {
   const c = document.createElement("canvas");
   c.width = view.w; c.height = view.h;
@@ -383,8 +384,8 @@ function canvasFor(view, img) {
 
 const RENDER = {
   // DWD radar composite, repainted in the rainy palette.
-  async radar(view, ts) {
-    const img = await loadImage(wmsUrl(DWD_WMS, "dwd:Niederschlagsradar", view, ts));
+  async radar(view, ts, ref) {
+    const img = await loadImage(wmsUrl(DWD_WMS, "dwd:Niederschlagsradar", view, ts, ref));
     const [c, ctx] = canvasFor(view, img);
     const data = ctx.getImageData(0, 0, view.w, view.h), px = data.data;
     for (let i = 0; i < px.length; i += 4) {
@@ -425,9 +426,10 @@ const RENDER = {
   },
 };
 
-function imgFrame(kind, ts) {
-  const key = `${kind}:${ts}`;
-  if (!imgFrames.has(key)) imgFrames.set(key, { key, kind, ts, overlay: null, viewId: 0, pending: null, pendingView: 0 });
+const frameKey = (kind, ts, ref) => `${kind}:${ts}` + (ref ? `@${ref}` : "");
+function imgFrame(kind, ts, ref) {
+  const key = frameKey(kind, ts, ref);
+  if (!imgFrames.has(key)) imgFrames.set(key, { key, kind, ts, ref, overlay: null, viewId: 0, pending: null, pendingView: 0 });
   return imgFrames.get(key);
 }
 const frameReady = (f) => !!imgView && f.viewId === imgView.id;
@@ -437,7 +439,7 @@ function loadImgFrame(f) {
   if (f.viewId === view.id) return Promise.resolve();
   if (f.pending && f.pendingView === view.id) return f.pending;
   f.pendingView = view.id;
-  f.pending = RENDER[f.kind](view, f.ts).then((res) => {
+  f.pending = RENDER[f.kind](view, f.ts, f.ref).then((res) => {
     if (f.pendingView !== view.id) return;
     const url = res.canvas.toDataURL();
     if (!f.overlay) {
@@ -458,8 +460,8 @@ function setVisibleFrame(f) {
   if (visibleFrame && visibleFrame !== f && visibleFrame.overlay) visibleFrame.overlay.setOpacity(0);
   visibleFrame = f;
 }
-function showImg(kind, ts) {
-  const f = imgFrame(kind, ts);
+function showImg(kind, ts, ref) {
+  const f = imgFrame(kind, ts, ref);
   shownKey = f.key;
   setVisibleFrame(f); // shows an older image of this frame right away if there is one
   loadImgFrame(f);
@@ -478,7 +480,7 @@ function preloadFrames() {
   const token = ++preloadToken;
   const s = cur();
   const order = [...s.frames.slice(s.idx), ...s.frames.slice(0, s.idx).reverse()]
-    .filter((f) => f.map.kind === "radar" || f.map.kind === "sat").map((f) => imgFrame(f.map.kind, f.map.ts));
+    .filter((f) => f.map.kind === "radar" || f.map.kind === "sat").map((f) => imgFrame(f.map.kind, f.map.ts, f.map.ref));
   let active = 0;
   const next = () => {
     if (token !== preloadToken) return;
@@ -773,22 +775,26 @@ function getPosition() {
       () => resolve(null), { timeout: 6000, maximumAge: 300000 });
   });
 }
+// Place name via Photon (OpenStreetMap data, no API key or app identification needed).
 async function reverseGeocode(loc, detail = false) {
   try {
-    const d = await getJSON(`https://nominatim.openstreetmap.org/reverse?lat=${loc.lat}&lon=${loc.lon}` +
-      `&zoom=${detail ? 14 : 10}&format=jsonv2&accept-language=de`);
-    const a = d.address || {};
-    const city = a.city || a.town || a.village || a.municipality;
-    const part = detail && (a.suburb || a.city_district || a.quarter || a.neighbourhood);
-    const name = part && city && part !== city ? `${part}, ${city}` : city || part || d.name || "Unbekannter Ort";
-    return { name, bbox: d.boundingbox };
-  } catch { return { name: "Ausgewählter Ort", bbox: null }; }
+    const d = await getJSON(`https://photon.komoot.io/reverse?lat=${loc.lat}&lon=${loc.lon}&lang=de`);
+    const a = (d.features && d.features[0] && d.features[0].properties) || {};
+    const city = a.city || a.town || a.village || a.county || a.state;
+    const part = detail && (a.district || a.locality);
+    const name = part && city && part !== city ? `${part}, ${city}` : city || part || a.name || "Unbekannter Ort";
+    return { name, city, country: a.countrycode };
+  } catch { return { name: "Ausgewählter Ort" }; }
 }
-// Zoom so roughly the whole city is visible, but never wider than zoom 10 or closer than 13.
-function cityZoom(bbox) {
-  if (!bbox) return 11;
-  const b = L.latLngBounds([+bbox[0], +bbox[2]], [+bbox[1], +bbox[3]]);
-  return clamp(map.getBoundsZoom(b), 10, 13);
+// Zoom so roughly the whole city is visible: bigger cities get a wider view (zoom 10..13 by population).
+async function cityZoom(place) {
+  if (!place || !place.city) return 11;
+  try {
+    const d = await getJSON(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(place.city)}` +
+      `&count=1&language=de&format=json` + (place.country ? `&countryCode=${place.country}` : ""));
+    const pop = (d.results && d.results[0] && d.results[0].population) || 0;
+    return pop > 1e6 ? 10 : pop > 2e5 ? 11 : pop > 3e4 ? 12 : 13;
+  } catch { return 11; }
 }
 
 // ---------- Data ----------
@@ -822,7 +828,9 @@ async function loadRadarPoint(loc) {
     state.radarPoint = (d.radar || []).map((r) => {
       const g = r.precipitation_5;
       const center = g[Math.floor(g.length / 2)][Math.floor(g[0].length / 2)];
-      return { ts: Date.parse(r.timestamp), mmh: (center / 100) * 12 }; // 0.01 mm per 5 min -> mm/h
+      // source = "RADARCOMP::RV::<run time>": the DWD run this frame belongs to (analysis frames: their own time)
+      const run = Date.parse(String(r.source || "").split("::")[2]);
+      return { ts: Date.parse(r.timestamp), mmh: (center / 100) * 12, ref: isNaN(run) ? null : run }; // 0.01 mm / 5 min -> mm/h
     });
   } catch { state.radarPoint = []; } // outside Germany: no radar
 }
@@ -856,7 +864,7 @@ function buildViews() {
 
   // rain, 2 h: 5-minute radar frames (or the model outside radar coverage)
   state.views["rain-short"] = finish(R.length
-    ? R.map((r) => ({ ts: r.ts, value: r.mmh, temp: temp(r.ts), map: { kind: "radar", ts: r.ts } }))
+    ? R.map((r) => ({ ts: r.ts, value: r.mmh, temp: temp(r.ts), map: { kind: "radar", ts: r.ts, ref: r.ref } }))
     : steps(2).map((ts) => ({ ts, value: modelRain(ts), temp: temp(ts), map: { kind: "model" } })));
 
   // rain, 14 h: 15-minute steps; radar (averaged) while it lasts, then the model
@@ -864,7 +872,7 @@ function buildViews() {
     if (ts <= radarEnd) {
       const inStep = R.filter((r) => r.ts >= ts && r.ts < ts + STEP);
       const v = inStep.length ? inStep.reduce((a, r) => a + r.mmh, 0) / inStep.length : 0;
-      return { ts, value: v, temp: temp(ts), map: { kind: "radar", ts: inStep.length ? inStep[0].ts : ts } };
+      return { ts, value: v, temp: temp(ts), map: { kind: "radar", ts: inStep.length ? inStep[0].ts : ts, ref: inStep.length ? inStep[0].ref : null } };
     }
     return { ts, value: modelRain(ts), temp: temp(ts), map: { kind: "model" } };
   }));
@@ -901,7 +909,7 @@ function renderFrame() {
   const k = f.map.kind;
   if (k === "model") { hideImg(); hideNowcast(); showGrid(f.ts, state.mode === "rain" ? "rain" : "cloud"); }
   else if (k === "nowcast") { hideImg(); showNowcast(f); showGrid(f.ts, "cloud", 1 - f.map.w); }
-  else { hideGrid(); hideNowcast(); showImg(k, f.map.ts); }
+  else { hideGrid(); hideNowcast(); showImg(k, f.map.ts, f.map.ref); }
   updateSource();
   drawChart();
 }
@@ -915,7 +923,7 @@ function updateSource() {
       (f.map.w < 0.5 ? " + Modell" : "")
     : state.mode === "rain" ? "Modellvorhersage, ungenauer" : "Wolken-Vorhersage (Modell)";
   const img = s.frames.filter((x) => x.map.kind === "radar" || x.map.kind === "sat");
-  const keys = [...new Set(img.map((x) => `${x.map.kind}:${x.map.ts}`))];
+  const keys = [...new Set(img.map((x) => frameKey(x.map.kind, x.map.ts, x.map.ref)))];
   const ready = keys.filter((k) => imgFrames.has(k) && frameReady(imgFrames.get(k))).length;
   if (ready < keys.length) text += ` · lade ${ready}/${keys.length}`;
   document.getElementById("source").textContent = text;
@@ -1261,7 +1269,7 @@ function play() {
     if (s.idx >= s.frames.length - 1) { stop(); return; }
     // Hold the current frame (max ~2 s) until the next image has arrived, so playback never flickers.
     const m = s.frames[s.idx + 1].map;
-    const next = (m.kind === "radar" || m.kind === "sat") && imgFrame(m.kind, m.ts);
+    const next = (m.kind === "radar" || m.kind === "sat") && imgFrame(m.kind, m.ts, m.ref);
     if (next && !frameReady(next) && waited++ < 4) { loadImgFrame(next); return; }
     waited = 0;
     setIdx(s.idx + 1);
@@ -1574,7 +1582,8 @@ try {
     state.home = loc;
     youAreHere.setLatLng([loc.lat, loc.lon]);
     const place = await Promise.race([reverseGeocode(loc), new Promise((r) => setTimeout(() => r(null), 1500))]);
-    map.setView([loc.lat, loc.lon], place ? cityZoom(place.bbox) : 11, { animate: false });
+    const zoom = place ? await Promise.race([cityZoom(place), new Promise((r) => setTimeout(() => r(11), 1500))]) : 11;
+    map.setView([loc.lat, loc.lon], zoom, { animate: false });
     await setLocation(loc, false, place ? place.name : undefined);
   }
   setInterval(refreshAll, 5 * 60e3);
