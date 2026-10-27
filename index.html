@@ -23,6 +23,7 @@
     --temp: #e5484d;
     --night: #eef0f4;
     --logo: #0B2A5B;
+    --night-band: #e6e9ef;
     --shadow: 0 -6px 24px rgba(20, 24, 31, 0.12);
   }
   @media (prefers-color-scheme: dark) {
@@ -34,6 +35,7 @@
       --sun-soft: #7a5a14;
       --night: #1d2129;
       --logo: #8FB2FF;
+      --night-band: #0b0d11;
       --shadow: 0 -6px 24px rgba(0, 0, 0, 0.5);
     }
   }
@@ -106,7 +108,10 @@
   .hour { flex: 0 0 calc((min(100vw, 600px) - 32px) / 6.5); scroll-snap-align: start; display: flex; flex-direction: column;
     align-items: center; gap: 2px; padding: 6px 0 2px; border: 0; background: none; font: inherit; font-size: 11px;
     color: var(--muted); cursor: pointer; }
-  .hour.night { background: var(--night); }
+  .hour { position: relative; }
+  .hour.night { background: var(--night-band); }
+  .hour .zz { position: absolute; bottom: 3px; left: 6px; font-size: 9px; font-weight: 700; font-style: italic; color: var(--muted); opacity: .8; }
+  .hour .far { position: absolute; top: 6px; right: 6px; width: 3px; height: 3px; border-radius: 50%; background: var(--muted); opacity: .7; }
   .hour.night-start { border-radius: 12px 0 0 12px; }
   .hour.night-end { border-radius: 0 12px 12px 0; }
   .hour.night-start.night-end { border-radius: 12px; }
@@ -175,7 +180,7 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
 "use strict";
-const VERSION = "v0.20";
+const VERSION = "v0.21";
 const FALLBACK = { lat: 53.5511, lon: 9.9937, name: "Hamburg" };
 const DWD_WMS = "https://maps.dwd.de/geoserver/dwd/wms";
 const EUM_WMS = "https://view.eumetsat.int/geoserver/ows";
@@ -1077,11 +1082,11 @@ function renderHours() {
   const rain = state.mode === "rain", three = state.hoursRange === "3d";
   const items = three ? hourBlocks(all, 4).slice(0, 18) : all.slice(0, 24);
   let lastDay = new Date(items[0].ts).getDay();
-  // Night = 0-7 h; a 4-hour block counts as night when most of its hours fall in that range.
+  // Night = 0-7 h (until 8:00); a 4-hour block counts as night when most of its hours fall in that range.
   const isNight = (h) => {
     const start = new Date(h.ts).getHours(), len = three ? 4 : 1;
     let n = 0;
-    for (let k = 0; k < len; k++) if ((start + k) % 24 < 7) n++;
+    for (let k = 0; k < len; k++) if ((start + k) % 24 < 8) n++;
     return n * 2 > len;
   };
   const night = items.map(isNight);
@@ -1095,7 +1100,10 @@ function renderHours() {
     else { v = h.isDay ? clamp(1 - h.cover / 100, 0, 1) : 0; color = "var(--sun)"; }
     const bar = v > 0.02 ? `<i style="height:${Math.max(3, v * 16).toFixed(1)}px;background:${color}"></i>` : "";
     const cls = night[i] ? " night" + (night[i - 1] ? "" : " night-start") + (night[i + 1] ? "" : " night-end") : "";
-    return `<button class="hour${cls}" data-ts="${h.ts}"><span>${label}</span>${weatherIcon(h)}` +
+    // Zz marks the start of a night band; a small dot marks entries beyond 48 h (coarser model, less certain).
+    const marks = (night[i] && !night[i - 1] ? '<span class="zz">Zz</span>' : "") +
+      (h.ts - Date.now() >= 48 * 3600e3 ? '<span class="far" title="mehr als 48 h voraus, unsicherer"></span>' : "");
+    return `<button class="hour${cls}" data-ts="${h.ts}">${marks}<span>${label}</span>${weatherIcon(h)}` +
       `<span class="tp">${Math.round(h.temp)}°</span><span class="bar">${bar}</span></button>`;
   }).join("");
 }
