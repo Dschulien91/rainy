@@ -3,6 +3,8 @@
 Observation: GeoColour (MTG FCI, every 10 min, ~30-35 min latency; true colour by day, infrared plus a fog/low-cloud
 channel by night) for all of Europe in one Web Mercator image (~2.5 km pixels). Cloudiness per pixel is read from
 the image: clouds are bright and grey/white, land, sea and city lights have at least one dark channel.
+By day the brightness scale follows the sun's elevation, so broken cloud fields with sun between them are not
+read as overcast when the sun is low.
 Nowcast, per forecast step:
   1. dense motion field (optical flow between the images 30 min apart, smoothed), so clouds move and also
      stretch, turn and shear where the wind differs from place to place, instead of one global shift
@@ -42,10 +44,32 @@ MODEL_DEG, MODEL_BATCH, MODEL_REFRESH_S = 0.25, 2000, 30 * 60
 FLOW_DOWN = 4                                            # optical flow on a 10 km grid: large-scale motion only
 
 
-def cloudiness(rgb):
-    """0..1 from a GeoColour RGB image (same formula as the app's fallback path)."""
+def sun_elevation(ts, lat, lon):
+    """Solar elevation in degrees (NOAA approximation, same as the app); lat/lon may be arrays."""
+    rad, d = math.pi / 180, ts / 86400e3 - 10957.5  # days since J2000.0
+    g, q = (357.529 + 0.98560028 * d) * rad, 280.459 + 0.98564736 * d
+    lam = (q + 1.915 * math.sin(g) + 0.02 * math.sin(2 * g)) * rad
+    eps = (23.439 - 0.00000036 * d) * rad
+    dec = math.asin(math.sin(eps) * math.sin(lam))
+    ra = math.atan2(math.cos(eps) * math.sin(lam), math.cos(lam))
+    gmst = (18.697374558 + 24.06570982441908 * d) % 24
+    ha = (gmst * 15 + lon) * rad - ra
+    return np.degrees(np.arcsin(np.sin(lat * rad) * math.sin(dec) + np.cos(lat * rad) * math.cos(dec) * np.cos(ha)))
+
+
+def cloudiness(rgb, elev):
+    """0..1 from a GeoColour RGB image (same formula as the app's fallback path).
+
+    By day the image is a true-colour photo whose brightness depends on the sun: with a low sun a thick deck is
+    only ~190 of 255 and a broken (cumulus / altocumulus) field ~130, so a fixed scale turned broken fields with
+    lots of sun into overcast. The scale ends at the brightness of a thick deck for the local sun elevation.
+    By night (infrared + fog channel) the brightness does not depend on the sun."""
     m = rgb.min(axis=2).astype(np.float32)
-    c = np.clip((m - 80.0) / 90.0, 0.0, 1.0)
+    top = 120.0 + 120.0 * np.sqrt(np.clip(np.sin(np.radians(elev)), 0.0, 1.0))  # thick deck brightness by day
+    day = np.clip((m - 85.0) / np.maximum(top - 85.0, 30.0), 0.0, 1.0)
+    night = np.clip((m - 80.0) / 90.0, 0.0, 1.0)
+    w = np.clip((elev + 3.0) / 9.0, 0.0, 1.0)  # twilight: GeoColour fades from the IR to the photo
+    c = w * day + (1 - w) * night
     return cv2.GaussianBlur(c, (0, 0), 0.7)  # JPEG noise
 
 
@@ -76,6 +100,7 @@ class CloudNowcast:
         mx = ((lon - self.lons[0]) / MODEL_DEG).astype(np.float32)
         my = ((lat - self.lats[0]) / MODEL_DEG).astype(np.float32)
         self.model_maps = np.meshgrid(mx, my)
+        self.coarse_ll = tuple(np.meshgrid(lat, lon, indexing="ij"))  # (lat, lon) of the coarse pixels, for the sun
         self.gx, self.gy = np.meshgrid(np.arange(N, dtype=np.float32), np.arange(N, dtype=np.float32))
 
     # ---------- data ----------
@@ -100,7 +125,7 @@ class CloudNowcast:
         url = (f"{WMS}?service=WMS&version=1.1.1&request=GetMap&layers={LAYER}&styles=&srs=EPSG:3857"
                f"&bbox={x0},{y0},{x1},{y1}&width={N}&height={N}&format=image/jpeg&time={stamp}")
         rgb = np.asarray(Image.open(io.BytesIO(self.fetch(url, timeout=120))).convert("RGB"))
-        return (cloudiness(rgb) * 255).astype(np.uint8)
+        return (cloudiness(rgb, cv2.resize(sun_elevation(ts, *self.coarse_ll), (N, N))) * 255).astype(np.uint8)
 
     def _log(self, ts, g):
         try:
