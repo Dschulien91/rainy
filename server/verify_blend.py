@@ -21,6 +21,7 @@ import rainy_server as rs  # noqa: E402
 from verify_nowcast import Cache, counts  # noqa: E402
 
 LEADS = (15, 30, 60, 90, 120)
+DOWN = 3  # evaluation grid: 3 km
 THR = (0.5, 2.0)
 
 
@@ -45,7 +46,7 @@ def main(name, hours, step):
         print("no model snapshots yet - let the server run for a few hours first")
         return
     times = region.list_times()
-    cache = Cache(region, times, size=40)
+    cache = Cache(region, times, size=12)  # 1 km frames are big: keep only what one case needs
     ts = sorted(times)
     end = ts[-1] - 120 * 60_000
     start = max(ts[0] + 30 * 60_000, ts[-1] - hours * 3600_000, snaps[0][0] + 60_000)
@@ -55,18 +56,20 @@ def main(name, hours, step):
         base, prev = cache.nearest(t), cache.nearest(t - 30 * 60_000, 4)
         snap = [f for issued, f in snaps if issued <= (base or 0) and base - issued <= rs.MODEL_MAX_AGE_MS]
         if base and prev and prev != base and snap:
-            last = cache.get(base)
+            full = cache.get(base)
             if model.maps is None:
-                model._setup(last)
+                model._setup(full)
+            # evaluated on a 3 km grid: all blend variants of a 24-step 1 km nowcast at once would need ~8 GB
+            last, prev_g = rs._coarse(full, DOWN), rs._coarse(cache.get(prev), DOWN)
             z = np.load(snap[-1])
             mt, mr = z["times"], z["rate"].astype(np.float32)
-            fc0 = rs.nowcast(cache.get(prev), last, base - prev, rs.FC_STEPS, region.SMOOTH, region.FLOW_DOWN)
+            fc0 = rs.nowcast(prev_g, last, base - prev, rs.FC_STEPS, region.SMOOTH / DOWN, max(1, region.FLOW_DOWN // DOWN))
             fcs = {v: model.blend([g.copy() for g in fc0], base, mt, mr, w) for v, w in VARIANTS.items()}
             for lead in LEADS:
                 valid = cache.nearest(base + lead * 60_000)
                 if not valid:
                     continue
-                ob = cache.get(valid)
+                ob = rs._coarse(cache.get(valid), DOWN)
                 for v, fc in fcs.items():
                     for thr in THR:
                         acc.setdefault((v, lead, thr), np.zeros(3, np.int64))
