@@ -23,6 +23,10 @@ Endpoints (all CORS-enabled, cache headers suitable for a CDN):
   GET /api/radar/image?region=&ts=&bbox=&width=&height=   (bbox in EPSG:3857) -> PNG in the rainy palette
   GET /api/radar/point?lat=&lon=               -> {"region": "eu"|"us"|"sat"|null, "series": [{"ts", "mmh"}], "ref": ms}
   GET /api/radar/mask?bbox=&width=&height=     -> PNG, opaque where radar coverage exists (for the "no data" hatching)
+  Clouds for the "sunny" map (server/clouds.py, Europe, EUMETSAT GeoColour + nowcast):
+  GET /api/cloud/frames                        -> {"frames": [{"ts", "fc"}], "ref": ms}
+  GET /api/cloud/image?ts=&bbox=&width=&height= -> grey + alpha PNG, grey = cloudiness 0..255
+  GET /api/cloud/point?lat=&lon=               -> {"series": [{"ts", "fc", "cloud": 0..1}], "ref": ms}
   Rain alerts (server/alerts.py, Web Push):
   GET  /api/push/key                           -> {"key": VAPID public key}
   POST /api/push/subscribe   {id?, subscription, places, lead, early, quiet, tz} -> {"id"}
@@ -54,6 +58,7 @@ from PIL import Image
 from pyproj import Transformer
 
 import alerts
+import clouds
 
 try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is used
     from pysteps import motion as ps_motion, nowcasts as ps_nowcasts
@@ -62,7 +67,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v0.10"
+VERSION = "server-v0.11"
 PORT = int(os.environ.get("PORT", "8771"))
 UA = "Mozilla/5.0"          # neutral, carries no identity
 HISTORY_MS = 60 * 60_000    # observed frames kept (1 h)
@@ -703,8 +708,20 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send(r.status, r.read(), r.headers.get("Content-Type", "application/json"), 600)
             if u.path == "/api/health":
                 info = {name: {"frames": len(r.frames()[0]), "ref": r.ref} for name, r in REGIONS.items()}
+                info["clouds"] = {"frames": len(CLOUDS.frames()[0]), "ref": CLOUDS.ref}
                 body = {"version": VERSION, "regions": info, "openmeteo": openmeteo_available()}
                 return self.send(200, json.dumps(body).encode(), "application/json", 10)
+            if u.path == "/api/cloud/frames":
+                frames, ref = CLOUDS.frames()
+                return self.send(200, json.dumps({"frames": frames, "ref": ref}).encode(), "application/json", 30)
+            if u.path == "/api/cloud/image":
+                bbox = [float(v) for v in q["bbox"].split(",")]
+                w, h = min(int(q["width"]), 2048), min(int(q["height"]), 2048)
+                png = CLOUDS.image(int(q["ts"]), bbox, w, h)
+                return self.send(200, png, "image/png", 3600) if png else self.send(404, b"unknown frame", "text/plain", 30)
+            if u.path == "/api/cloud/point":
+                body = {"series": CLOUDS.point(float(q["lat"]), float(q["lon"])), "ref": CLOUDS.ref}
+                return self.send(200, json.dumps(body).encode(), "application/json", 60)
             region = REGIONS.get(q.get("region", "eu"))
             if u.path == "/api/radar/frames":
                 frames, ref = region.frames()
@@ -768,9 +785,11 @@ class Handler(BaseHTTPRequestHandler):
 
 
 ALERTS = alerts.AlertEngine(DATA_DIR, REGIONS, log, UA, VAPID_SUBJECT)
+CLOUDS = clouds.CloudNowcast(fetch, log, OPENMETEO_URL, openmeteo_available, ll_to_3857)
 
 if __name__ == "__main__":
     threading.Thread(target=ALERTS.loop, args=(ll_to_3857,), daemon=True).start()
+    threading.Thread(target=CLOUDS.loop, daemon=True).start()
     for r in REGIONS.values():
         threading.Thread(target=update_loop, args=(r,), daemon=True).start()
         if r.MODEL_DEG:

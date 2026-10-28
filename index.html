@@ -55,6 +55,7 @@
   body.sunny .basemap { filter: sepia(0.55) saturate(1.6) hue-rotate(-12deg) brightness(1.08); } /* light orange cast */
   .eu-frame, .srvus-frame, .srvsat-frame { transition: opacity 0.45s linear; filter: blur(1px); } /* already interpolated by the server */
   .sat-frame { transition: opacity 0.4s ease; filter: blur(3px); }
+  .cloud-frame { transition: opacity 0.4s ease; } /* sharp cloud edges, drawn at screen resolution */
   /* dark map: lighten instead of covering, so sun tint reads as warm light and not olive */
   .place button { border: 0; background: var(--night); color: var(--fg); border-radius: 999px;
     font-size: 11px; padding: 1px 7px; margin-left: 6px; cursor: pointer; }
@@ -273,7 +274,7 @@
 <script src="https://unpkg.com/@maplibre/maplibre-gl-leaflet@0.0.22/leaflet-maplibre-gl.js"></script>
 <script>
 "use strict";
-const VERSION = "v0.41";
+const VERSION = "v0.42";
 const FALLBACK = { lat: 53.5511, lon: 9.9937, name: "Hamburg" };
 const DWD_WMS = "https://maps.dwd.de/geoserver/dwd/wms";
 const EUM_WMS = "https://view.eumetsat.int/geoserver/ows";
@@ -289,7 +290,7 @@ const serverReady = API_BASE ? fetch(`${API_BASE}/api/health`).then((r) => r.jso
   if (h.openmeteo) OM_BASE = `${API_BASE}/om`;
   return h;
 }).catch(() => null) : Promise.resolve(null);
-const isImgKind = (k) => k === "radar" || k === "sat" || k === "eu" || k === "srvus" || k === "srvsat" || k === "ca" || k === "us";
+const isImgKind = (k) => k === "radar" || k === "sat" || k === "cloud" || k === "eu" || k === "srvus" || k === "srvsat" || k === "ca" || k === "us";
 // Canada (ECCC GeoMet): rain rate in 14 discrete classes, observations every 6 min plus a 72 min nowcast.
 const CA_WMS = "https://geo.weather.gc.ca/geomet";
 const CA_CLASSES = { "98cbfe": 0.3, "0098fe": 1.4, "00fe66": 2.8, "00cb00": 5.7, "009800": 9.8, "006600": 13.9,
@@ -366,6 +367,7 @@ const state = {
   loc: null, home: null, picked: false, placeName: "",
   point: null,           // Open-Meteo minutely_15 series for the location
   radarPoint: [],        // Bright Sky radar series for the location ({ts, mmh}), empty outside Germany
+  cloudPoint: [],        // our server's cloudiness series ({ts, fc, cloud}), empty outside Europe / without the server
   satLatest: null,       // newest available satellite cloud mask (ms)
   grid: null,            // Open-Meteo grid for model maps
   views: {},             // "rain-short" etc. -> { frames, nowIdx, idx, split }
@@ -508,6 +510,12 @@ const PHOTO_ALPHA = 0.92;
 // Cloud opacity from a GeoColour pixel: clouds are bright and grey/white (by night: grey high cloud, light-blue fog
 // and low cloud), land, sea and city lights have at least one dark channel.
 const photoCloud = (r, g, b) => 0.85 * clamp((Math.min(r, g, b) - 80) / 90, 0, 1);
+// Server clouds: a narrow edge band turns the smooth cloudiness field into clouds with crisp outlines;
+// inside, thicker clouds are more opaque. The same edge decides the sun share of the timeline.
+const smoothstep = (a, b, v) => { const t = clamp((v - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
+const CLOUD_EDGE = [0.3, 0.4];
+const cloudCover = (v) => smoothstep(CLOUD_EDGE[0], CLOUD_EDGE[1], v);
+const cloudOpacity = (v) => cloudCover(v) * (0.62 + 0.3 * clamp((v - CLOUD_EDGE[1]) / 0.45, 0, 1));
 // Paint cloud opacity ac over the sun tint (by day) into an RGBA buffer at i4; returns the resulting alpha.
 function paintSky(px, i4, ac, day) {
   const tint = day ? SUN_ALPHA * (1 - Math.min(1, ac / 0.5)) : 0, a = ac + tint * (1 - ac);
@@ -597,6 +605,24 @@ const RENDER = {
   async eu(view, ts, ref) { return serverRadar("eu", view, ts, ref); },
   async srvus(view, ts, ref) { return serverRadar("us", view, ts, ref); },
   async srvsat(view, ts, ref) { return serverRadar("sat", view, ts, ref); },
+  // Clouds from our server (Europe): observed GeoColour clouds and the nowcast, as a cloudiness field that is
+  // drawn here at screen resolution with a sharp edge, so clouds get crisp outlines at every zoom level.
+  async cloud(view, ts) {
+    const mpp = 40075016.69 / (256 * 2 ** view.zoom); // Web Mercator metres per screen pixel
+    const w = clamp(Math.round((view.se.x - view.nw.x) / mpp), 64, 2048), h = clamp(Math.round((view.nw.y - view.se.y) / mpp), 64, 2048);
+    const img = await loadImage(`${API_BASE}/api/cloud/image?ts=${ts}&bbox=${view.bbox}&width=${w}&height=${h}`);
+    const c = document.createElement("canvas");
+    c.width = w; c.height = h;
+    const ctx = c.getContext("2d", { willReadFrequently: true });
+    ctx.drawImage(img, 0, 0);
+    const data = ctx.getImageData(0, 0, w, h), px = data.data, day = isDayAt(ts) ? 1 : 0;
+    for (let i = 0; i < px.length; i += 4) {
+      if (px[i + 3] < 128) { px[i + 3] = 0; continue; }
+      paintSky(px, i, cloudOpacity(px[i] / 255), day);
+    }
+    ctx.putImageData(data, 0, 0);
+    return { canvas: c };
+  },
   // EUMETSAT MTG GeoColour (every 10 min, ~1 km): true colour by day; by night infrared clouds plus a fog/low-cloud
   // channel (light blue), so fog and low stratus show up day and night, unlike the plain cloud mask.
   async sat(view, ts) {
@@ -1080,6 +1106,16 @@ async function loadPoint(loc) {
     cover: m.cloud_cover, isDay: m.is_day,
   };
 }
+// Clouds at the place from our server (Europe only; empty elsewhere or without the server).
+async function loadCloudPoint(loc) {
+  state.cloudPoint = [];
+  if (!API_BASE || SAT_STYLE !== "clouds") return;
+  await serverReady;
+  try {
+    const d = await getJSON(`${API_BASE}/api/cloud/point?lat=${loc.lat}&lon=${loc.lon}`);
+    state.cloudPoint = d.series || []; state.cloudRef = d.ref;
+  } catch {}
+}
 async function loadRadarPoint(loc) {
   const now = Date.now(), iso = (t) => new Date(t).toISOString().slice(0, 19) + "Z";
   try {
@@ -1209,8 +1245,15 @@ function buildViews() {
 
   // sun: satellite up to now, model forecast afterwards
   {
+    const C = state.cloudPoint; // our server's clouds (observed + nowcast), where available
     state.views["sun-short"] = finish(steps(2).map((ts) => {
       const isDay = isDayAt(ts) ? 1 : 0;
+      const e = C.length ? C.reduce((a, b) => (Math.abs(b.ts - ts) < Math.abs(a.ts - ts) ? b : a)) : null;
+      if (e && Math.abs(e.ts - ts) <= 7.5 * 60e3) {
+        // sun share around the place: 1 - mean cloudiness, scaled like the map's cloud edge
+        const sun = isDay ? 1 - clamp((e.cloud - 0.15) / 0.35, 0, 1) : 0;
+        return { ts, value: sun, model: sun, isDay, temp: temp(ts), map: { kind: "cloud", ts: e.ts, fc: e.fc } };
+      }
       // Sun share = clear-sky share from the same cloud cover the map shows (the model's separate
       // sunshine-duration field often contradicts its own cloud cover).
       const sun = isDay ? clamp(1 - interp(p.t, p.cover, ts) / 100, 0, 1) : 0;
@@ -1304,7 +1347,7 @@ async function loadProviderTimes(kind) {
   renderFrame(); preloadFrames();
 }
 function resolveMap(m) {
-  if (!isImgKind(m.kind) || m.kind === "sat") return m;
+  if (!isImgKind(m.kind) || m.kind === "sat" || m.kind === "cloud") return m;
   const prov = providerForView();
   if (prov === m.kind) return m;
   if (!prov) return null;
@@ -1344,6 +1387,7 @@ function updateSource() {
     : k === "srvsat" ? "Kein Radar – Regen aus Satellit geschätzt (EUMETSAT)"
     : k === "ca" ? (fc ? "Radar-Vorhersage (Environment Canada)" : "Radar gemessen (Environment Canada)")
     : k === "us" ? "Radar gemessen (NOAA)"
+    : k === "cloud" ? (shown.fc ? `Satellit hochgerechnet + Wettermodell (Bild von ${fmtTime(state.cloudRef)})` : `Satellit (EUMETSAT) · Stand ${fmtTime(f.map.ts)}`)
     : f.map.kind === "sat" ? `Satellit (${state.satRegion === "meteosat" ? "EUMETSAT" : "NOAA GOES / NASA"}) · Stand ${fmtTime(f.map.ts)}`
     : f.map.kind === "nowcast" ? `Satellit hochgerechnet${nowcast.motion ? " (Zug: " + nowcast.motion.source + ")" : ""}` +
       (f.map.w < 0.5 ? " + Modell" : "")
@@ -1769,7 +1813,7 @@ async function setLocation(loc, picked, knownName) {
     const fresh = state.satLatest && state.satRegion === satRegion(loc.lon) && Date.now() - state.satLatest < 45 * 60e3;
     const satP = fresh ? null : loadSatLatest(loc);
     const pointOk = await loadPoint(loc).then(() => true, (err) => { console.warn(err); return false; });
-    await Promise.all([loadRadarPoint(loc), satP]);
+    await Promise.all([loadRadarPoint(loc), loadCloudPoint(loc), satP]);
     if (!pointOk) {
       if (!(state.point && state.point.loc && sameLoc(state.point.loc, loc))) PLACE_TZ = tzFromLon(loc.lon);
       const same = state.point && state.point.loc && sameLoc(state.point.loc, loc);
