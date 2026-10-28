@@ -63,6 +63,7 @@ from pyproj import Transformer
 import alerts
 import clouds
 import mosaic
+import recorder
 
 try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is used
     from pysteps import motion as ps_motion, nowcasts as ps_nowcasts
@@ -71,7 +72,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v0.14"
+VERSION = "server-v0.17"
 PORT = int(os.environ.get("PORT", "8771"))
 UA = "Mozilla/5.0"          # neutral, carries no identity
 HISTORY_MS = 60 * 60_000    # observed frames kept (1 h)
@@ -843,11 +844,14 @@ ALERTS = alerts.AlertEngine(DATA_DIR, REGIONS, log, UA, VAPID_SUBJECT)
 CLOUDS = clouds.CloudNowcast(fetch, log, OPENMETEO_URL, openmeteo_available, ll_to_3857)
 DE = mosaic.GermanyDwd(fetch, log)
 MOSAIC = mosaic.Mosaic(REGIONS, DE, CLOUDS, sample, colorize, log)
+RECORDER = recorder.Recorder(fetch, log, MOSAIC, CLOUDS, mosaic.merc)
+CLOUDS.heavy_lock = SPROG_LOCK  # cloud nowcast and S-PROG take turns (Docker VM memory)
 
 if __name__ == "__main__":
     threading.Thread(target=ALERTS.loop, args=(ll_to_3857,), daemon=True).start()
     threading.Thread(target=CLOUDS.loop, daemon=True).start()
     threading.Thread(target=mosaic.de_loop, args=(DE, log), daemon=True).start()
+    threading.Thread(target=RECORDER.loop, daemon=True).start()
     for r in REGIONS.values():
         threading.Thread(target=update_loop, args=(r,), daemon=True).start()
         if r.MODEL_DEG:

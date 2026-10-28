@@ -113,7 +113,14 @@ class GermanyDwd:
         url = (f"{self.WMS}?service=WMS&version=1.1.1&request=GetMap&layers={self.LAYER}&styles=&srs=EPSG:3857"
                f"&bbox={x0},{y0},{x1},{y1}&width={self.nx}&height={self.ny}&format=image/png&transparent=true&time={iso(ts)}"
                + (f"&DIM_REFERENCE_TIME={iso(ref)}" if ref else ""))
-        px = np.asarray(Image.open(io.BytesIO(self.fetch(url, timeout=120))).convert("RGBA"), np.int32)
+        for attempt in range(4):  # the WMS now and then answers with a random service exception: ask again
+            try:
+                px = np.asarray(Image.open(io.BytesIO(self.fetch(url, timeout=120))).convert("RGBA"), np.int32)
+                break
+            except OSError:
+                if attempt == 3:
+                    raise
+                time.sleep(2 + 3 * attempt)
         rate = np.zeros((self.ny, self.nx), np.float32)
         wet = px[..., 3] > 200
         d2 = ((px[wet][:, :3][:, None, :] - self.rgb[None]) ** 2).sum(-1)
@@ -122,6 +129,8 @@ class GermanyDwd:
 
     def update(self):
         ref = self._latest_run()
+        if self.ref and ref < self.ref:  # the capabilities now and then announce an old run as the default
+            return 0
         obs_t = [ref - k * STEP_MS for k in range(12, -1, -1)]
         fc_t = [ref + k * STEP_MS for k in range(1, 25)]
         new_obs = [t for t in obs_t if t not in self.obs]

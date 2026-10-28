@@ -8,10 +8,9 @@ read as overcast when the sun is low.
 Nowcast, per forecast step:
   1. dense motion field (optical flow between the images 30 min apart, smoothed), so clouds move and also
      stretch, turn and shear where the wind differs from place to place, instead of one global shift
-  2. growth and decay along the motion from the weather model: where the model's cloud cover rises or falls
-     along a cloud's path, the cloud thickens/forms or thins/dissolves (Lagrangian trend)
+  2. optional growth and decay along the motion from the weather model (Lagrangian trend; off, see TREND)
   3. small structures fade with lead time (they are not predictable for long)
-  4. blend into the model's cloud cover: satellite only for the first hour, model only from 4 h
+  4. blend into the model's cloud cover: satellite only for the first 2 h, model only from 6 h
 The model is the self-hosted Open-Meteo "best match" (ICON-D2, AROME, HARMONIE, UKV ... wherever available).
 """
 import io
@@ -38,8 +37,13 @@ LOG_DIR = os.environ.get("CLOUD_LOG_DIR", os.path.join(os.path.dirname(os.path.a
 LOG_DOWN, LOG_KEEP_S = 4, 72 * 3600
 FC_STEP_MS = 15 * 60_000                                 # forecast frames on the app's 15 min timeline
 FC_HORIZON_MS = 3 * 3600_000                             # beyond the newest image (it is ~35 min old already)
-SAT_FULL_MIN, SAT_ZERO_MIN = 60, 240                     # satellite weight: 1 for the first hour, 0 from 4 h
-TREND = 0.5                                              # share of the model's cloud trend that is applied
+# Backtest against DWD sunshine duration (server/backtest_clouds.py, 14 days, 65 stations): the model's cloud cover
+# is far worse than the satellite even 2 h ahead (sun share MAE 0.28 vs 0.18) and every model share or model
+# trend made the 2 h forecast worse; plain advection with lead-dependent blur won (MAE +60 min 0.137, +120 0.175
+# vs persistence 0.162 / 0.213). So the model only takes over beyond the app's 2 h.
+SAT_FULL_MIN, SAT_ZERO_MIN = 120, 360                    # satellite weight: 1 for 2 h, 0 from 6 h
+TREND = 0.0                                              # share of the model's cloud trend that is applied
+BLUR = 2.0                                               # blur sigma (px) at 10 min lead, grows with sqrt(lead)
 MODEL_DEG, MODEL_BATCH, MODEL_REFRESH_S = 0.25, 2000, 30 * 60
 FLOW_DOWN = 4                                            # optical flow on a 10 km grid: large-scale motion only
 
@@ -62,11 +66,13 @@ def cloudiness(rgb, elev):
 
     By day the image is a true-colour photo whose brightness depends on the sun: with a low sun a thick deck is
     only ~190 of 255 and a broken (cumulus / altocumulus) field ~130, so a fixed scale turned broken fields with
-    lots of sun into overcast. The scale ends at the brightness of a thick deck for the local sun elevation.
+    lots of sun into overcast. The scale runs from 110 to a top that follows the local sun elevation; constants
+    fitted against DWD sunshine duration (server/calibrate_sun.py, 14 days, 65 stations: sun share MAE 0.085
+    on held-out days vs 0.097 before).
     By night (infrared + fog channel) the brightness does not depend on the sun."""
     m = rgb.min(axis=2).astype(np.float32)
-    top = 120.0 + 120.0 * np.sqrt(np.clip(np.sin(np.radians(elev)), 0.0, 1.0))  # thick deck brightness by day
-    day = np.clip((m - 85.0) / np.maximum(top - 85.0, 30.0), 0.0, 1.0)
+    top = 45.0 + 200.0 * np.sqrt(np.clip(np.sin(np.radians(elev)), 0.0, 1.0))  # thick deck brightness by day
+    day = np.clip((m - 110.0) / np.maximum(top - 110.0, 30.0), 0.0, 1.0)
     night = np.clip((m - 80.0) / 90.0, 0.0, 1.0)
     w = np.clip((elev + 3.0) / 9.0, 0.0, 1.0)  # twilight: GeoColour fades from the IR to the photo
     c = w * day + (1 - w) * night
@@ -86,6 +92,8 @@ class CloudNowcast:
         self.fetch, self.log, self.om_url, self.om_ok, self.ll = fetch, log, openmeteo_url, openmeteo_available, ll_to_3857
         self.lock = threading.Lock()
         self.obs, self.fc, self.ref = {}, {}, None  # ts -> uint8 cloudiness grid
+        self.raw = {}                                # ts -> darkest RGB channel of the observed image (uint8)
+        self.heavy_lock = threading.Lock()           # replaced by the server's S-PROG lock
         self.model = None                            # (times ms, cover (T, nlat, nlon) 0..1)
         self.model_at = 0
         x0, y0, x1, y1 = BBOX
@@ -113,6 +121,10 @@ class CloudNowcast:
         with self.lock:
             return self.obs.get(ts) if ts in self.obs else self.fc.get(ts)
 
+    def raw_grid(self, ts):
+        with self.lock:
+            return self.raw.get(ts)
+
     def _latest_time(self):
         xml = self.fetch(f"{WMS[:-4]}/{LAYER.replace(':', '/')}/ows?service=WMS&version=1.3.0&request=GetCapabilities").decode("utf-8", "ignore")
         i = xml.find('<Dimension name="time"')
@@ -125,13 +137,14 @@ class CloudNowcast:
         url = (f"{WMS}?service=WMS&version=1.1.1&request=GetMap&layers={LAYER}&styles=&srs=EPSG:3857"
                f"&bbox={x0},{y0},{x1},{y1}&width={N}&height={N}&format=image/jpeg&time={stamp}")
         rgb = np.asarray(Image.open(io.BytesIO(self.fetch(url, timeout=120))).convert("RGB"))
-        return (cloudiness(rgb, cv2.resize(sun_elevation(ts, *self.coarse_ll), (N, N))) * 255).astype(np.uint8)
+        g = (cloudiness(rgb, cv2.resize(sun_elevation(ts, *self.coarse_ll), (N, N))) * 255).astype(np.uint8)
+        return g, rgb.min(axis=2)  # the darkest channel is kept to recalibrate the cloudiness against stations
 
-    def _log(self, ts, g):
+    def _log(self, ts, g, raw):
         try:
             os.makedirs(LOG_DIR, exist_ok=True)
-            small = cv2.resize(g, (N // LOG_DOWN, N // LOG_DOWN), interpolation=cv2.INTER_AREA)
-            np.savez_compressed(os.path.join(LOG_DIR, f"obs_{ts}.npz"), cloud=small)
+            small = lambda a: cv2.resize(a, (N // LOG_DOWN, N // LOG_DOWN), interpolation=cv2.INTER_AREA)
+            np.savez_compressed(os.path.join(LOG_DIR, f"obs_{ts}.npz"), cloud=small(g), raw=small(raw))
             for f in os.listdir(LOG_DIR):
                 fp = os.path.join(LOG_DIR, f)
                 if time.time() - os.path.getmtime(fp) > LOG_KEEP_S:
@@ -190,19 +203,21 @@ class CloudNowcast:
         want = [end - k * 600_000 for k in range(OBS_KEEP)]
         new = [t for t in want if t not in self.obs]
         for t in new:  # newest first: the map is usable as soon as the first image is in
-            g = self._load(t)
+            g, raw = self._load(t)
             with self.lock:
-                self.obs[t] = g
-            self._log(t, g)
+                self.obs[t], self.raw[t] = g, raw
+            self._log(t, g, raw)
         with self.lock:
             for t in list(self.obs):
                 if t not in want:
                     del self.obs[t]
+                    self.raw.pop(t, None)
         if not new:
             return 0
         prev_t = end - 30 * 60_000
         if prev_t in self.obs:
-            self._forecast(self.obs[prev_t], self.obs[end], end)
+            with self.heavy_lock:  # shared with the rain nowcasts: their memory peaks must not overlap
+                self._forecast(self.obs[prev_t], self.obs[end], end)
         return len(new)
 
     def _forecast(self, prev, last, ref):
@@ -221,13 +236,13 @@ class CloudNowcast:
             mx, my = self.gx - flow[..., 0] * lead, self.gy - flow[..., 1] * lead  # where the air came from
             c = cv2.remap(base, mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
             m1 = self.model_field(ts)
-            if m0 is not None and m1 is not None:
+            if TREND and m0 is not None and m1 is not None:
                 a0 = cv2.remap(m0, mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)  # model at the origin
                 a1 = a0 + TREND * (m1 - a0)
                 thin = np.where(a0 > 0.05, a1 / np.maximum(a0, 1e-3), 1.0)
                 form = np.where(a0 < 0.95, (a1 - a0) / np.maximum(1 - a0, 1e-3), 0.0)
                 c = np.where(a1 < a0, c * thin, c + (1 - c) * form * 0.5)
-            c = cv2.GaussianBlur(c, (0, 0), 0.6 * math.sqrt(lead / 10))  # small clouds are not predictable for long
+            c = cv2.GaussianBlur(c, (0, 0), BLUR * math.sqrt(lead / 10))  # small clouds are not predictable for long
             w = sat_weight(lead)
             if m1 is not None and w < 1:
                 c = w * c + (1 - w) * m1
