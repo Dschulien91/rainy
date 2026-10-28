@@ -273,7 +273,7 @@
 <script src="https://unpkg.com/@maplibre/maplibre-gl-leaflet@0.0.22/leaflet-maplibre-gl.js"></script>
 <script>
 "use strict";
-const VERSION = "v0.39";
+const VERSION = "v0.40";
 const FALLBACK = { lat: 53.5511, lon: 9.9937, name: "Hamburg" };
 const DWD_WMS = "https://maps.dwd.de/geoserver/dwd/wms";
 const EUM_WMS = "https://view.eumetsat.int/geoserver/ows";
@@ -595,6 +595,7 @@ const RENDER = {
     const data = ctx.getImageData(0, 0, view.w, view.h), px = data.data;
     const irPx = ir ? canvasFor(view, ir)[1].getImageData(0, 0, view.w, view.h).data : null;
     const day = isDayAt(ts) ? 1 : 0;
+    const strat = stratusField(view, ts);
     const mask = new Uint8Array(view.w * view.h); // 0 = no data, 1 = clear, 2 = cloud
     for (let i = 0, p = 0; i < px.length; i += 4, p++) {
       if (px[i + 3] < 128) { px[i + 3] = 0; continue; }
@@ -604,6 +605,12 @@ const RENDER = {
         const t = irPx ? clamp((irPx[i] - 60) / 140, 0, 1) : 0.5; // brighter IR = colder, thicker cloud
         px[i] = CLOUD_RGB[0]; px[i + 1] = CLOUD_RGB[1]; px[i + 2] = CLOUD_RGB[2];
         px[i + 3] = Math.round((0.5 + 0.45 * t) * 255);
+      } else if (strat && strat[p] > 0) {
+        // "clear" in the satellite mask, but the model has dense low cloud: fog / low stratus (see stratusField)
+        const s = strat[p], ac = 0.62 * s, as = SUN_ALPHA * day * (1 - s), a = ac + as * (1 - ac);
+        for (let k = 0; k < 3; k++) px[i + k] = (CLOUD_RGB[k] * ac + SUN_RGB[k] * as * (1 - ac)) / a;
+        px[i + 3] = Math.round(a * 255);
+        if (s >= 0.5) mask[p] = 2;
       } else {
         px[i] = SUN_RGB[0]; px[i + 1] = SUN_RGB[1]; px[i + 2] = SUN_RGB[2];
         px[i + 3] = Math.round(SUN_ALPHA * 255 * day);
@@ -955,7 +962,12 @@ async function loadGrid() {
   const viewB = map.getBounds(), g = state.grid;
   // Reuse the grid while it covers the view and is younger than 30 min (keeps us far below the free API limits).
   if (g && g.bounds.contains(viewB) && Math.abs(g.zoom - map.getZoom()) < 2 && Date.now() - g.at < 30 * 60e3) return;
-  if (Date.now() - (loadGrid.lastTry || 0) < 20e3) return; // at most one attempt per 20 s (fast panning)
+  const wait = 20e3 - (Date.now() - (loadGrid.lastTry || 0));
+  if (wait > 0) { // at most one attempt per 20 s (fast panning); try again once the pause is over
+    clearTimeout(loadGrid.retry);
+    loadGrid.retry = setTimeout(() => { if (needsGrid()) loadGrid(); }, wait);
+    return;
+  }
   loadGrid.lastTry = Date.now();
   gridFetching = true;
   const b = viewB.pad(0.6);
@@ -968,19 +980,55 @@ async function loadGrid() {
   try {
     await serverReady;
     const d = await getJSON(`${OM_BASE}/v1/forecast?latitude=${lats}&longitude=${lons}` +
-      `&hourly=cloud_cover,precipitation,is_day&past_hours=2&forecast_hours=17&timeformat=unixtime`);
+      `&hourly=cloud_cover,cloud_cover_low,precipitation,is_day&past_hours=2&forecast_hours=17&timeformat=unixtime`);
     const arr = Array.isArray(d) ? d : [d];
     state.grid = {
       at: Date.now(), bounds: b, zoom: map.getZoom(),
       t: arr[0].hourly.time.map((x) => x * 1000),
       cover: arr.map((p) => p.hourly.cloud_cover),
+      low: arr.map((p) => p.hourly.cloud_cover_low || []),
       precip: arr.map((p) => p.hourly.precipitation),
       isDay: arr.map((p) => p.hourly.is_day),
     };
+    // satellite images rendered without the model's low clouds get redrawn with them (see stratusField)
+    imgFrames.forEach((f) => { if (f.kind === "sat") f.viewId = 0; });
+    nowcast.base = null;
     nowcast.cache.clear();
+    if (needsNowcast()) loadNowcastBase().then(() => renderFrame());
+    preloadFrames();
     renderFrame();
   } catch (err) { console.warn("grid failed", err); }
   gridFetching = false;
+}
+// The EUMETSAT cloud mask often misses fog and low stratus ("Hochnebel"): its top is nearly as warm as the ground,
+// so the satellite calls it clear. Where the model has dense low cloud we trust the model instead.
+// Returns a per-pixel stratus strength 0..1 for the view (bilinear between grid points), or null without a grid.
+const STRATUS_FROM = 0.6, STRATUS_FULL = 0.85; // model low cloud cover where the correction starts / is complete
+function stratusField(view, ts) {
+  const g = state.grid;
+  if (!g || !g.low.length || !g.low[0].length) return null;
+  const n = g.bounds.getNorth(), s = g.bounds.getSouth(), w = g.bounds.getWest(), e = g.bounds.getEast();
+  const val = g.low.map((l) => clamp((interp(g.t, l, ts) / 100 - STRATUS_FROM) / (STRATUS_FULL - STRATUS_FROM), 0, 1));
+  if (!val.some((v) => v > 0)) return null;
+  const out = new Float32Array(view.w * view.h);
+  const lons = Array.from({ length: view.w }, (_, x) =>
+    L.CRS.EPSG3857.unproject(L.point(view.nw.x + (x + 0.5) / view.w * (view.se.x - view.nw.x), view.nw.y)).lng);
+  for (let y = 0; y < view.h; y++) {
+    const lat = L.CRS.EPSG3857.unproject(L.point(view.nw.x, view.nw.y + (y + 0.5) / view.h * (view.se.y - view.nw.y))).lat;
+    const fi = (n - lat) / (n - s) * GRID - 0.5;
+    if (fi < -0.5 || fi > GRID - 0.5) continue; // outside the grid: keep the satellite
+    const fadeI = clamp(Math.min(fi + 0.5, GRID - 0.5 - fi) * 2, 0, 1); // soft edge over the outer half cell
+    const i0 = clamp(Math.floor(fi), 0, GRID - 1), i1 = Math.min(i0 + 1, GRID - 1), di = clamp(fi - i0, 0, 1);
+    for (let x = 0; x < view.w; x++) {
+      const fj = (lons[x] - w) / (e - w) * GRID - 0.5;
+      if (fj < -0.5 || fj > GRID - 0.5) continue;
+      const j0 = clamp(Math.floor(fj), 0, GRID - 1), j1 = Math.min(j0 + 1, GRID - 1), dj = clamp(fj - j0, 0, 1);
+      const top = val[i0 * GRID + j0] * (1 - dj) + val[i0 * GRID + j1] * dj;
+      const bot = val[i1 * GRID + j0] * (1 - dj) + val[i1 * GRID + j1] * dj;
+      out[y * view.w + x] = (top * (1 - di) + bot * di) * fadeI * clamp(Math.min(fj + 0.5, GRID - 0.5 - fj) * 2, 0, 1);
+    }
+  }
+  return out;
 }
 const gridCanvas = document.createElement("canvas");
 gridCanvas.width = gridCanvas.height = GRID;

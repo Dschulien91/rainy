@@ -62,7 +62,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v0.9"
+VERSION = "server-v0.10"
 PORT = int(os.environ.get("PORT", "8771"))
 UA = "Mozilla/5.0"          # neutral, carries no identity
 HISTORY_MS = 60 * 60_000    # observed frames kept (1 h)
@@ -433,7 +433,7 @@ class EuropeOpera(Region):
     KM_PER_PX = 1.0
     SMOOTH, FLOW_DOWN = 2.0, 4          # same physical scales as the backtested 2 km setup
     MODEL_DEG = 0.15
-    SPROG_DOWN = 2                      # S-PROG at 2 km (1 km would take ~4x as long)
+    SPROG_DOWN = 3                      # S-PROG at 3 km: about half the memory of 2 km (peak ~5.3 GB was too close to the laptop Docker limit)
 
     def __init__(self):
         super().__init__()
