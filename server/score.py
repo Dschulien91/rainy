@@ -117,14 +117,19 @@ def score_rain(hours):
                 if b is None or not ts[0] <= t - TEN <= t <= ts[-1]:
                     continue
                 fc = np.interp([t - 7.5 * 60_000, t - 2.5 * 60_000], ts, series).mean()
-                for k, p in (("rainy", fc), ("persist", at_issue)):
+                preds = [("rainy", fc), ("persist", at_issue)]
+                if "opera" in r:  # shadow variant: Europe composite + our nowcast only, no DWD
+                    preds.append(("opera", np.interp([t - 7.5 * 60_000, t - 2.5 * 60_000], ts, r["opera"][:, j]).mean()))
+                for k, p in preds:
                     for th, (to, tf) in (("nass", (0.05, 0.3)), (">=1mm/h", (1 / 6, 1.0))):
                         e = acc.setdefault((k, b, th), [0, 0, 0])
                         wo, wf = mm >= to, p >= tf
                         e[0] += wo and wf; e[1] += wo and not wf; e[2] += wf and not wo
     print("REGEN  (CSI / POD / FAR)")
     for th in ("nass", ">=1mm/h"):
-        for k in ("rainy", "persist"):
+        for k in ("rainy", "opera", "persist"):
+            if not any(key[0] == k for key in acc):
+                continue
             cells = []
             for name, _, _ in BUCKETS:
                 h, m, f = acc.get((k, name, th), [0, 0, 0])

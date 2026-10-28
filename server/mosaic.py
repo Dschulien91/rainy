@@ -176,8 +176,9 @@ class Mosaic:
         return src.grid(best["ts"]) if abs(best["ts"] - ts) <= tol_ms else None
 
     # ---------- composite ----------
-    def rain(self, ts, X, Y):
-        """Rain rate and a 'faint' flag (satellite estimate) at Web Mercator points X, Y."""
+    def rain(self, ts, X, Y, use_de=True):
+        """Rain rate and a 'faint' flag (satellite estimate) at Web Mercator points X, Y.
+        use_de=False: OPERA + our nowcast only (recorded in parallel to decide whether DWD is worth keeping)."""
         rate = np.zeros(X.shape, np.float32)
         covered = np.zeros(X.shape, bool)
         for name, tol in (("eu", 150_000), ("us", 180_000)):
@@ -186,7 +187,7 @@ class Mosaic:
                 r, cov = self.sample(self.regions[name], g, X, Y)
                 rate[cov] = r[cov]
                 covered |= cov
-        g = self._nearest(self.de, ts, 150_000)
+        g = self._nearest(self.de, ts, 150_000) if use_de else None
         if g is not None:
             col, row = (v.astype(np.float32) for v in self.de.to_pixels(X, Y))
             d = cv2.remap(g.astype(np.float32), col, row, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
