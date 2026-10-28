@@ -6,5 +6,8 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 # server plus the backtest scripts (verify_*.py, compare_pysteps.py)
 COPY *.py *.json ./
+# fewer malloc arenas: with many threads and big numpy temporaries glibc kept freeing memory per thread arena
+# and the process grew until the Docker VM killed it (exit 137 after hours)
+ENV MALLOC_ARENA_MAX=2
 EXPOSE 8771
 CMD ["python", "-u", "rainy_server.py"]

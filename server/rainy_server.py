@@ -73,7 +73,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v0.21"
+VERSION = "server-v0.22"
 PORT = int(os.environ.get("PORT", "8771"))
 UA = "Mozilla/5.0"          # neutral, carries no identity
 HISTORY_MS = 60 * 60_000    # observed frames kept (1 h)
@@ -97,6 +97,31 @@ def openmeteo_available():
             _om_state["ok"] = False
         _om_state["at"] = time.time()
     return _om_state["ok"]
+
+def rss_mb():
+    try:
+        with open("/proc/self/status") as f:
+            return next(int(l.split()[1]) // 1024 for l in f if l.startswith("VmRSS"))
+    except (OSError, StopIteration):
+        return None
+
+
+def memory_loop():
+    """Give freed heap back to the OS regularly (glibc keeps it otherwise) and log the memory use."""
+    try:
+        import ctypes
+        trim = ctypes.CDLL("libc.so.6").malloc_trim
+    except OSError:
+        trim = None
+    n = 0
+    while True:
+        time.sleep(30)
+        if trim:
+            trim(0)
+        n += 1
+        if n % 20 == 0:
+            log(f"[{datetime.now():%H:%M:%S}] memory {rss_mb()} MB")
+
 
 def log(msg):
     """Server messages go to stderr: pySTEPS' progress output on stdout is silenced while it runs."""
@@ -766,7 +791,7 @@ class Handler(BaseHTTPRequestHandler):
                 info = {name: {"frames": len(r.frames()[0]), "ref": r.ref} for name, r in REGIONS.items()}
                 info["clouds"] = {"frames": len(CLOUDS.frames()[0]), "ref": CLOUDS.ref}
                 info["de"] = {"frames": len(DE.frames()[0]), "ref": DE.ref}
-                body = {"version": VERSION, "regions": info, "openmeteo": openmeteo_available()}
+                body = {"version": VERSION, "regions": info, "openmeteo": openmeteo_available(), "rss_mb": rss_mb()}
                 return self.send(200, json.dumps(body).encode(), "application/json", 10)
             if u.path.startswith("/tiles/"):
                 m = re.fullmatch(r"/tiles/(rain|raineu|cloud)/([\w-]+)/(\d+)/(\d+)/(\d+)/(\d+)\.png", u.path)
@@ -871,6 +896,7 @@ if __name__ == "__main__":
     threading.Thread(target=CLOUDS.loop, daemon=True).start()
     threading.Thread(target=mosaic.de_loop, args=(DE, log), daemon=True).start()
     threading.Thread(target=RECORDER.loop, daemon=True).start()
+    threading.Thread(target=memory_loop, daemon=True).start()
     for r in REGIONS.values():
         threading.Thread(target=update_loop, args=(r,), daemon=True).start()
         if r.MODEL_DEG:
