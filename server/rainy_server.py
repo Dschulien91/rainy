@@ -25,7 +25,8 @@ Endpoints (all CORS-enabled, cache headers suitable for a CDN):
   GET /api/radar/point?lat=&lon=               -> {"region": "eu"|"us"|"sat"|null, "series": [{"ts", "mmh"}], "ref": ms}
   GET /api/radar/mask?bbox=&width=&height=     -> PNG, opaque where radar coverage exists (for the "no data" hatching)
   Seamless map tiles for the app (server/mosaic.py; DWD + OPERA + NOAA + satellite in one, CDN-cacheable):
-  GET /api/rain/frames, /api/rain/point?lat=&lon=, /tiles/rain/<key>/<ts>/<z>/<x>/<y>.png, /tiles/cloud/...
+  GET /api/rain/frames, /api/rain/point?lat=&lon=[&src=eu], /tiles/rain/<key>/<ts>/<z>/<x>/<y>.png, /tiles/cloud/...
+      (/tiles/raineu/... and src=eu: Europe composite only, without the DWD source in Germany - user-selectable)
   Clouds for the "sunny" map (server/clouds.py, Europe, EUMETSAT GeoColour + nowcast):
   GET /api/cloud/frames                        -> {"frames": [{"ts", "fc"}], "ref": ms}
   GET /api/cloud/image?ts=&bbox=&width=&height= -> grey + alpha PNG, grey = cloudiness 0..255
@@ -72,7 +73,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v0.20"
+VERSION = "server-v0.21"
 PORT = int(os.environ.get("PORT", "8771"))
 UA = "Mozilla/5.0"          # neutral, carries no identity
 HISTORY_MS = 60 * 60_000    # observed frames kept (1 h)
@@ -768,13 +769,14 @@ class Handler(BaseHTTPRequestHandler):
                 body = {"version": VERSION, "regions": info, "openmeteo": openmeteo_available()}
                 return self.send(200, json.dumps(body).encode(), "application/json", 10)
             if u.path.startswith("/tiles/"):
-                m = re.fullmatch(r"/tiles/(rain|cloud)/([\w-]+)/(\d+)/(\d+)/(\d+)/(\d+)\.png", u.path)
+                m = re.fullmatch(r"/tiles/(rain|raineu|cloud)/([\w-]+)/(\d+)/(\d+)/(\d+)/(\d+)\.png", u.path)
                 if not m:
                     return self.send(404, b"not found", "text/plain", 60)
                 kind, key, ts, z, x, y = m.group(1), m.group(2), *map(int, m.groups()[2:])
                 if not (2 <= z <= 13 and 0 <= x < (1 << z) and 0 <= y < (1 << z)):
                     return self.send(404, b"bad tile", "text/plain", 3600)
-                png = MOSAIC.rain_tile(key, ts, z, x, y) if kind == "rain" else MOSAIC.cloud_tile(key, ts, z, x, y)
+                png = (MOSAIC.cloud_tile(key, ts, z, x, y) if kind == "cloud"
+                       else MOSAIC.rain_tile(key, ts, z, x, y, use_de=kind == "rain"))
                 if png is None:
                     return self.send(404, b"unknown frame", "text/plain", 30)
                 return self.send(200, png, "image/png", 86400)  # the key in the URL makes the content immutable
@@ -782,7 +784,7 @@ class Handler(BaseHTTPRequestHandler):
                 body = {"key": MOSAIC.key(), "frames": MOSAIC.frames()}
                 return self.send(200, json.dumps(body).encode(), "application/json", 30)
             if u.path == "/api/rain/point":
-                body = {"key": MOSAIC.key(), "series": MOSAIC.rain_point(float(q["lat"]), float(q["lon"]))}
+                body = {"key": MOSAIC.key(), "series": MOSAIC.rain_point(float(q["lat"]), float(q["lon"]), q.get("src") != "eu")}
                 return self.send(200, json.dumps(body).encode(), "application/json", 60)
             if u.path == "/api/cloud/frames":
                 frames, ref = CLOUDS.frames()

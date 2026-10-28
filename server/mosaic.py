@@ -214,30 +214,30 @@ class Mosaic:
                 self.cache.popitem(last=False)
         return png
 
-    def rain_tile(self, key, ts, z, x, y):
+    def rain_tile(self, key, ts, z, x, y, use_de=True):
         def make():
             X, Y = tile_xy(z, x, y)
-            rate, faint = self.rain(ts, X, Y)
+            rate, faint = self.rain(ts, X, Y, use_de)
             rgba = self.colorize(rate)
             rgba[..., 3] = np.where(faint, (rgba[..., 3] * 0.65).astype(np.uint8), rgba[..., 3])
             buf = io.BytesIO()
             Image.fromarray(rgba, "RGBA").save(buf, "PNG", compress_level=6)
             return buf.getvalue()
-        return self._cached(f"r/{key}/{ts}/{z}/{x}/{y}", make)
+        return self._cached(f"{'r' if use_de else 're'}/{key}/{ts}/{z}/{x}/{y}", make)
 
     def cloud_tile(self, key, ts, z, x, y):
         span = 2 * WORLD / (1 << z)
         bbox = (-WORLD + x * span, WORLD - (y + 1) * span, -WORLD + (x + 1) * span, WORLD - y * span)
         return self._cached(f"c/{key}/{ts}/{z}/{x}/{y}", lambda: self.clouds.image(ts, bbox, TILE, TILE))
 
-    def rain_point(self, lat, lon):
+    def rain_point(self, lat, lon, use_de=True):
         """Same composite as the map, mean over ~3 km around the place."""
         cx, cy = merc(lon, lat)
         d = np.array([-1500.0, 0.0, 1500.0]) / np.cos(np.radians(lat))
         X, Y = np.meshgrid(cx + d, cy + d)
         out = []
         for f in self.frames():
-            rate, faint = self.rain(f["ts"], X, Y)
+            rate, faint = self.rain(f["ts"], X, Y, use_de)
             out.append({"ts": f["ts"], "fc": f["fc"], "mmh": round(float(rate.mean()), 3), "est": bool(faint.all())})
         return out
 
