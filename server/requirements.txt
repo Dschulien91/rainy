@@ -5,3 +5,5 @@ pyproj
 pillow
 opencv-python-headless
 pysteps
+pywebpush
+tzdata

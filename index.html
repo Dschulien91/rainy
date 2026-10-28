@@ -103,6 +103,26 @@
   .place .star-btn { display: inline-flex; vertical-align: -4px; padding: 0 4px; background: none; color: var(--muted); margin-left: 4px; }
   .place .star-btn.on { color: #f5b800; }
   .place .star-btn svg { width: 16px; height: 16px; }
+  .place .bell-btn { display: inline-flex; vertical-align: -4px; border: 0; background: none; color: var(--muted); cursor: pointer; padding: 0 4px; }
+  .place .bell-btn svg { width: 16px; height: 16px; }
+  .place .bell-btn.on { color: var(--rain); }
+  .place .bell-btn.on path { fill: currentColor; }
+  /* rain alert settings card */
+  .alert-card { position: absolute; left: 50%; bottom: calc(var(--sheet-h) + 12px); z-index: 1200; width: min(360px, calc(100% - 32px));
+    transform: translate(-50%, 8px); background: var(--bg); color: var(--fg); border-radius: 16px; padding: 16px;
+    box-shadow: 0 8px 32px rgba(0,0,0,.3); opacity: 0; pointer-events: none; transition: opacity .2s, transform .2s; }
+  .alert-card.show { opacity: 1; transform: translate(-50%, 0); pointer-events: auto; }
+  .alert-card h3 { margin: 0 0 4px; font-size: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .alert-card p { margin: 0 0 12px; font-size: 13px; color: var(--muted); line-height: 1.35; }
+  .alert-card .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 0; border-top: 1px solid var(--line); font-size: 14px; }
+  .alert-card .seg { display: flex; gap: 4px; }
+  .alert-card .seg button { border: 1px solid var(--line); background: none; color: var(--fg); font: inherit; font-size: 13px; padding: 5px 10px; border-radius: 999px; cursor: pointer; }
+  .alert-card .seg button.on { background: var(--rain); border-color: var(--rain); color: #fff; }
+  .alert-card input[type=checkbox] { width: 20px; height: 20px; accent-color: var(--rain); }
+  .alert-card .actions { display: flex; justify-content: space-between; margin-top: 12px; }
+  .alert-card .actions button { border: 0; background: none; font: inherit; font-weight: 600; cursor: pointer; padding: 6px 2px; }
+  .alert-card .off { color: var(--temp); }
+  .alert-card .done { color: var(--rain); }
   .fav-controls { margin-top: 12px; }
   .fav-list { flex: 1; overflow: auto; margin: 12px -16px 0; padding: 0 16px; }
   .fav { border: 1px solid var(--line); border-radius: 14px; margin-bottom: 10px; background: var(--bg); overflow: hidden; }
@@ -127,7 +147,7 @@
     padding: 12px 16px max(10px, env(safe-area-inset-bottom)); display: flex; flex-direction: column; gap: 8px; }
   .head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
   .place { font-size: 13px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .summary { font-size: 17px; font-weight: 700; line-height: 1.2; }
+  .summary { font-size: 17px; font-weight: 700; line-height: 1.2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } /* never wraps: long texts end in … */
   .now-temp { font-size: 28px; font-weight: 300; margin-left: auto; white-space: nowrap; }
 
   .toggle { display: inline-flex; background: var(--night); border-radius: 999px; padding: 3px; flex: none; }
@@ -185,6 +205,7 @@
 </svg>
 <div id="map"></div>
 <div class="toast" id="toast" role="status"></div>
+<div class="alert-card" id="alertCard" role="dialog" aria-label="Regenwarnung"></div>
 <div class="brand"><svg class="logo" id="brandLogo"><use href="#logo"/></svg><span id="brandName">rainy</span><span class="version" id="ver"></span></div>
 <button class="fab" id="favs" title="Favoriten" aria-label="Favoriten" style="--i:3"><svg viewBox="0 0 24 24"><path d="M12 3.5l2.6 5.3 5.8.8-4.2 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.2-4.1 5.8-.8z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg></button>
 <button class="fab" id="search" title="Ort suchen" aria-label="Ort suchen" style="--i:2"><svg viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="10.5" cy="10.5" r="6"/><line x1="15" y1="15" x2="20" y2="20"/></g></svg></button>
@@ -252,7 +273,7 @@
 <script src="https://unpkg.com/@maplibre/maplibre-gl-leaflet@0.0.22/leaflet-maplibre-gl.js"></script>
 <script>
 "use strict";
-const VERSION = "v0.36";
+const VERSION = "v0.39";
 const FALLBACK = { lat: 53.5511, lon: 9.9937, name: "Hamburg" };
 const DWD_WMS = "https://maps.dwd.de/geoserver/dwd/wms";
 const EUM_WMS = "https://view.eumetsat.int/geoserver/ows";
@@ -1334,21 +1355,21 @@ function summary() {
     const wet = (f) => f.value >= 0.1;
     if (wet(fr[0])) {
       const dry = fr.find((f) => !wet(f));
-      return dry ? `Regen bis ca. ${fmtTime(dry.ts)}` : `Regen hält die nächsten ${h} h an`;
+      return dry ? `Regen bis ca. ${fmtTime(dry.ts)}` : `Regen hält ${h} Std. an`;
     }
     const next = fr.find(wet);
-    return next ? `Regen ab ca. ${fmtTime(next.ts)}` : `Die nächsten ${h} Stunden trocken`;
+    return next ? `Regen ab ca. ${fmtTime(next.ts)}` : `${h} Std. trocken`;
   }
   const sunny = (f) => f.value >= 0.5;
   if (sunny(fr[0])) {
     const end = fr.find((f) => !sunny(f));
-    return end ? `Sonne bis ca. ${fmtTime(end.ts)}` : "Sonnig für die nächsten Stunden";
+    return end ? `Sonne bis ca. ${fmtTime(end.ts)}` : "Sonnig, bleibt so";
   }
   const next = fr.find(sunny);
   if (next) return `Sonne ab ca. ${fmtTime(next.ts)}`;
   const some = fr.find((f) => f.value >= 0.2);
-  if (some) return `Kaum Sonne, etwas ab ca. ${fmtTime(some.ts)}`;
-  return fr[0].isDay ? `Keine Sonne in den nächsten ${h} h` : `Nacht – keine Sonne in den nächsten ${h} h`;
+  if (some) return `Etwas Sonne ab ca. ${fmtTime(some.ts)}`;
+  return fr[0].isDay ? `${h} Std. keine Sonne` : `Nacht – ${h} Std. keine Sonne`;
 }
 
 const chart = document.getElementById("chart");
@@ -1791,12 +1812,107 @@ function renderPlace() {
   if (!loc) return;
   el.innerHTML = (state.picked ? '<svg class="pin-ico" viewBox="0 0 24 24"><path d="M12 22s-7-7.6-7-13a7 7 0 0 1 14 0c0 5.4-7 13-7 13z" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="9" r="2.4" fill="none" stroke="currentColor" stroke-width="2"/></svg>' : "") + esc(state.placeName || "") +
     `<button class="star-btn${isFav(loc) ? " on" : ""}" aria-label="Favorit">${STAR}</button>` +
+    (ALERTS_POSSIBLE ? `<button class="bell-btn${hasAlert(loc) ? " on" : ""}" aria-label="Regenwarnung">${BELL}</button>` : "") +
     (state.picked ? '<button class="back">× zurück</button>' : "") +
     (PLACE_TZ && fmtTime(Date.now(), PLACE_TZ) !== fmtTime(Date.now(), DEVICE_TZ) ? `<span class="tzhint">Ortszeit ${fmtTime(Date.now())}</span>` : "");
   el.querySelector(".star-btn").addEventListener("click", () => toggleFav(state.loc, state.placeName));
+  const bell = el.querySelector(".bell-btn");
+  if (bell) bell.addEventListener("click", () => bellClicked(state.loc, state.placeName));
   const back = el.querySelector(".back");
   if (back) back.addEventListener("click", () => document.getElementById("locate").click());
 }
+// ---------- Rain alerts (Web Push from our server) ----------
+// Places with alerts and the settings live on the device; the server only gets the push address, the places
+// (rounded to ~1 km) and the settings - no account. Alerts need our own server and https (or localhost).
+const ALERTS_POSSIBLE = !!API_BASE && "serviceWorker" in navigator;
+const BELL = '<svg viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0-6 6v3.5L4.5 16h15L18 12.5V9a6 6 0 0 0-6-6zM10 19a2 2 0 0 0 4 0" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>';
+const ALERT_DEFAULTS = { places: [], lead: 20, early: true, quiet: true };
+function loadAlerts() { try { return { ...ALERT_DEFAULTS, ...JSON.parse(localStorage.getItem("rainy.alerts")) }; } catch { return { ...ALERT_DEFAULTS }; } }
+function saveAlerts(a) { try { localStorage.setItem("rainy.alerts", JSON.stringify(a)); } catch {} }
+const hasAlert = (loc) => loadAlerts().places.some((p) => sameLoc(p, loc));
+const b64ToBytes = (b64) => Uint8Array.from(atob((b64 + "===".slice((b64.length + 3) % 4)).replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0));
+const postJSON = (path, body) => fetch(`${API_BASE}${path}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+
+// Send the current places and settings to the server (or unsubscribe when no place is left).
+async function syncAlerts(a) {
+  const reg = await navigator.serviceWorker.register("sw.js");
+  let sub = await reg.pushManager.getSubscription();
+  if (!a.places.length) {
+    if (a.id) await postJSON("/api/push/unsubscribe", { id: a.id }).catch(() => {});
+    if (sub) await sub.unsubscribe().catch(() => {});
+    delete a.id;
+    saveAlerts(a);
+    return false;
+  }
+  if (!sub) {
+    const { key } = await getJSON(`${API_BASE}/api/push/key`);
+    if (!key) throw new Error("server has no push key");
+    sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64ToBytes(key) });
+  }
+  const r = await postJSON("/api/push/subscribe", { id: a.id, subscription: sub.toJSON(), places: a.places,
+    lead: a.lead, early: a.early, quiet: a.quiet, tz: DEVICE_TZ });
+  if (!r.ok) throw new Error(`subscribe ${r.status}`);
+  const first = !a.id;
+  a.id = (await r.json()).id;
+  saveAlerts(a);
+  return first;
+}
+
+async function bellClicked(loc, name) {
+  if (!window.isSecureContext) return toast("Warnungen gehen nur über eine sichere Verbindung (https) – mit dem echten Server klappt das.");
+  if (!("PushManager" in window) || !("Notification" in window)) {
+    return toast(/iPhone|iPad/.test(navigator.userAgent)
+      ? "Auf dem iPhone: erst über „Teilen → Zum Home-Bildschirm“ hinzufügen, dann dort die Glocke antippen."
+      : "Dieser Browser kann keine Benachrichtigungen empfangen.");
+  }
+  if (hasAlert(loc)) return showAlertCard(loc, name);
+  if ((await Notification.requestPermission()) !== "granted") return toast("Benachrichtigungen sind für rainy blockiert – bitte in den Browser-Einstellungen erlauben.");
+  const a = loadAlerts();
+  a.places.push({ name: name || "", lat: +loc.lat.toFixed(4), lon: +loc.lon.toFixed(4) });
+  if (!isFav(loc)) toggleFav(loc, name); // alerts are for home and favorites
+  try {
+    const first = await syncAlerts(a);
+    if (first) postJSON("/api/push/test", { id: a.id }).catch(() => {});
+  } catch (e) {
+    console.warn("alerts", e);
+    a.places = a.places.filter((p) => !sameLoc(p, loc));
+    saveAlerts(a);
+    renderPlace();
+    return toast("Regenwarnung konnte nicht eingerichtet werden. Bitte später noch einmal versuchen.");
+  }
+  renderPlace();
+  showAlertCard(loc, name);
+}
+
+// Small card: lead time, heads-up for heavy rain, quiet hours, switch off.
+function showAlertCard(loc, name) {
+  const card = document.getElementById("alertCard"), a = loadAlerts();
+  card.innerHTML = `<h3>Regenwarnung · ${esc(name || "dieser Ort")}</h3>
+    <p>Wir melden uns, bevor hier Regen beginnt – nur beim ersten Schauer, danach erst wieder nach 2 trockenen Stunden.</p>
+    <div class="row"><span>Vorwarnzeit</span><span class="seg">${[10, 20, 30].map((m) =>
+      `<button data-lead="${m}" class="${a.lead === m ? "on" : ""}">${m} Min.</button>`).join("")}</span></div>
+    <label class="row"><span>Bei Starkregen schon ca. 1 Std. vorher</span><input type="checkbox" data-k="early"${a.early ? " checked" : ""}></label>
+    <label class="row"><span>Nachtruhe 22–7 Uhr</span><input type="checkbox" data-k="quiet"${a.quiet ? " checked" : ""}></label>
+    <div class="actions"><button class="off">Für diesen Ort aus</button><button class="done">Fertig</button></div>`;
+  const update = () => { saveAlerts(a); syncAlerts(a).catch((e) => console.warn("alerts", e)); };
+  card.querySelectorAll("[data-lead]").forEach((b) => b.addEventListener("click", () => {
+    a.lead = +b.dataset.lead;
+    card.querySelectorAll("[data-lead]").forEach((x) => x.classList.toggle("on", x === b));
+    update();
+  }));
+  card.querySelectorAll("input[data-k]").forEach((c) => c.addEventListener("change", () => { a[c.dataset.k] = c.checked; update(); }));
+  card.querySelector(".off").addEventListener("click", () => {
+    a.places = a.places.filter((p) => !sameLoc(p, loc));
+    update();
+    card.classList.remove("show");
+    renderPlace();
+    toast(`Regenwarnung für ${name || "diesen Ort"} ist aus.`);
+  });
+  card.querySelector(".done").addEventListener("click", () => card.classList.remove("show"));
+  card.classList.add("show");
+}
+map.on("click", () => document.getElementById("alertCard").classList.remove("show"));
+
 // Jump the map to a place and show its forecast.
 function goTo(loc, name) {
   map.setView([loc.lat, loc.lon], Math.max(map.getZoom(), 11));

@@ -23,6 +23,11 @@ Endpoints (all CORS-enabled, cache headers suitable for a CDN):
   GET /api/radar/image?region=&ts=&bbox=&width=&height=   (bbox in EPSG:3857) -> PNG in the rainy palette
   GET /api/radar/point?lat=&lon=               -> {"region": "eu"|"us"|"sat"|null, "series": [{"ts", "mmh"}], "ref": ms}
   GET /api/radar/mask?bbox=&width=&height=     -> PNG, opaque where radar coverage exists (for the "no data" hatching)
+  Rain alerts (server/alerts.py, Web Push):
+  GET  /api/push/key                           -> {"key": VAPID public key}
+  POST /api/push/subscribe   {id?, subscription, places, lead, early, quiet, tz} -> {"id"}
+  POST /api/push/unsubscribe {id};  POST /api/push/test {id}
+  GET  /api/push/preview?lat=&lon=&lead=&tz=   -> what the alert logic sees at a place (sends nothing)
 
 Run:  python server/rainy_server.py   (port from env PORT, default 8771)
 Requests to data sources carry a neutral User-Agent and no identifying information.
@@ -48,6 +53,8 @@ import numpy as np
 from PIL import Image
 from pyproj import Transformer
 
+import alerts
+
 try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is used
     from pysteps import motion as ps_motion, nowcasts as ps_nowcasts
     from pysteps.utils import transformation as ps_transformation
@@ -55,7 +62,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v0.8"
+VERSION = "server-v0.9"
 PORT = int(os.environ.get("PORT", "8771"))
 UA = "Mozilla/5.0"          # neutral, carries no identity
 HISTORY_MS = 60 * 60_000    # observed frames kept (1 h)
@@ -166,6 +173,9 @@ def nowcast(prev, last, dt_ms, steps, smooth=1.0, down=2):
 # ---------- weather model rain for the second hour ----------
 MODEL_REFRESH_S = 15 * 60
 MODEL_MAX_AGE_MS = 3 * 3600_000
+DATA_DIR = os.environ.get("DATA_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "data"))  # push subscriptions, keys
+# contact claim required by Web Push; set it to the app's own domain in production (no personal address)
+VAPID_SUBJECT = os.environ.get("VAPID_SUBJECT", "https://rainy.invalid")
 MODEL_LOG_DIR = os.environ.get("MODEL_LOG_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "model_log"))
 MODEL_LOG_KEEP_S = 48 * 3600
 # radar weight: radar only for the first hour, then fading to an even mix at 2 h (to be tuned with the logs)
@@ -316,6 +326,9 @@ def _coarse(g, down):
     return np.where((b >= 0).any(axis=(1, 3)), np.where(b < 0, 0, b).mean(axis=(1, 3)), NODATA).astype(np.float32)
 
 
+SPROG_LOCK = threading.Lock()  # S-PROG needs a lot of memory: never run two regions at the same time
+
+
 def sprog_nowcast(seq, mot, steps, down):
     """pySTEPS S-PROG: like `nowcast`, but each spatial scale decays at its own observed rate (small showers fade
     fast, large rain areas persist). seq: frames 10/5/0 min old; mot: frames 30/15/0 min old (for the motion).
@@ -327,17 +340,18 @@ def sprog_nowcast(seq, mot, steps, down):
     m = [_coarse(g, down) for g in mot]
     velocity = ps_motion.get_method("LK")(dbz([np.where(g < 0, np.nan, g) for g in m])) / 3.0  # per 15 min -> per 5 min
     s = [_coarse(g, down) for g in seq]
-    with contextlib.redirect_stdout(io.StringIO()):  # pySTEPS prints lengthy progress tables
+    with SPROG_LOCK, contextlib.redirect_stdout(io.StringIO()):  # one region at a time; pySTEPS prints long tables
         fc = ps_nowcasts.get_method("sprog")(dbz([np.where(g < 0, 0, g) for g in s]), velocity, steps,
                                              precip_thr=-10.0,  # 0.1 mm/h in dB
-                                             n_cascade_levels=6, num_workers=os.cpu_count() or 1, probmatching_method="cdf")
-    fc = np.nan_to_num(ps_transformation.dB_transform(fc, threshold=-10.0, inverse=True)[0], nan=0.0)
+                                             n_cascade_levels=6, num_workers=min(4, os.cpu_count() or 1), probmatching_method="cdf")
     out = []
-    for g in fc:
-        g = cv2.resize(g.astype(np.float32), (nx, ny), interpolation=cv2.INTER_LINEAR) if down > 1 else g.astype(np.float32)
+    for i in range(len(fc)):  # frame by frame: converting all at once would copy the whole stack several times
+        g = np.where(np.isfinite(fc[i]), 10.0 ** (fc[i].astype(np.float32) / 10.0), 0.0).astype(np.float32)  # dB -> mm/h
+        g[g < 0.1] = 0  # below 0.1 mm/h counts as dry, as in pySTEPS' inverse dB transform
+        g = cv2.resize(g, (nx, ny), interpolation=cv2.INTER_LINEAR) if down > 1 else g
         g[g < 0.05] = 0
         g[last < 0] = NODATA
-        out.append(g)
+        out.append(g.astype(np.float16))  # compact right away: 24 full-size float32 frames would need ~1.6 GB
     return out
 
 
@@ -416,6 +430,7 @@ class EuropeOpera(Region):
     BUCKET = "https://s3.waw3-1.cloudferro.com/openradar-24h"
     LAEA = "+proj=laea +lat_0=55.0 +lon_0=10.0 +x_0=1950000.0 +y_0=-2100000.0 +units=m +ellps=WGS84"
     CELL, NY, NX = 1000.0, 4400, 3800   # full 1 km resolution
+    KM_PER_PX = 1.0
     SMOOTH, FLOW_DOWN = 2.0, 4          # same physical scales as the backtested 2 km setup
     MODEL_DEG = 0.15
     SPROG_DOWN = 2                      # S-PROG at 2 km (1 km would take ~4x as long)
@@ -461,6 +476,7 @@ class UsaNowcoast(Region):
     WMS = "https://nowcoast.noaa.gov/geoserver/observations/weather_radar/ows"
     BBOX = (-14000000.0, 2700000.0, -7400000.0, 6500000.0)  # CONUS in EPSG:3857
     NX, NY = 2200, 1267
+    KM_PER_PX = 2.3                     # 3 km Web Mercator pixels at ~40 N
     MODEL_DEG = 0.2
     SPROG_DOWN = 1
     RAMP = [(6, "599494"), (8, "3bb1b1"), (9, "1dcece"), (10, "00ecec"), (11, "00d9ee"), (13, "00c6f1"), (14, "00b3f3"),
@@ -707,12 +723,54 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/radar/point":
                 name, series, ref = point_series(float(q["lat"]), float(q["lon"]))
                 return self.send(200, json.dumps({"region": name, "series": series, "ref": ref}).encode(), "application/json", 60)
+            if u.path == "/api/push/key":
+                return self.send(200, json.dumps({"key": ALERTS.public_key}).encode(), "application/json", 3600)
+            if u.path == "/api/push/preview":  # what the alert logic sees at a place (for testing, sends nothing)
+                s = ALERTS.series(float(q["lat"]), float(q["lon"]), ll_to_3857)
+                cfg = {"lead": int(q.get("lead", 20)), "early": True, "quiet": False, "tz": q.get("tz", "UTC")}
+                kind, info = alerts.AlertEngine.evaluate(s, int(time.time() * 1000), cfg, {}) if s else (None, {})
+                text = alerts.AlertEngine.message(kind, info, "Test", cfg["tz"]) if kind else None
+                body = {"would_send": kind, "message": text, "info": info,
+                        "series": [{"ts": t, "fc": f, "wet_share": round(p, 2), "mmh": round(r, 2)} for t, f, p, r in (s or [])]}
+                return self.send(200, json.dumps(body, ensure_ascii=False).encode(), "application/json", 0)
             return self.send(404, b"not found", "text/plain")
         except Exception as e:
             return self.send(400, str(e).encode(), "text/plain", 0)
 
+    def do_OPTIONS(self):  # CORS preflight for the JSON POSTs below
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Max-Age", "86400")
+        self.end_headers()
+
+    def do_POST(self):
+        u = urlparse(self.path)
+        try:
+            n = int(self.headers.get("Content-Length", "0"))
+            if n > 20_000:
+                return self.send(413, b"too large", "text/plain", 0)
+            body = json.loads(self.rfile.read(n) or b"{}")
+            if u.path == "/api/push/subscribe":
+                sid = ALERTS.subscribe(body)
+                return self.send(200, json.dumps({"id": sid}).encode(), "application/json", 0)
+            if u.path == "/api/push/unsubscribe":
+                ALERTS.unsubscribe(str(body.get("id")))
+                return self.send(200, b"{}", "application/json", 0)
+            if u.path == "/api/push/test":
+                ok = ALERTS.send(str(body.get("id")), {"title": "🌧 Regenwarnung ist aktiv",
+                                                       "body": "So sieht eine Warnung aus, wenn Regen auf dich zukommt."})
+                return self.send(200 if ok else 404, json.dumps({"ok": ok}).encode(), "application/json", 0)
+            return self.send(404, b"not found", "text/plain", 0)
+        except Exception as e:
+            return self.send(400, str(e).encode(), "text/plain", 0)
+
+
+ALERTS = alerts.AlertEngine(DATA_DIR, REGIONS, log, UA, VAPID_SUBJECT)
 
 if __name__ == "__main__":
+    threading.Thread(target=ALERTS.loop, args=(ll_to_3857,), daemon=True).start()
     for r in REGIONS.values():
         threading.Thread(target=update_loop, args=(r,), daemon=True).start()
         if r.MODEL_DEG:

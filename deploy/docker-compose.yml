@@ -4,6 +4,7 @@ volumes:
   open-meteo-data:
   caddy-data:
   model-log:
+  push-data:
 
 services:
   api:
@@ -14,8 +15,11 @@ services:
       OPENMETEO: "1"            # tells the app to use /om instead of the public Open-Meteo API
       OPENMETEO_URL: http://openmeteo:8080   # model rain for blending the second hour of the nowcast
       MODEL_LOG_DIR: /app/model_log
+      DATA_DIR: /app/data
+      VAPID_SUBJECT: https://${DOMAIN}       # Web Push contact claim: the app's domain, no personal address
     volumes:
       - model-log:/app/model_log           # model snapshots for verify_blend.py
+      - push-data:/app/data                # push subscriptions and the VAPID key (must survive updates)
 
   openmeteo:
     image: ghcr.io/open-meteo/open-meteo
