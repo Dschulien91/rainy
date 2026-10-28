@@ -72,7 +72,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v0.17"
+VERSION = "server-v0.18"
 PORT = int(os.environ.get("PORT", "8771"))
 UA = "Mozilla/5.0"          # neutral, carries no identity
 HISTORY_MS = 60 * 60_000    # observed frames kept (1 h)
@@ -645,9 +645,23 @@ def view_coords(bbox, w, h):
 
 
 def sample(region, grid, X, Y):
-    """Bilinear interpolation between grid pixels (smooth edges instead of blocks); returns rate and coverage."""
-    col, row = (v.astype(np.float32) for v in region.to_pixels(X, Y))
-    g = grid.astype(np.float32)
+    """Bilinear interpolation between grid pixels (smooth edges instead of blocks); returns rate and coverage.
+
+    Only the window of the grid around the points is converted (the EU grid is 4400 x 3800: converting all of it
+    per tile or point cost ~200 MB and seconds each, which made parallel tile requests run out of memory). For a
+    dense output grid (map tiles) much coarser than the data, the window is decimated to ~2 data pixels per output
+    pixel."""
+    col, row = (np.asarray(v, np.float64) for v in region.to_pixels(X, Y))
+    h, w = grid.shape
+    c0, c1 = max(int(np.floor(col.min())) - 1, 0), min(int(np.ceil(col.max())) + 2, w)
+    r0, r1 = max(int(np.floor(row.min())) - 1, 0), min(int(np.ceil(row.max())) + 2, h)
+    if c0 >= c1 or r0 >= r1:
+        return np.zeros(X.shape, np.float32), np.zeros(X.shape, bool)
+    step = 1
+    if X.ndim == 2 and min(X.shape) >= 64:
+        step = max(1, int(min((c1 - c0) / X.shape[1], (r1 - r0) / X.shape[0]) / 2))
+    g = grid[r0:r1:step, c0:c1:step].astype(np.float32)
+    col, row = ((col - c0) / step).astype(np.float32), ((row - r0) / step).astype(np.float32)
     rate = cv2.remap(np.where(g < 0, 0, g), col, row, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
     cov = cv2.remap((g >= 0).astype(np.float32), col, row, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
     return rate, cov > 0.5
