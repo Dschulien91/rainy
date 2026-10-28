@@ -24,6 +24,8 @@ Endpoints (all CORS-enabled, cache headers suitable for a CDN):
   GET /api/radar/image?region=&ts=&bbox=&width=&height=   (bbox in EPSG:3857) -> PNG in the rainy palette
   GET /api/radar/point?lat=&lon=               -> {"region": "eu"|"us"|"sat"|null, "series": [{"ts", "mmh"}], "ref": ms}
   GET /api/radar/mask?bbox=&width=&height=     -> PNG, opaque where radar coverage exists (for the "no data" hatching)
+  Seamless map tiles for the app (server/mosaic.py; DWD + OPERA + NOAA + satellite in one, CDN-cacheable):
+  GET /api/rain/frames, /api/rain/point?lat=&lon=, /tiles/rain/<key>/<ts>/<z>/<x>/<y>.png, /tiles/cloud/...
   Clouds for the "sunny" map (server/clouds.py, Europe, EUMETSAT GeoColour + nowcast):
   GET /api/cloud/frames                        -> {"frames": [{"ts", "fc"}], "ref": ms}
   GET /api/cloud/image?ts=&bbox=&width=&height= -> grey + alpha PNG, grey = cloudiness 0..255
@@ -60,6 +62,7 @@ from pyproj import Transformer
 
 import alerts
 import clouds
+import mosaic
 
 try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is used
     from pysteps import motion as ps_motion, nowcasts as ps_nowcasts
@@ -68,7 +71,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v0.12"
+VERSION = "server-v0.13"
 PORT = int(os.environ.get("PORT", "8771"))
 UA = "Mozilla/5.0"          # neutral, carries no identity
 HISTORY_MS = 60 * 60_000    # observed frames kept (1 h)
@@ -743,8 +746,26 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/health":
                 info = {name: {"frames": len(r.frames()[0]), "ref": r.ref} for name, r in REGIONS.items()}
                 info["clouds"] = {"frames": len(CLOUDS.frames()[0]), "ref": CLOUDS.ref}
+                info["de"] = {"frames": len(DE.frames()[0]), "ref": DE.ref}
                 body = {"version": VERSION, "regions": info, "openmeteo": openmeteo_available()}
                 return self.send(200, json.dumps(body).encode(), "application/json", 10)
+            if u.path.startswith("/tiles/"):
+                m = re.fullmatch(r"/tiles/(rain|cloud)/([\w-]+)/(\d+)/(\d+)/(\d+)/(\d+)\.png", u.path)
+                if not m:
+                    return self.send(404, b"not found", "text/plain", 60)
+                kind, key, ts, z, x, y = m.group(1), m.group(2), *map(int, m.groups()[2:])
+                if not (2 <= z <= 13 and 0 <= x < (1 << z) and 0 <= y < (1 << z)):
+                    return self.send(404, b"bad tile", "text/plain", 3600)
+                png = MOSAIC.rain_tile(key, ts, z, x, y) if kind == "rain" else MOSAIC.cloud_tile(key, ts, z, x, y)
+                if png is None:
+                    return self.send(404, b"unknown frame", "text/plain", 30)
+                return self.send(200, png, "image/png", 86400)  # the key in the URL makes the content immutable
+            if u.path == "/api/rain/frames":
+                body = {"key": MOSAIC.key(), "frames": MOSAIC.frames()}
+                return self.send(200, json.dumps(body).encode(), "application/json", 30)
+            if u.path == "/api/rain/point":
+                body = {"key": MOSAIC.key(), "series": MOSAIC.rain_point(float(q["lat"]), float(q["lon"]))}
+                return self.send(200, json.dumps(body).encode(), "application/json", 60)
             if u.path == "/api/cloud/frames":
                 frames, ref = CLOUDS.frames()
                 return self.send(200, json.dumps({"frames": frames, "ref": ref}).encode(), "application/json", 30)
@@ -820,10 +841,13 @@ class Handler(BaseHTTPRequestHandler):
 
 ALERTS = alerts.AlertEngine(DATA_DIR, REGIONS, log, UA, VAPID_SUBJECT)
 CLOUDS = clouds.CloudNowcast(fetch, log, OPENMETEO_URL, openmeteo_available, ll_to_3857)
+DE = mosaic.GermanyDwd(fetch, log)
+MOSAIC = mosaic.Mosaic(REGIONS, DE, CLOUDS, sample, colorize, log)
 
 if __name__ == "__main__":
     threading.Thread(target=ALERTS.loop, args=(ll_to_3857,), daemon=True).start()
     threading.Thread(target=CLOUDS.loop, daemon=True).start()
+    threading.Thread(target=mosaic.de_loop, args=(DE, log), daemon=True).start()
     for r in REGIONS.values():
         threading.Thread(target=update_loop, args=(r,), daemon=True).start()
         if r.MODEL_DEG:

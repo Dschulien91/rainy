@@ -15,6 +15,7 @@ The model is the self-hosted Open-Meteo "best match" (ICON-D2, AROME, HARMONIE, 
 import io
 import json
 import math
+import os
 import threading
 import time
 import urllib.parse
@@ -30,6 +31,9 @@ LAYER = "mtg_fd:rgb_geocolour"
 BBOX = (-2783000.0, 4028802.0, 5009000.0, 11753184.0)  # 25 W - 45 E, 34 N - 72 N in EPSG:3857
 N = 3100                                                 # 2.5 km Web Mercator pixels (~1.5 km on the ground)
 OBS_KEEP = 7                                             # observed frames: the last hour in 10 min steps
+# every observed image is also logged at 10 km for backtests of the nowcast (server/verify_clouds.py)
+LOG_DIR = os.environ.get("CLOUD_LOG_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "cloud_log"))
+LOG_DOWN, LOG_KEEP_S = 4, 72 * 3600
 FC_STEP_MS = 15 * 60_000                                 # forecast frames on the app's 15 min timeline
 FC_HORIZON_MS = 3 * 3600_000                             # beyond the newest image (it is ~35 min old already)
 SAT_FULL_MIN, SAT_ZERO_MIN = 60, 240                     # satellite weight: 1 for the first hour, 0 from 4 h
@@ -98,6 +102,18 @@ class CloudNowcast:
         rgb = np.asarray(Image.open(io.BytesIO(self.fetch(url, timeout=120))).convert("RGB"))
         return (cloudiness(rgb) * 255).astype(np.uint8)
 
+    def _log(self, ts, g):
+        try:
+            os.makedirs(LOG_DIR, exist_ok=True)
+            small = cv2.resize(g, (N // LOG_DOWN, N // LOG_DOWN), interpolation=cv2.INTER_AREA)
+            np.savez_compressed(os.path.join(LOG_DIR, f"obs_{ts}.npz"), cloud=small)
+            for f in os.listdir(LOG_DIR):
+                fp = os.path.join(LOG_DIR, f)
+                if time.time() - os.path.getmtime(fp) > LOG_KEEP_S:
+                    os.remove(fp)
+        except OSError as e:
+            self.log(f"cloud log failed: {e}")
+
     def refresh_model(self):
         """Hourly total cloud cover on a 0.25 deg grid over Europe (self-hosted Open-Meteo, ~43k points)."""
         if not self.om_ok() or time.time() - self.model_at < MODEL_REFRESH_S:
@@ -119,9 +135,15 @@ class CloudNowcast:
                 cover = np.zeros((len(times), len(la)), np.float32)
             for j, e in enumerate(d):
                 cover[:, i + j] = [(v or 0.0) / 100.0 for v in e["hourly"]["cloud_cover"]]
+        cover = cover.reshape(len(times), len(self.lats), len(self.lons))
         with self.lock:
-            self.model = (times, cover.reshape(len(times), len(self.lats), len(self.lons)))
+            self.model = (times, cover)
         self.model_at = time.time()
+        try:  # model snapshot for fair backtests (only data that existed at the forecast time)
+            os.makedirs(LOG_DIR, exist_ok=True)
+            np.savez_compressed(os.path.join(LOG_DIR, f"model_{int(self.model_at * 1000)}.npz"), times=times, cover=cover.astype(np.float16))
+        except OSError as e:
+            self.log(f"cloud model log failed: {e}")
         self.log(f"[{datetime.now():%H:%M:%S}] clouds: model cloud cover for {len(la)} points")
 
     def model_field(self, ts):
@@ -146,6 +168,7 @@ class CloudNowcast:
             g = self._load(t)
             with self.lock:
                 self.obs[t] = g
+            self._log(t, g)
         with self.lock:
             for t in list(self.obs):
                 if t not in want:

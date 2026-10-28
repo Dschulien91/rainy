@@ -1,3 +1,4 @@
 server/model_log/
 __pycache__/
 server/data/
+server/cloud_log/

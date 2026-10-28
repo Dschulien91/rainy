@@ -78,7 +78,8 @@
   body.sunny .basemap { filter: sepia(0.55) saturate(1.6) hue-rotate(-12deg) brightness(1.08); } /* light orange cast */
   .eu-frame, .srvus-frame, .srvsat-frame { transition: opacity 0.45s linear; filter: blur(1px); } /* already interpolated by the server */
   .sat-frame { transition: opacity 0.4s ease; filter: blur(3px); }
-  .cloud-frame { transition: opacity 0.4s ease; } /* sharp cloud edges, drawn at screen resolution */
+  .rain-tiles { transition: opacity 0.35s linear; filter: blur(1px); }
+  .cloud-tiles { transition: opacity 0.4s ease; } /* sharp cloud edges, drawn at screen resolution */
   /* dark map: lighten instead of covering, so sun tint reads as warm light and not olive */
   .place button { border: 0; background: var(--night); color: var(--fg); border-radius: 999px;
     font-size: 11px; padding: 1px 7px; margin-left: 6px; cursor: pointer; }
@@ -299,7 +300,7 @@
 <script src="https://unpkg.com/@maplibre/maplibre-gl-leaflet@0.0.22/leaflet-maplibre-gl.js"></script>
 <script>
 "use strict";
-const VERSION = "v0.43";
+const VERSION = "v0.44";
 const FALLBACK = { lat: 53.5511, lon: 9.9937, name: "Hamburg" };
 const DWD_WMS = "https://maps.dwd.de/geoserver/dwd/wms";
 const EUM_WMS = "https://view.eumetsat.int/geoserver/ows";
@@ -315,7 +316,7 @@ const serverReady = API_BASE ? fetch(`${API_BASE}/api/health`).then((r) => r.jso
   if (h.openmeteo) OM_BASE = `${API_BASE}/om`;
   return h;
 }).catch(() => null) : Promise.resolve(null);
-const isImgKind = (k) => k === "radar" || k === "sat" || k === "cloud" || k === "eu" || k === "srvus" || k === "srvsat" || k === "ca" || k === "us";
+const isImgKind = (k) => k === "radar" || k === "sat" || k === "eu" || k === "srvus" || k === "srvsat" || k === "ca" || k === "us";
 // Canada (ECCC GeoMet): rain rate in 14 discrete classes, observations every 6 min plus a 72 min nowcast.
 const CA_WMS = "https://geo.weather.gc.ca/geomet";
 const CA_CLASSES = { "98cbfe": 0.3, "0098fe": 1.4, "00fe66": 2.8, "00cb00": 5.7, "009800": 9.8, "006600": 13.9,
@@ -392,6 +393,7 @@ const state = {
   loc: null, home: null, picked: false, placeName: "",
   point: null,           // Open-Meteo minutely_15 series for the location
   radarPoint: [],        // Bright Sky radar series for the location ({ts, mmh}), empty outside Germany
+  tileKey: { rain: null, cloud: null }, // data-run keys of the server's map tiles
   cloudPoint: [],        // our server's cloudiness series ({ts, fc, cloud}), empty outside Europe / without the server
   satLatest: null,       // newest available satellite cloud mask (ms)
   grid: null,            // Open-Meteo grid for model maps
@@ -684,24 +686,6 @@ const RENDER = {
   async eu(view, ts, ref) { return serverRadar("eu", view, ts, ref); },
   async srvus(view, ts, ref) { return serverRadar("us", view, ts, ref); },
   async srvsat(view, ts, ref) { return serverRadar("sat", view, ts, ref); },
-  // Clouds from our server (Europe): observed GeoColour clouds and the nowcast, as a cloudiness field that is
-  // drawn here at screen resolution with a sharp edge, so clouds get crisp outlines at every zoom level.
-  async cloud(view, ts) {
-    const mpp = 40075016.69 / (256 * 2 ** view.zoom); // Web Mercator metres per screen pixel
-    const w = clamp(Math.round((view.se.x - view.nw.x) / mpp), 64, 2048), h = clamp(Math.round((view.nw.y - view.se.y) / mpp), 64, 2048);
-    const img = await loadImage(`${API_BASE}/api/cloud/image?ts=${ts}&bbox=${view.bbox}&width=${w}&height=${h}`);
-    const c = document.createElement("canvas");
-    c.width = w; c.height = h;
-    const ctx = c.getContext("2d", { willReadFrequently: true });
-    ctx.drawImage(img, 0, 0);
-    const data = ctx.getImageData(0, 0, w, h), px = data.data, day = isDayAt(ts) ? 1 : 0;
-    for (let i = 0; i < px.length; i += 4) {
-      if (px[i + 3] < 128) { px[i + 3] = 0; continue; }
-      paintSky(px, i, cloudOpacity(px[i] / 255), day);
-    }
-    ctx.putImageData(data, 0, 0);
-    return { canvas: c };
-  },
   // EUMETSAT MTG GeoColour (every 10 min, ~1 km): true colour by day; by night infrared clouds plus a fog/low-cloud
   // channel (light blue), so fog and low stratus show up day and night, unlike the plain cloud mask.
   async sat(view, ts) {
@@ -824,6 +808,7 @@ function clearImgFrames() {
 function preloadFrames() {
   const token = ++preloadToken;
   const s = cur();
+  preloadTiles(s);
   const order = [...s.frames.slice(s.idx), ...s.frames.slice(0, s.idx).reverse()]
     .map((f) => isImgKind(f.map.kind) && resolveMap(f.map)).filter(Boolean).map((m) => imgFrame(m.kind, m.ts, m.ref));
   let active = 0;
@@ -1192,7 +1177,7 @@ async function loadCloudPoint(loc) {
   await serverReady;
   try {
     const d = await getJSON(`${API_BASE}/api/cloud/point?lat=${loc.lat}&lon=${loc.lon}`);
-    state.cloudPoint = d.series || []; state.cloudRef = d.ref;
+    state.cloudPoint = d.series || []; state.cloudRef = d.ref; state.tileKey.cloud = d.ref;
   } catch {}
 }
 // Country of a place (Photon / OpenStreetMap, anonymous), cached; "" when unknown.
@@ -1212,7 +1197,16 @@ async function loadRadarPoint(loc) {
   // DWD (via Bright Sky) only for places in Germany: Bright Sky answers "0 mm" far beyond the reach of the German
   // radars (e.g. Wroclaw, Amsterdam), which would show rain as dry. Elsewhere our server's OPERA radar is used.
   // Without our server, DWD remains the only European source, so then the rough Germany box decides.
-  if (cc === "DE" || (!API_BASE && (cc ? false : inBox(DE_BOX, loc.lat, loc.lon)))) {
+  if (API_BASE && cc !== "CA" && !(loc.lon < -50 && !inBox(US_BOX, loc.lat, loc.lon))) {
+    // our server: the same seamless mosaic the map shows (DWD in Germany, OPERA, NOAA, satellite estimate)
+    try {
+      await serverReady;
+      const d = await getJSON(`${API_BASE}/api/rain/point?lat=${loc.lat}&lon=${loc.lon}`);
+      state.radarPoint = (d.series || []).map((r) => ({ ts: r.ts, mmh: r.mmh, ref: r.fc ? 1 : null }));
+      state.radarSource = "rtile"; state.tileKey.rain = d.key;
+    } catch { state.radarPoint = []; }
+  }
+  if (!state.radarPoint.length && (cc === "DE" || (!API_BASE && (cc ? false : inBox(DE_BOX, loc.lat, loc.lon))))) {
     try {
       const d = await getJSON(`https://api.brightsky.dev/radar?lat=${loc.lat}&lon=${loc.lon}&distance=1000&format=plain` +
         `&date=${iso(now - 3600e3)}&last_date=${iso(now + 2.5 * 3600e3)}`);
@@ -1343,7 +1337,7 @@ function buildViews() {
       if (e && Math.abs(e.ts - ts) <= 7.5 * 60e3) {
         // sun share around the place: 1 - mean cloudiness, scaled like the map's cloud edge
         const sun = isDay ? 1 - clamp((e.cloud - 0.15) / 0.35, 0, 1) : 0;
-        return { ts, value: sun, model: sun, isDay, temp: temp(ts), map: { kind: "cloud", ts: e.ts, fc: e.fc } };
+        return { ts, value: sun, model: sun, isDay, temp: temp(ts), map: { kind: "ctile", ts: e.ts, fc: e.fc } };
       }
       // Sun share = clear-sky share from the same cloud cover the map shows (the model's separate
       // sunshine-duration field often contradicts its own cloud cover).
@@ -1438,7 +1432,7 @@ async function loadProviderTimes(kind) {
   renderFrame(); preloadFrames();
 }
 function resolveMap(m) {
-  if (!isImgKind(m.kind) || m.kind === "sat" || m.kind === "cloud") return m;
+  if (!isImgKind(m.kind) || m.kind === "sat") return m;
   const prov = providerForView();
   if (prov === m.kind) return m;
   if (!prov) return null;
@@ -1450,15 +1444,89 @@ function resolveMap(m) {
   return best ? { kind: prov, ts: best.ts, ref: best.ref } : null;
 }
 
+// ---------- Map tiles from our server ----------
+// One seamless map for all countries (DWD, OPERA, NOAA, satellite merged on the server), as z/x/y tiles that are
+// the same for every user and therefore served from the CDN cache. One tile layer per time step; the key in the
+// URL changes with every new data run, so cached tiles never go stale.
+const tileLayers = new Map();
+let shownTiles = null;
+const CloudTiles = L.GridLayer.extend({
+  createTile(c, done) {
+    const tile = document.createElement("canvas");
+    tile.width = tile.height = 256;
+    loadImage(L.Util.template(this.options.url, c)).then((img) => {
+      const ctx = tile.getContext("2d", { willReadFrequently: true });
+      ctx.drawImage(img, 0, 0);
+      const d = ctx.getImageData(0, 0, 256, 256), px = d.data, day = isDayAt(this.options.ts) ? 1 : 0;
+      for (let i = 0; i < px.length; i += 4) {
+        if (px[i + 3] < 128) { px[i + 3] = 0; continue; }
+        paintSky(px, i, cloudOpacity(px[i] / 255), day);
+      }
+      ctx.putImageData(d, 0, 0);
+      done(null, tile);
+    }, () => done(null, tile)); // missing tile: stay empty
+    return tile;
+  },
+});
+function tileLayer(kind, ts) {
+  const id = `${kind}/${state.tileKey[kind]}/${ts}`;
+  let layer = tileLayers.get(id);
+  if (!layer) {
+    const url = `${API_BASE}/tiles/${id}/{z}/{x}/{y}.png`;
+    layer = kind === "rain"
+      ? L.tileLayer(url, { pane: "weather", opacity: 0, maxNativeZoom: 10, className: "rain-tiles", crossOrigin: "anonymous" })
+      : new CloudTiles({ pane: "weather", opacity: 0, className: "cloud-tiles", url, ts });
+    layer.id = id;
+    tileLayers.set(id, layer);
+  }
+  if (!map.hasLayer(layer)) layer.addTo(map);
+  return layer;
+}
+// Show a time step; the previous one stays visible until the new tiles are in (no blank flashes while playing).
+function showTiles(kind, ts) {
+  const layer = tileLayer(kind, ts);
+  const swap = () => {
+    if (showTiles.want !== layer) return;
+    layer.setOpacity(1);
+    if (shownTiles && shownTiles !== layer) shownTiles.setOpacity(0);
+    shownTiles = layer;
+  };
+  showTiles.want = layer;
+  if (layer.isLoading()) layer.once("load", swap); else swap();
+}
+function hideTiles() {
+  showTiles.want = null;
+  if (shownTiles) shownTiles.setOpacity(0);
+  shownTiles = null;
+}
+// Load all time steps of the open timeline one after another (from the selected one), drop the others.
+function preloadTiles(s) {
+  const want = [...s.frames.slice(s.idx), ...s.frames.slice(0, s.idx).reverse()]
+    .filter((f) => f.map.kind === "rtile" || f.map.kind === "ctile")
+    .map((f) => `${f.map.kind === "rtile" ? "rain" : "cloud"}/${state.tileKey[f.map.kind === "rtile" ? "rain" : "cloud"]}/${f.map.ts}`);
+  for (const [id, layer] of tileLayers) {
+    if (!want.includes(id)) { layer.remove(); tileLayers.delete(id); if (shownTiles === layer) shownTiles = null; }
+  }
+  const token = preloadToken, queue = [...new Set(want)];
+  const next = () => {
+    if (token !== preloadToken || !queue.length) return;
+    const [kind, , ts] = queue.shift().split("/");
+    const layer = tileLayer(kind, +ts);
+    if (layer.isLoading()) layer.once("load", next); else next();
+  };
+  next(); next(); // two time steps in parallel
+}
+
 // ---------- Rendering ----------
 function renderFrame() {
   const s = cur(), f = s.frames[s.idx];
   if (!f) return;
   const k = f.map.kind;
-  if (k === "model") { hideImg(); hideNowcast(); showGrid(f.ts, state.mode === "rain" ? "rain" : "cloud"); }
-  else if (k === "nowcast") { hideImg(); hideGrid(); showNowcast(f); }
+  if (k === "rtile" || k === "ctile") { hideImg(); hideGrid(); hideNowcast(); showTiles(k === "rtile" ? "rain" : "cloud", f.map.ts); }
+  else if (k === "model") { hideTiles(); hideImg(); hideNowcast(); showGrid(f.ts, state.mode === "rain" ? "rain" : "cloud"); }
+  else if (k === "nowcast") { hideTiles(); hideImg(); hideGrid(); showNowcast(f); }
   else {
-    hideGrid(); hideNowcast();
+    hideTiles(); hideGrid(); hideNowcast();
     const m = resolveMap(f.map);
     if (m) showImg(m.kind, m.ts, m.ref); else hideImg();
   }
@@ -1478,7 +1546,8 @@ function updateSource() {
     : k === "srvsat" ? "Kein Radar – Regen aus Satellit geschätzt (EUMETSAT)"
     : k === "ca" ? (fc ? "Radar-Vorhersage (Environment Canada)" : "Radar gemessen (Environment Canada)")
     : k === "us" ? "Radar gemessen (NOAA)"
-    : k === "cloud" ? (shown.fc ? `Satellit hochgerechnet + Wettermodell (Bild von ${fmtTime(state.cloudRef)})` : `Satellit (EUMETSAT) · Stand ${fmtTime(f.map.ts)}`)
+    : k === "rtile" ? (shown.ref ? "Radar-Vorhersage (DWD in Deutschland, sonst rainy)" : "Radar gemessen (DWD, EUMETNET OPERA, NOAA)")
+    : k === "ctile" ? (shown.fc ? `Satellit hochgerechnet + Wettermodell (Bild von ${fmtTime(state.cloudRef)})` : `Satellit (EUMETSAT) · Stand ${fmtTime(f.map.ts)}`)
     : f.map.kind === "sat" ? `Satellit (${state.satRegion === "meteosat" ? "EUMETSAT" : "NOAA GOES / NASA"}) · Stand ${fmtTime(f.map.ts)}`
     : f.map.kind === "nowcast" ? `Satellit hochgerechnet${nowcast.motion ? " (Zug: " + nowcast.motion.source + ")" : ""}` +
       (f.map.w < 0.5 ? " + Modell" : "")

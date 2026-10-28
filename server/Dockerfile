@@ -5,6 +5,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends build-essential
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 # server plus the backtest scripts (verify_*.py, compare_pysteps.py)
-COPY *.py .
+COPY *.py *.json ./
 EXPOSE 8771
 CMD ["python", "-u", "rainy_server.py"]
