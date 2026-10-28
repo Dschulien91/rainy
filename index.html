@@ -273,7 +273,7 @@
 <script src="https://unpkg.com/@maplibre/maplibre-gl-leaflet@0.0.22/leaflet-maplibre-gl.js"></script>
 <script>
 "use strict";
-const VERSION = "v0.40";
+const VERSION = "v0.41";
 const FALLBACK = { lat: 53.5511, lon: 9.9937, name: "Hamburg" };
 const DWD_WMS = "https://maps.dwd.de/geoserver/dwd/wms";
 const EUM_WMS = "https://view.eumetsat.int/geoserver/ows";
@@ -501,6 +501,21 @@ const CLOUD_RGB = dark ? [236, 240, 247] : [128, 128, 128];
 // Clear sky by day: a warm yellow-to-red glow (pick a variant for testing with ?sun=1..4)
 const SUN_VARIANTS = { 1: [[255, 150, 20], 0.34], 2: [[255, 95, 35], 0.34], 3: [[255, 200, 40], 0.3], 4: [[240, 60, 70], 0.3] };
 const [SUN_RGB, SUN_ALPHA] = SUN_VARIANTS[new URLSearchParams(location.search).get("sun")] || SUN_VARIANTS[1];
+// Satellite look (test with ?sat=photo): "clouds" = clouds from the satellite photo drawn as our cloud layer with
+// the sun tint on clear sky; "photo" = the EUMETSAT GeoColour photo itself, like classic satellite maps.
+const SAT_STYLE = new URLSearchParams(location.search).get("sat") === "photo" ? "photo" : "clouds";
+const PHOTO_ALPHA = 0.92;
+// Cloud opacity from a GeoColour pixel: clouds are bright and grey/white (by night: grey high cloud, light-blue fog
+// and low cloud), land, sea and city lights have at least one dark channel.
+const photoCloud = (r, g, b) => 0.85 * clamp((Math.min(r, g, b) - 80) / 90, 0, 1);
+// Paint cloud opacity ac over the sun tint (by day) into an RGBA buffer at i4; returns the resulting alpha.
+function paintSky(px, i4, ac, day) {
+  const tint = day ? SUN_ALPHA * (1 - Math.min(1, ac / 0.5)) : 0, a = ac + tint * (1 - ac);
+  if (a <= 0.01) { px[i4 + 3] = 0; return 0; }
+  for (let k = 0; k < 3; k++) px[i4 + k] = (CLOUD_RGB[k] * ac + SUN_RGB[k] * tint * (1 - ac)) / a;
+  px[i4 + 3] = a * 255;
+  return a;
+}
 
 // DWD radar legend colors (style "niederschlagsradar") -> representative mm/h of each class.
 const DWD_CLASSES = {
@@ -582,42 +597,29 @@ const RENDER = {
   async eu(view, ts, ref) { return serverRadar("eu", view, ts, ref); },
   async srvus(view, ts, ref) { return serverRadar("us", view, ts, ref); },
   async srvsat(view, ts, ref) { return serverRadar("sat", view, ts, ref); },
-  // EUMETSAT cloud mask (where clouds are, day and night) shaded with the 1 km infrared image (cloud texture).
+  // EUMETSAT MTG GeoColour (every 10 min, ~1 km): true colour by day; by night infrared clouds plus a fog/low-cloud
+  // channel (light blue), so fog and low stratus show up day and night, unlike the plain cloud mask.
   async sat(view, ts) {
     const region = satRegion(L.CRS.EPSG3857.unproject(L.point((view.nw.x + view.se.x) / 2, (view.nw.y + view.se.y) / 2)).lng);
     if (region !== "meteosat") return goesSat(view, ts, region);
-    const irTs = Math.floor(ts / 600e3) * 600e3; // IR comes every 10 min
-    const [clm, ir] = await Promise.all([
-      loadImage(wmsUrl(EUM_WMS, "msg_fes:clm", view, ts)),
-      loadImage(wmsUrl(EUM_WMS, "mtg_fd:ir105_hrfi", view, irTs)).catch(() => null),
-    ]);
-    const [c, ctx] = canvasFor(view, clm);
+    const url = wmsUrl(EUM_WMS, "mtg_fd:rgb_geocolour", view, Math.floor(ts / 600e3) * 600e3)
+      .replace("format=image/png&transparent=true", "format=image/jpeg"); // photo: JPEG is ~7x smaller
+    const [c, ctx] = canvasFor(view, await loadImage(url));
     const data = ctx.getImageData(0, 0, view.w, view.h), px = data.data;
-    const irPx = ir ? canvasFor(view, ir)[1].getImageData(0, 0, view.w, view.h).data : null;
     const day = isDayAt(ts) ? 1 : 0;
-    const strat = stratusField(view, ts);
     const mask = new Uint8Array(view.w * view.h); // 0 = no data, 1 = clear, 2 = cloud
+    const cloud = new Float32Array(view.w * view.h); // cloud opacity 0..0.85 (used by the nowcast)
+    const photo = SAT_STYLE === "photo" ? new Uint8ClampedArray(px) : null;
     for (let i = 0, p = 0; i < px.length; i += 4, p++) {
-      if (px[i + 3] < 128) { px[i + 3] = 0; continue; }
-      const cloud = px[i] > 200 && px[i + 1] > 200 && px[i + 2] > 200; // white = cloud, green/blue = clear
-      mask[p] = cloud ? 2 : 1;
-      if (cloud) {
-        const t = irPx ? clamp((irPx[i] - 60) / 140, 0, 1) : 0.5; // brighter IR = colder, thicker cloud
-        px[i] = CLOUD_RGB[0]; px[i + 1] = CLOUD_RGB[1]; px[i + 2] = CLOUD_RGB[2];
-        px[i + 3] = Math.round((0.5 + 0.45 * t) * 255);
-      } else if (strat && strat[p] > 0) {
-        // "clear" in the satellite mask, but the model has dense low cloud: fog / low stratus (see stratusField)
-        const s = strat[p], ac = 0.62 * s, as = SUN_ALPHA * day * (1 - s), a = ac + as * (1 - ac);
-        for (let k = 0; k < 3; k++) px[i + k] = (CLOUD_RGB[k] * ac + SUN_RGB[k] * as * (1 - ac)) / a;
-        px[i + 3] = Math.round(a * 255);
-        if (s >= 0.5) mask[p] = 2;
-      } else {
-        px[i] = SUN_RGB[0]; px[i + 1] = SUN_RGB[1]; px[i + 2] = SUN_RGB[2];
-        px[i + 3] = Math.round(SUN_ALPHA * 255 * day);
-      }
+      if (px[i] + px[i + 1] + px[i + 2] < 6) { px[i + 3] = 0; continue; } // outside the satellite's view
+      const ac = photoCloud(px[i], px[i + 1], px[i + 2]);
+      cloud[p] = ac;
+      mask[p] = ac >= 0.35 ? 2 : 1;
+      if (photo) px[i + 3] = PHOTO_ALPHA * 255;
+      else paintSky(px, i, ac, day);
     }
     ctx.putImageData(data, 0, 0);
-    return { canvas: c, mask };
+    return { canvas: c, mask, cloud, photo };
   },
 };
 
@@ -628,24 +630,19 @@ async function goesSat(view, ts, region) {
   const [c, ctx] = canvasFor(view, img);
   const data = ctx.getImageData(0, 0, view.w, view.h), px = data.data;
   const day = isDayAt(ts) ? 1 : 0;
-  const mask = new Uint8Array(view.w * view.h);
+  const mask = new Uint8Array(view.w * view.h), cloud = new Float32Array(view.w * view.h);
   for (let i = 0, p = 0; i < px.length; i += 4, p++) {
     if (px[i + 3] < 128) { px[i + 3] = 0; continue; }
     const r = px[i], g = px[i + 1], b = px[i + 2];
     const colored = Math.max(r, g, b) - Math.min(r, g, b) > 30;
     const t = colored ? 1 : clamp((r - 140) / 80, 0, 1); // cloudiness from IR brightness
-    const cloud = t > 0.15;
-    mask[p] = cloud ? 2 : 1;
-    if (cloud) {
-      px[i] = CLOUD_RGB[0]; px[i + 1] = CLOUD_RGB[1]; px[i + 2] = CLOUD_RGB[2];
-      px[i + 3] = Math.round((0.45 + 0.5 * t) * 255);
-    } else {
-      px[i] = SUN_RGB[0]; px[i + 1] = SUN_RGB[1]; px[i + 2] = SUN_RGB[2];
-      px[i + 3] = Math.round(SUN_ALPHA * 255 * day);
-    }
+    const ac = t > 0.15 ? 0.45 + 0.5 * t : 0;
+    mask[p] = ac ? 2 : 1;
+    cloud[p] = ac;
+    paintSky(px, i, ac, day);
   }
   ctx.putImageData(data, 0, 0);
-  return { canvas: c, mask };
+  return { canvas: c, mask, cloud };
 }
 
 function imgFrame(kind, ts, ref) {
@@ -662,7 +659,7 @@ function loadImgFrame(f) {
   f.pendingView = view.id;
   f.pending = RENDER[f.kind](view, f.ts, f.ref).then((res) => {
     if (f.pendingView !== view.id) return;
-    const url = res.canvas.toDataURL();
+    const url = f.kind === "sat" ? res.canvas.toDataURL("image/webp", 0.85) : res.canvas.toDataURL();
     if (!f.overlay) {
       f.overlay = L.imageOverlay(url, view.bounds, { pane: "weather", className: `${f.kind}-frame`, opacity: 0 }).addTo(map);
     } else { f.overlay.setUrl(url); f.overlay.setBounds(view.bounds); }
@@ -797,8 +794,8 @@ function loadNowcastBase() {
   if (nowcast.loading) return nowcast.loading;
   const view = makeView(2); // wide enough that shifting by up to ~3 h of motion keeps the screen covered
   nowcast.loading = RENDER.sat(view, ts).then((res) => {
-    const px = res.canvas.getContext("2d").getImageData(0, 0, view.w, view.h).data;
-    nowcast.base = { ts, view, bounds: view.bounds, zoom: view.zoom, mask: res.mask, px, url: res.canvas.toDataURL() };
+    nowcast.base = { ts, view, bounds: view.bounds, zoom: view.zoom, mask: res.mask, cloud: res.cloud, photo: res.photo,
+      url: res.canvas.toDataURL() };
     nowcast.cache.clear();
     if (applySatSamples()) { updateHeader(); drawChart(); }
   }).catch(() => {}).finally(() => { nowcast.loading = null; });
@@ -906,30 +903,29 @@ function nowcastImage(f) {
     c0[j * lw + i] = s0(lat, lon); c1[j * lw + i] = s1(lat, lon);
   }
   const [c, ctx] = canvasFor(v, null);
-  const out = ctx.createImageData(v.w, v.h), o = out.data, src = b.px;
+  const out = ctx.createImageData(v.w, v.h), o = out.data, photo = b.photo;
   const day = isDayAt(b.ts + dt);
   for (let y = 0, k = 0; y < v.h; y++) {
     for (let x = 0; x < v.w; x++, k++) {
-      const m = b.mask[k];
-      if (!m) continue;
+      if (!b.mask[k]) continue;
       const li = ((y / S) | 0) * lw + ((x / S) | 0), a0 = c0[li], a1 = a0 + TREND * (c1[li] - a0), i4 = k * 4;
       const modelCloud = 0.8 * c1[li] ** 1.3; // model cloudiness at this time, same scale as the satellite clouds
-      const form = a1 > a0 && a0 < 0.95 ? (a1 - a0) / (1 - a0) : 0;
-      let cloud;
-      if (m === 2) { // cloud pixel: keep the satellite texture, thin it out or thicken it
-        const alpha = src[i4 + 3] / 255;
-        cloud = a1 < a0 ? (a0 > 0.05 ? alpha * (a1 / a0) : alpha) : alpha + (1 - alpha) * form * 0.5;
-      } else cloud = form * 0.6; // clear pixel: new cloud forms
-      cloud = w * cloud + (1 - w) * modelCloud; // later hours lean on the model, but only the clouds fade
-      const tint = day ? SUN_ALPHA * (1 - Math.min(1, cloud / 0.5)) : 0;
-      const a = cloud + tint * (1 - cloud);
-      if (a <= 0.01) continue;
-      for (let ch = 0; ch < 3; ch++) o[i4 + ch] = (CLOUD_RGB[ch] * cloud + SUN_RGB[ch] * tint * (1 - cloud)) / a;
-      o[i4 + 3] = a * 255;
+      if (photo) {
+        // photo look: the shifted photo, cross-faded into the model's cloud layer as the nowcast loses weight
+        const am = paintSky(o, i4, modelCloud, day), ap = PHOTO_ALPHA * w, a = ap + am * (1 - w);
+        if (a <= 0.01) { o[i4 + 3] = 0; continue; }
+        for (let ch = 0; ch < 3; ch++) o[i4 + ch] = (photo[i4 + ch] * ap + o[i4 + ch] * am * (1 - w)) / a;
+        o[i4 + 3] = a * 255;
+        continue;
+      }
+      // keep the satellite texture, thin it out or let new cloud form per the model trend
+      const alpha = b.cloud[k], form = a1 > a0 && a0 < 0.95 ? (a1 - a0) / (1 - a0) : 0;
+      const cloud = a1 < a0 ? (a0 > 0.05 ? alpha * (a1 / a0) : alpha) : alpha + (1 - alpha) * form * 0.5;
+      paintSky(o, i4, w * cloud + (1 - w) * modelCloud, day); // later hours lean on the model
     }
   }
   ctx.putImageData(out, 0, 0);
-  const url = c.toDataURL();
+  const url = c.toDataURL("image/webp", 0.85); // ~5x smaller than PNG (browsers without WebP encoding fall back to PNG)
   nowcast.cache.set(dt, url);
   return url;
 }
@@ -980,55 +976,19 @@ async function loadGrid() {
   try {
     await serverReady;
     const d = await getJSON(`${OM_BASE}/v1/forecast?latitude=${lats}&longitude=${lons}` +
-      `&hourly=cloud_cover,cloud_cover_low,precipitation,is_day&past_hours=2&forecast_hours=17&timeformat=unixtime`);
+      `&hourly=cloud_cover,precipitation,is_day&past_hours=2&forecast_hours=17&timeformat=unixtime`);
     const arr = Array.isArray(d) ? d : [d];
     state.grid = {
       at: Date.now(), bounds: b, zoom: map.getZoom(),
       t: arr[0].hourly.time.map((x) => x * 1000),
       cover: arr.map((p) => p.hourly.cloud_cover),
-      low: arr.map((p) => p.hourly.cloud_cover_low || []),
       precip: arr.map((p) => p.hourly.precipitation),
       isDay: arr.map((p) => p.hourly.is_day),
     };
-    // satellite images rendered without the model's low clouds get redrawn with them (see stratusField)
-    imgFrames.forEach((f) => { if (f.kind === "sat") f.viewId = 0; });
-    nowcast.base = null;
     nowcast.cache.clear();
-    if (needsNowcast()) loadNowcastBase().then(() => renderFrame());
-    preloadFrames();
     renderFrame();
   } catch (err) { console.warn("grid failed", err); }
   gridFetching = false;
-}
-// The EUMETSAT cloud mask often misses fog and low stratus ("Hochnebel"): its top is nearly as warm as the ground,
-// so the satellite calls it clear. Where the model has dense low cloud we trust the model instead.
-// Returns a per-pixel stratus strength 0..1 for the view (bilinear between grid points), or null without a grid.
-const STRATUS_FROM = 0.6, STRATUS_FULL = 0.85; // model low cloud cover where the correction starts / is complete
-function stratusField(view, ts) {
-  const g = state.grid;
-  if (!g || !g.low.length || !g.low[0].length) return null;
-  const n = g.bounds.getNorth(), s = g.bounds.getSouth(), w = g.bounds.getWest(), e = g.bounds.getEast();
-  const val = g.low.map((l) => clamp((interp(g.t, l, ts) / 100 - STRATUS_FROM) / (STRATUS_FULL - STRATUS_FROM), 0, 1));
-  if (!val.some((v) => v > 0)) return null;
-  const out = new Float32Array(view.w * view.h);
-  const lons = Array.from({ length: view.w }, (_, x) =>
-    L.CRS.EPSG3857.unproject(L.point(view.nw.x + (x + 0.5) / view.w * (view.se.x - view.nw.x), view.nw.y)).lng);
-  for (let y = 0; y < view.h; y++) {
-    const lat = L.CRS.EPSG3857.unproject(L.point(view.nw.x, view.nw.y + (y + 0.5) / view.h * (view.se.y - view.nw.y))).lat;
-    const fi = (n - lat) / (n - s) * GRID - 0.5;
-    if (fi < -0.5 || fi > GRID - 0.5) continue; // outside the grid: keep the satellite
-    const fadeI = clamp(Math.min(fi + 0.5, GRID - 0.5 - fi) * 2, 0, 1); // soft edge over the outer half cell
-    const i0 = clamp(Math.floor(fi), 0, GRID - 1), i1 = Math.min(i0 + 1, GRID - 1), di = clamp(fi - i0, 0, 1);
-    for (let x = 0; x < view.w; x++) {
-      const fj = (lons[x] - w) / (e - w) * GRID - 0.5;
-      if (fj < -0.5 || fj > GRID - 0.5) continue;
-      const j0 = clamp(Math.floor(fj), 0, GRID - 1), j1 = Math.min(j0 + 1, GRID - 1), dj = clamp(fj - j0, 0, 1);
-      const top = val[i0 * GRID + j0] * (1 - dj) + val[i0 * GRID + j1] * dj;
-      const bot = val[i1 * GRID + j0] * (1 - dj) + val[i1 * GRID + j1] * dj;
-      out[y * view.w + x] = (top * (1 - di) + bot * di) * fadeI * clamp(Math.min(fj + 0.5, GRID - 0.5 - fj) * 2, 0, 1);
-    }
-  }
-  return out;
 }
 const gridCanvas = document.createElement("canvas");
 gridCanvas.width = gridCanvas.height = GRID;
@@ -1182,7 +1142,7 @@ async function usFrames() {
   return obs.filter((t) => t > Date.now() - 3600e3).map((t) => ({ ts: t, mmh: 0, ref: null }));
 }
 
-// Newest available satellite image: Meteosat from EUMETSAT's capabilities (~20-30 min behind),
+// Newest available satellite image: MTG GeoColour from EUMETSAT's capabilities (~30-35 min behind),
 // GOES by probing NASA GIBS backwards in 10 min steps (~1 h behind).
 async function loadSatLatest(loc) {
   const region = satRegion((loc || state.loc).lon);
@@ -1202,8 +1162,8 @@ async function loadSatLatest(loc) {
     return;
   }
   try {
-    const r = await fetch(`https://view.eumetsat.int/geoserver/msg_fes/clm/ows?service=WMS&version=1.3.0&request=GetCapabilities`);
-    const m = (await r.text()).match(/<Dimension name="time"[^>]*>[^<]*\/([0-9T:.\-]+Z)\/PT15M/);
+    const r = await fetch(`https://view.eumetsat.int/geoserver/mtg_fd/rgb_geocolour/ows?service=WMS&version=1.3.0&request=GetCapabilities`);
+    const m = (await r.text()).match(/<Dimension name="time"[^>]*>[^<]*\/([0-9T:.\-]+Z)\/PT10M/);
     state.satLatest = m ? Date.parse(m[1]) : null;
   } catch { state.satLatest = null; }
 }
@@ -1274,6 +1234,7 @@ map.createPane("nodata").style.zIndex = 345;
 let nodataOverlay = null, nodataToken = 0;
 const CA_BOX = [[41.5, -141], [62, -52]];
 async function updateNodata() {
+  if (!map.getSize().x || !map.getSize().y) return; // map not laid out yet
   const token = ++nodataToken;
   const b = map.getBounds().pad(0.2), w = 320, h = Math.round(320 * map.getSize().y / map.getSize().x);
   const nw = L.CRS.EPSG3857.project(b.getNorthWest()), se = L.CRS.EPSG3857.project(b.getSouthEast());
