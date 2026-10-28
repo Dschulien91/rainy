@@ -8,7 +8,7 @@ compact table per kind, by lead time from the moment the forecast was available:
 Every method is compared with simple baselines: "persist" (the value at issue time held) and, for the sun,
 "model" (weather model cloud cover only). A forecast is only worth showing where it beats both.
 
-  python score.py [--hours 48] [--sun-map 0.35,0.45] [--visual out.png]
+  python score.py [--hours 48] [--since 2026-10-28T20:35] [--sun-map 0.05,0.8] [--visual out.png]
 """
 import argparse
 import glob
@@ -39,7 +39,11 @@ def load_truth(kind, since):
     return out
 
 
+SINCE = 0  # --since: ignore forecasts issued before this time (e.g. before a live change)
+
+
 def records(kind, since):
+    since = max(since, SINCE)
     for fp in sorted(glob.glob(os.path.join(LOG_DIR, f"fc_{kind}_*.npz"))):
         try:
             r = dict(np.load(fp))
@@ -200,7 +204,11 @@ if __name__ == "__main__":
     ap.add_argument("--hours", type=float, default=48)
     ap.add_argument("--sun-map", default="0.05,0.8")
     ap.add_argument("--visual")
+    ap.add_argument("--since", help="only forecasts issued after this UTC time, e.g. 2026-10-28T20:35")
     a = ap.parse_args()
+    if a.since:
+        from datetime import datetime, timezone
+        SINCE = datetime.fromisoformat(a.since).replace(tzinfo=timezone.utc).timestamp() * 1000
     score_sun(a.hours, [float(v) for v in a.sun_map.split(",")])
     score_rain(a.hours)
     if a.visual:
