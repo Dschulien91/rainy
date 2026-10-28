@@ -5,8 +5,7 @@ snapshot fetched *before* that time is used, so the test sees exactly what the l
 Blend variants (radar weight by lead time):
   R   radar nowcast only
   B   current server setting (radar only until 60 min, 50/50 at 120 min)
-  E   early: from 30 min, 30 % radar at 120 min
-  L   late: from 90 min, 70 % radar at 120 min
+  N   "new cells": radar unchanged, model adds showers only where the radar has no rain within 10 km
   M   model only (reference)
 Usage:  python server/verify_blend.py eu|us [hours=10] [step_min=30]
 """
@@ -25,11 +24,12 @@ DOWN = 3  # evaluation grid: 3 km
 THR = (0.5, 2.0)
 
 
-def ramp(start, end_w, end=120):
-    return lambda m: 1.0 if m <= start else 1.0 - min(1.0, (m - start) / (end - start)) * (1.0 - end_w)
-
-
-VARIANTS = {"R": lambda m: 1.0, "B": rs.radar_weight, "E": ramp(30, 0.3), "L": ramp(90, 0.7), "M": lambda m: 0.0}
+VARIANTS = {  # (model, fc, base, times, rate) -> blended fc
+    "R": lambda md, fc, b, t, r: fc,
+    "B": lambda md, fc, b, t, r: md.blend(fc, b, t, r, rs.radar_weight),
+    "N": lambda md, fc, b, t, r: rs.blend_new_cells(md, fc, b, t, r, km_per_px=md.region.KM_PER_PX * DOWN),
+    "M": lambda md, fc, b, t, r: md.blend(fc, b, t, r, lambda m: 0.0),
+}
 
 
 def snapshots(name):
@@ -64,7 +64,7 @@ def main(name, hours, step):
             z = np.load(snap[-1])
             mt, mr = z["times"], z["rate"].astype(np.float32)
             fc0 = rs.nowcast(prev_g, last, base - prev, rs.FC_STEPS, region.SMOOTH / DOWN, max(1, region.FLOW_DOWN // DOWN))
-            fcs = {v: model.blend([g.copy() for g in fc0], base, mt, mr, w) for v, w in VARIANTS.items()}
+            fcs = {v: f(model, [g.copy() for g in fc0], base, mt, mr) for v, f in VARIANTS.items()}
             for lead in LEADS:
                 valid = cache.nearest(base + lead * 60_000)
                 if not valid:

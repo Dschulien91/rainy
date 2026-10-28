@@ -12,9 +12,10 @@ long, as in S-PROG/pySTEPS). Chosen by backtests (server/tune_nowcast.py): +10-2
 first version, and better than persistence over the full 2 h in Europe and the USA.
 Where pySTEPS is installed (the Docker image), Europe and the USA use pySTEPS S-PROG instead (server/compare_pysteps.py:
 same skill for widespread rain, clearly better for showers in the second hour).
-Second hour: the radar nowcast is blended with the precipitation forecast of the best national weather model
-for each place (self-hosted Open-Meteo "best match": ICON-D2, AROME, HARMONIE, UKV, HRRR, ...), because the radar
-cannot see showers that have not formed yet. Every model snapshot is logged (model_log/) so that the blend
+Second hour: the radar nowcast stays as it is, and the precipitation forecast of the best national weather model
+for each place (self-hosted Open-Meteo "best match": ICON-D2, AROME, HARMONIE, UKV, HRRR, ...) adds showers only
+where the radar nowcast has no rain nearby - the radar cannot see showers that have not formed yet. A plain mix of
+radar and model scored worse for heavy rain (server/verify_blend.py). Every model snapshot is logged (model_log/) so that the blend
 weights can be verified fairly later (only model runs that were available at the forecast time).
 
 Endpoints (all CORS-enabled, cache headers suitable for a CDN):
@@ -67,7 +68,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v0.11"
+VERSION = "server-v0.12"
 PORT = int(os.environ.get("PORT", "8771"))
 UA = "Mozilla/5.0"          # neutral, carries no identity
 HISTORY_MS = 60 * 60_000    # observed frames kept (1 h)
@@ -308,6 +309,39 @@ class ModelRain:
         return fc
 
 
+# "new cells" blend (candidate): the radar nowcast stays as it is; in the second hour the model only adds showers
+# where the radar nowcast has no rain within NEW_RADIUS_KM - i.e. cells that have not formed yet.
+NEW_START_MIN, NEW_END_MIN, NEW_END_W, NEW_RADIUS_KM = 60, 120, 0.7, 10.0
+
+
+def new_cells_weight(lead_min):
+    if lead_min <= NEW_START_MIN:
+        return 0.0
+    return min(1.0, (lead_min - NEW_START_MIN) / (NEW_END_MIN - NEW_START_MIN)) * NEW_END_W
+
+
+def blend_new_cells(model, fc, ref, times=None, rate=None, km_per_px=None, weight=new_cells_weight):
+    if rate is None:
+        with model.lock:
+            times, rate, issued = model.times, model.rate, model.issued
+        if rate is None or ref - issued > MODEL_MAX_AGE_MS:
+            return fc
+    r = max(1, int(round(NEW_RADIUS_KM / (km_per_px or model.region.KM_PER_PX))))
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
+    for i, g in enumerate(fc):
+        w = weight((i + 1) * STEP_MS / 60_000)
+        if w <= 0:
+            continue
+        m = model.field(ref + (i + 1) * STEP_MS, g.shape, times, rate)
+        if m is None:
+            continue
+        cov = g >= 0
+        near = cv2.dilate((np.where(cov, g, 0) >= 0.1).astype(np.uint8), kernel) > 0
+        add = cov & ~near
+        g[add] = np.maximum(g[add], w * m[add])
+    return fc
+
+
 def model_loop(model):
     while True:
         started = time.time()
@@ -422,8 +456,8 @@ class Region:
                     log(f"{self.name} S-PROG failed, using simple nowcast: {e}")
         if fc is None:
             fc = nowcast(prev.astype(np.float32), last.astype(np.float32), last_t - prev_t, FC_STEPS, self.SMOOTH, self.FLOW_DOWN)
-        if self.model:
-            fc = self.model.blend(fc, last_t)
+        if self.model:  # backtest (verify_blend.py, variant N): same skill as radar only, plus showers yet to form
+            fc = blend_new_cells(self.model, fc, last_t)
         with self.lock:
             self.fc = {last_t + (i + 1) * STEP_MS: g.astype(np.float16) for i, g in enumerate(fc)}
             self.ref = last_t
