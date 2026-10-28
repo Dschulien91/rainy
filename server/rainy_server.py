@@ -72,7 +72,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v0.18"
+VERSION = "server-v0.19"
 PORT = int(os.environ.get("PORT", "8771"))
 UA = "Mozilla/5.0"          # neutral, carries no identity
 HISTORY_MS = 60 * 60_000    # observed frames kept (1 h)
@@ -477,6 +477,9 @@ class EuropeOpera(Region):
     SMOOTH, FLOW_DOWN = 2.0, 4          # same physical scales as the backtested 2 km setup
     MODEL_DEG = 0.15
     SPROG_DOWN = 3                      # S-PROG at 3 km: about half the memory of 2 km (peak ~5.3 GB was too close to the laptop Docker limit)
+    # OPERA DBZH via Marshall-Palmer shows 1.94x the rain of ~300 German 10-min gauges (22 h, server/check_opera_gauges.py)
+    # while DWD shows 0.65x; x0.5 matches the gauges, gives the best CSI and removes the step at the German border.
+    GAIN = 0.5
 
     def __init__(self):
         super().__init__()
@@ -505,7 +508,7 @@ class EuropeOpera(Region):
         nod = d == nodata
         dbz = d * gain + offset
         dbz[(d == undetect) | nod] = -32.0
-        rate = cv2.medianBlur(dbz_to_rate(dbz), 3)   # removes single-pixel clutter
+        rate = cv2.medianBlur(dbz_to_rate(dbz), 3) * self.GAIN   # median removes single-pixel clutter
         rate[nod] = NODATA
         return rate
 

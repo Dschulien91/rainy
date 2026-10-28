@@ -87,6 +87,8 @@ class Recorder:
                     v = float(p[k])
                     if v > -999:
                         ts = int(datetime.strptime(p[1].strip(), "%Y%m%d%H%M").replace(tzinfo=timezone.utc).timestamp() * 1000)
+                        if ts < (time.time() - 3 * 86400) * 1000:  # a few "now" files carry stray old rows
+                            continue
                         new.setdefault(day_str(ts), {}).setdefault(sid, {})[str(ts)] = v
             for day, data in new.items():
                 fp = os.path.join(LOG_DIR, f"truth_{kind}_{day}.json")

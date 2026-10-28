@@ -60,6 +60,9 @@ class GermanyDwd:
     LAYER = "dwd:Niederschlagsradar"
     BBOX = (*merc(2.0, 46.0), *merc(19.0, 56.0))   # x0, y0, x1, y1
     CELL = 1500.0                                   # ~0.95 km on the ground at 51 N
+    # The WMS radar is not gauge-adjusted: against ~300 DWD 10-min gauges it shows 0.65-0.67 of the measured rain
+    # (2.5 days and 22 h, server/check_rain_gauges.py); x1.5 matches the gauge totals and gives the best CSI.
+    GAIN = 1.5
     # legend colour -> representative mm/h (same table as the app's DWD fallback)
     CLASSES = {"33ffff": 0.14, "1acc9a": 0.28, "019934": 0.63, "4db31b": 1.4, "99cc01": 2.4, "cce601": 3.9,
                "ffff01": 6.1, "ffc401": 8.7, "ff8901": 12, "ff4501": 21, "fe0000": 37, "e5004c": 58,
@@ -125,7 +128,7 @@ class GermanyDwd:
         wet = px[..., 3] > 200
         d2 = ((px[wet][:, :3][:, None, :] - self.rgb[None]) ** 2).sum(-1)
         rate[wet] = np.where(d2.min(-1) <= 3 * 30 * 30, self.val[d2.argmin(-1)], 0.0)  # outline etc. -> 0
-        return rate.astype(np.float16)
+        return (rate * self.GAIN).astype(np.float16)
 
     def update(self):
         ref = self._latest_run()
