@@ -45,6 +45,7 @@ def storm(de, pt, th, lat, lon, arrive_min=40, speed_kmh=30):
     onset = int(time.time() * 1000) + (arrive_min - 10) * 60_000
     w = {"id": f"dev-{onset}", "group": "Gewitter", "severity": "Moderate", "level": "Starkes Gewitter",
          "onset": onset, "expires": onset + 60 * 60_000, "rings": [ring]}
+    th.frozen = True  # the 2-min DWD refresh must not replace the scenario
     with th.lock:
         th.warnings = [w]
         th.geojson = (b'{"type":"FeatureCollection","features":[{"type":"Feature","geometry":{"type":"Polygon","coordinates":['
@@ -63,6 +64,7 @@ def reset(de, pt, th):
     de.obs.clear(); de.fc.clear(); de.ref = None  # reloaded from the DWD within a minute
     with pt.lock:
         pt.grids.clear()
+    th.frozen = False
     with th.lock:
         th.warnings = []
         th.geojson = b'{"type":"FeatureCollection","features":[]}'

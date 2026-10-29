@@ -40,6 +40,19 @@ services:
       REMOTE_DATA_DIRECTORY: https://openmeteo.s3.amazonaws.com/data/   # Open-Meteo's open-data mirror
       CACHE_SIZE: ${OPENMETEO_CACHE:-8GB}
 
+  # Keeps the weather model files the app needs on local disk, so no request waits for a download (lazy remote reads
+  # took 13-30 s for the first request per region). Models: DWD ICON-D2 (+15 min), ICON-EU, ICON global = Open-Meteo's
+  # "best match" for Germany. Anything else is still read from the remote mirror on demand.
+  openmeteo-sync:
+    image: ghcr.io/open-meteo/open-meteo
+    restart: always
+    volumes:
+      - open-meteo-data:/app/data
+    command: >
+      sync dwd_icon_d2,dwd_icon_d2_15min,dwd_icon_eu,dwd_icon
+      temperature_2m,precipitation,cloud_cover,weather_code,wind_u_component_700hPa,wind_v_component_700hPa
+      --past-days 3 --repeat-interval 10 --concurrent 4
+
   caddy:
     image: caddy:2
     restart: always

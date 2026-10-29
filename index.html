@@ -182,6 +182,10 @@
     padding: 12px 16px max(10px, env(safe-area-inset-bottom)); display: flex; flex-direction: column; gap: 8px; }
   .head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
   .place { font-size: 13px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* DWD thunderstorm warning: a pill on the map just above the sheet, so the timeline keeps its height */
+  .warnline { position: absolute; left: 12px; right: 72px; bottom: calc(var(--sheet-h) + 10px); z-index: 900; width: fit-content; max-width: calc(100% - 84px);
+    padding: 6px 12px; border-radius: 999px; background: rgba(40, 22, 8, 0.9); color: #ffb066; font-size: 13px; font-weight: 700;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; box-shadow: 0 2px 8px rgba(0,0,0,.35); pointer-events: none; }
   .summary { font-size: 17px; font-weight: 700; line-height: 1.2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } /* never wraps: long texts end in … */
   .now-temp { font-size: 28px; font-weight: 300; margin-left: auto; white-space: nowrap; }
 
@@ -275,6 +279,7 @@
   <div class="fav-list" id="favList"></div>
 </div>
 
+<div class="warnline" id="warnline" hidden></div>
 <div class="sheet">
   <div class="head">
     <div style="min-width:0">
@@ -310,7 +315,7 @@
 <script src="vendor/leaflet-maplibre-gl.js"></script>
 <script>
 "use strict";
-const VERSION = "v0.57";
+const VERSION = "v0.60";
 const FALLBACK = { lat: 53.5511, lon: 9.9937, name: "Hamburg" };
 const DWD_WMS = "https://maps.dwd.de/geoserver/dwd/wms";
 const EUM_WMS = "https://view.eumetsat.int/geoserver/ows";
@@ -1661,6 +1666,11 @@ function preloadTiles(s) {
 function renderFrame() {
   const s = cur(), f = s.frames[s.idx];
   if (!f) return;
+  // lightning is measured (last minutes): only on the current and past frames, not in the forecast
+  if (lightningLayer) {
+    const show = state.mode === "rain" && f.ts <= Date.now() + 5 * 60e3;
+    if (show !== map.hasLayer(lightningLayer)) { if (show) lightningLayer.addTo(map); else lightningLayer.remove(); }
+  }
   const k = f.map.kind;
   if (k === "rtile" || k === "ctile") { hideImg(); hideGrid(); hideNowcast(); showTiles(k === "rtile" ? "rain" : "cloud", f.map.ts); }
   else if (k === "model") { hideTiles(); hideImg(); hideNowcast(); showGrid(f.ts, state.mode === "rain" ? "rain" : "cloud"); }
@@ -2006,9 +2016,11 @@ document.getElementById("hours").addEventListener("click", (e) => {
 
 function updateHeader() {
   renderHours();
-  const w = state.thunder[0], hm = (t) => fmtTime(t);
-  document.getElementById("summary").textContent = w && state.mode === "rain"
-    ? `⚡ ${w.level} ${w.onset <= Date.now() ? `bis ${hm(w.expires)}` : `ab ${hm(w.onset)}`} · ${summary()}` : summary();
+  document.getElementById("summary").textContent = summary();
+  // DWD thunderstorm warning for the place: its own line, so neither text gets cut off on small phones
+  const w = state.mode === "rain" && state.thunder[0], line = document.getElementById("warnline");
+  line.hidden = !w;
+  if (w) line.textContent = `⚡ ${w.level} ${w.onset <= Date.now() ? `bis ${fmtTime(w.expires)}` : `ab ${fmtTime(w.onset)}`} · DWD-Warnung`;
   const p = state.point;
   const t = p && interp(p.t, p.temp, Date.now());
   document.getElementById("nowTemp").textContent = t != null ? Math.round(t) + "°" : "–°";
@@ -2557,8 +2569,15 @@ try {
     youAreHere.setLatLng([loc.lat, loc.lon]);
     const place = await Promise.race([reverseGeocode(loc), new Promise((r) => setTimeout(() => r(null), 1500))]);
     const zoom = place ? await Promise.race([cityZoom(place), new Promise((r) => setTimeout(() => r(11), 1500))]) : 11;
-    map.setView([loc.lat, loc.lon], zoom, { animate: false });
+    // ?zoom= (shared links) or the city's size; ?view=lat,lon centres the map elsewhere than the place
+    const view = (params.get("view") || "").split(",").map(Number);
+    map.setView(view.length === 2 && view.every(isFinite) ? view : [loc.lat, loc.lon], +params.get("zoom") || zoom, { animate: false });
     await setLocation(loc, false, place ? place.name : undefined);
+    if (params.has("t")) { // ?t=30: open the timeline 30 min ahead (shared links, screenshots)
+      const s = cur();
+      s.idx = clamp(s.frames.findIndex((f) => f.ts >= Date.now() + +params.get("t") * 60e3), 0, s.frames.length - 1);
+      renderFrame(); drawChart();
+    }
   }
   setInterval(refreshAll, 5 * 60e3);
 })();

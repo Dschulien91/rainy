@@ -108,7 +108,7 @@ class Thunder:
 
     def loop(self):
         while True:
-            for fn in (self.refresh_warnings, self.refresh_lightning):
+            for fn in () if getattr(self, "frozen", False) else (self.refresh_warnings, self.refresh_lightning):  # devtools scenario
                 try:
                     fn()
                 except Exception as e:

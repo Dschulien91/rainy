@@ -10,6 +10,12 @@ One server runs everything behind one domain:
 
 When the app is opened from this domain it uses `/api`, `/tiles` and `/om` automatically (`API_BASE` / `OM_BASE` in `index.html`).
 
+## Weather model data
+
+`openmeteo-sync` downloads the DWD ICON models the app uses (about 10-20 GB, refreshed every 10 min). Wait until the
+first sync has finished (`docker compose logs -f openmeteo-sync`, "files completed" for all four models) before
+opening the app to users; until then first requests per region can take 10-30 s.
+
 ## Edition
 
 `EDITION=de` (default): Germany only - the first public version. `EDITION=full` adds the Europe/USA radar with our own
