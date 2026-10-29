@@ -65,6 +65,7 @@ import alerts
 import clouds
 import mosaic
 import recorder
+import thunder
 
 try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is used
     from pysteps import motion as ps_motion, nowcasts as ps_nowcasts
@@ -73,7 +74,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v0.27"
+VERSION = "server-v0.28"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model; no Europe/USA
 # radar, no clouds - their loops are not started); "full" = everything.
 EDITION = os.environ.get("EDITION", "de")
@@ -826,6 +827,25 @@ class Handler(BaseHTTPRequestHandler):
                 if png is None:
                     return self.send(404, b"unknown frame", "text/plain", 30)
                 return self.send(200, png, "image/png", 86400)  # the key in the URL makes the content immutable
+            if u.path == "/api/thunder/areas":  # DWD thunderstorm / heavy rain warning areas (GeoJSON)
+                with THUNDER.lock:
+                    body = THUNDER.geojson
+                return self.send(200, body, "application/json", 60)
+            if u.path == "/api/thunder/point":
+                ws = THUNDER.at(round(float(q["lat"]), 2), round(float(q["lon"]), 2))
+                body = [{k: w[k] for k in ("group", "level", "severity", "onset", "expires")} for w in ws]
+                return self.send(200, json.dumps(body).encode(), "application/json", 60)
+            if u.path == "/api/lightning":  # latest satellite lightning over Germany: {ts, flashes, box}
+                with THUNDER.lock:
+                    li = THUNDER.lightning
+                body = {"ts": li[0], "flashes": li[2], "box": thunder.LIGHTNING_BOX} if li else {}
+                return self.send(200, json.dumps(body).encode(), "application/json", 60)
+            if u.path.startswith("/api/lightning/") and u.path.endswith(".png"):
+                with THUNDER.lock:
+                    li = THUNDER.lightning
+                if not li:
+                    return self.send(404, b"no lightning image yet", "text/plain", 30)
+                return self.send(200, li[1], "image/png", 86400)  # ts in the URL: immutable
             if u.path == "/api/rain/frames":
                 body = {"key": MOSAIC.key(), "frames": MOSAIC.frames()}
                 return self.send(200, json.dumps(body).encode(), "application/json", 30)
@@ -916,8 +936,9 @@ class Handler(BaseHTTPRequestHandler):
 CLOUDS = clouds.CloudNowcast(fetch, log, OPENMETEO_URL, openmeteo_available, ll_to_3857)
 DE = mosaic.GermanyDwd(fetch, log)
 MOSAIC = mosaic.Mosaic(REGIONS, DE, CLOUDS, sample, colorize, log, de_only=EDITION == "de")
+THUNDER = thunder.Thunder(fetch, log)
 ALERTS = alerts.AlertEngine(DATA_DIR, {**REGIONS, "de": DE}, log, UA, VAPID_SUBJECT,
-                            order=("de",) if EDITION == "de" else ("eu", "us"))
+                            order=("de",) if EDITION == "de" else ("eu", "us"), thunder=THUNDER)
 RECORDER = recorder.Recorder(fetch, log, MOSAIC, CLOUDS, mosaic.merc)
 CLOUDS.heavy_lock = SPROG_LOCK  # cloud nowcast and S-PROG take turns (Docker VM memory)
 
@@ -925,6 +946,7 @@ if __name__ == "__main__":
     threading.Thread(target=ALERTS.loop, args=(ll_to_3857,), daemon=True).start()
     threading.Thread(target=mosaic.de_loop, args=(DE, log), daemon=True).start()
     threading.Thread(target=RECORDER.loop, daemon=True).start()
+    threading.Thread(target=THUNDER.loop, daemon=True).start()
     threading.Thread(target=memory_loop, daemon=True).start()
     for r in REGIONS.values() if EDITION == "full" else ():
         if r.name == "eu":

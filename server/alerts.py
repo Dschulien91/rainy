@@ -39,8 +39,9 @@ def level(rate):
 
 
 class AlertEngine:
-    def __init__(self, data_dir, regions, log, ua, subject, order=("eu", "us")):
+    def __init__(self, data_dir, regions, log, ua, subject, order=("eu", "us"), thunder=None):
         self.dir, self.regions, self.log, self.ua, self.subject = data_dir, regions, log, ua, subject
+        self.thunder = thunder  # thunder.Thunder (DWD thunderstorm warnings) or None
         self.order = order  # radar sources tried for a place, in this order
         os.makedirs(data_dir, exist_ok=True)
         self.path = os.path.join(data_dir, "subscriptions.json")
@@ -90,7 +91,8 @@ class AlertEngine:
             tz = "UTC"
         lead = int(body.get("lead", 45))
         cfg = {"lead": lead if 5 <= lead <= 90 and lead % 5 == 0 else 45,
-               "early": bool(body.get("early", True)), "quiet": bool(body.get("quiet", True)), "tz": tz}
+               "early": bool(body.get("early", True)), "quiet": bool(body.get("quiet", True)), "tz": tz,
+               "thunder": bool(body.get("thunder", True))}
         with self.lock:
             sid = body.get("id") if body.get("id") in self.subs else secrets.token_urlsafe(16)
             old = self.subs.get(sid, {}).get("state", {})
@@ -240,11 +242,16 @@ class AlertEngine:
         for sid, e in items:
             for p in e["places"]:
                 key = f"{p['lat']},{p['lon']}"
+                st = e["state"].setdefault(key, {})
+                before = json.dumps(st, sort_keys=True)
+                thunder = self.thunder_alert(p, now, e["cfg"], st)
+                if thunder:
+                    self.send(sid, {**thunder, "tag": f"t{key}", "lat": p["lat"], "lon": p["lon"], "name": p["name"]})
+                    self.log(f"alert thunder: {thunder['title']}")
+                    changed = True
                 s = self.series(p["lat"], p["lon"], ll_to_3857)
                 if not s:
                     continue
-                st = e["state"].setdefault(key, {})
-                before = json.dumps(st, sort_keys=True)
                 kind, info = self.evaluate(s, now, e["cfg"], st)
                 if kind:
                     title, body = self.message(kind, info, p["name"] or "dein Ort", e["cfg"]["tz"])
@@ -258,6 +265,25 @@ class AlertEngine:
         if changed:
             with self.lock:
                 self._save()
+
+    def thunder_alert(self, place, now_ms, cfg, st):
+        """One push per DWD thunderstorm warning covering the place (active now or within the hour)."""
+        if not self.thunder or not cfg.get("thunder", True):
+            return None
+        sent = st.setdefault("thunder_sent", [])
+        for w in self.thunder.at(place["lat"], place["lon"], now_ms):
+            if w["group"] != "Gewitter" or w["id"] in sent:
+                continue
+            tz = ZoneInfo(cfg.get("tz", "UTC"))
+            local = datetime.fromtimestamp(now_ms / 1000, tz)
+            if cfg.get("quiet", True) and (local.hour >= 22 or local.hour < 7) and w["severity"] in ("Minor", "Moderate"):
+                continue  # at night only severe thunderstorms wake people up
+            sent.append(w["id"])
+            del sent[:-30]
+            hm = lambda t: datetime.fromtimestamp(t / 1000, tz).strftime("%H:%M")
+            when = f"Jetzt bis ca. {hm(w['expires'])}" if w["onset"] <= now_ms else f"Ab ca. {hm(w['onset'])} bis ca. {hm(w['expires'])}"
+            return {"title": f"⚡ {w['level']} – {place['name'] or 'dein Ort'}", "body": f"{when}. Warnung des Deutschen Wetterdienstes."}
+        return None
 
     def loop(self, ll_to_3857, every_s=60):
         while True:

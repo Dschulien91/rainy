@@ -144,6 +144,7 @@
   .edition-de #modeSun, .edition-de #favSun { display: none; }
   .alert-card input[type=range] { width: 150px; accent-color: var(--rain); }
   .alert-card .row[hidden] { display: none; }
+  .lightning { filter: drop-shadow(0 0 1px rgba(0,0,0,.8)); }
   .alert-card .seg { flex-wrap: wrap; justify-content: flex-end; }
   .alert-card .sec { margin: 12px 0 2px; font-size: 12px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
   .alert-card .hint { margin: -4px 0 4px; font-size: 12px; color: var(--muted); }
@@ -309,7 +310,7 @@
 <script src="https://unpkg.com/@maplibre/maplibre-gl-leaflet@0.0.22/leaflet-maplibre-gl.js"></script>
 <script>
 "use strict";
-const VERSION = "v0.51";
+const VERSION = "v0.52";
 const FALLBACK = { lat: 53.5511, lon: 9.9937, name: "Hamburg" };
 const DWD_WMS = "https://maps.dwd.de/geoserver/dwd/wms";
 const EUM_WMS = "https://view.eumetsat.int/geoserver/ows";
@@ -397,6 +398,7 @@ const NOWCAST_MS = 4 * 3600e3;             // satellite cloud nowcast: full weig
 document.getElementById("ver").textContent = VERSION;
 
 const state = {
+  thunder: [],           // DWD thunderstorm warnings at the place (active or within the hour)
   mode: "rain",          // rain | sun
   range: "short",        // short (2 h) | long (14 h)
   loc: null, home: null, picked: false, placeName: "",
@@ -1253,6 +1255,15 @@ async function loadCloudPoint(loc) {
     state.cloudPoint = d.series || []; state.cloudRef = d.ref; state.tileKey.cloud = d.ref;
   } catch {}
 }
+// DWD thunderstorm warnings at the place (our server; Germany).
+async function loadThunderPoint(loc) {
+  state.thunder = [];
+  if (!API_BASE) return;
+  try {
+    state.thunder = (await getJSON(`${API_BASE}/api/thunder/point?lat=${loc.lat.toFixed(2)}&lon=${loc.lon.toFixed(2)}`))
+      .filter((w) => w.group === "Gewitter");
+  } catch {}
+}
 // Country of a place (Photon / OpenStreetMap, anonymous), cached; "" when unknown.
 const countryCache = new Map();
 async function countryOf(loc) {
@@ -1429,6 +1440,37 @@ function buildViews() {
   }
   applySatSamples();
 }
+
+// ---------- Thunderstorms on the map ----------
+// DWD warning areas (thunderstorm: orange, heavy rain: blue outline) and satellite lightning of the last minutes.
+map.createPane("thunder").style.zIndex = 360;
+map.getPane("thunder").style.pointerEvents = "none";
+let warnLayer = null, lightningLayer = null;
+async function loadThunderLayers() {
+  if (!API_BASE) return;
+  try {
+    const areas = await getJSON(`${API_BASE}/api/thunder/areas`);
+    if (warnLayer) warnLayer.remove();
+    warnLayer = L.geoJSON(areas, { pane: "thunder", interactive: false, style: (f) => {
+      const t = f.properties.group === "Gewitter", strong = f.properties.severity !== "Minor";
+      return { color: t ? (strong ? "#ff5a1f" : "#ff9f1a") : "#5aa9ff", weight: strong ? 2.5 : 1.8, dashArray: t ? null : "4 4",
+        fillColor: t ? "#ff9f1a" : "#5aa9ff", fillOpacity: t ? 0.12 : 0.06 };
+    } });
+    const li = await getJSON(`${API_BASE}/api/lightning`);
+    if (lightningLayer) lightningLayer.remove();
+    lightningLayer = null;
+    if (li.ts && li.flashes) {
+      const [x0, y0, x1, y1] = li.box;
+      lightningLayer = L.imageOverlay(`${API_BASE}/api/lightning/${li.ts}.png`, [[y0, x0], [y1, x1]], { pane: "thunder", className: "lightning" });
+    }
+    applyThunderLayers();
+  } catch (e) { console.warn("thunder", e); }
+}
+function applyThunderLayers() {
+  for (const l of [warnLayer, lightningLayer]) if (l) { if (state.mode === "rain") l.addTo(map); else l.remove(); }
+}
+loadThunderLayers();
+setInterval(loadThunderLayers, 5 * 60e3);
 
 // ---------- Where data is missing ----------
 // Rain mode: diagonal hatching where there is neither radar nor a satellite rain estimate.
@@ -1947,7 +1989,9 @@ document.getElementById("hours").addEventListener("click", (e) => {
 
 function updateHeader() {
   renderHours();
-  document.getElementById("summary").textContent = summary();
+  const w = state.thunder[0], hm = (t) => fmtTime(t);
+  document.getElementById("summary").textContent = w && state.mode === "rain"
+    ? `⚡ ${w.level} ${w.onset <= Date.now() ? `bis ${hm(w.expires)}` : `ab ${hm(w.onset)}`} · ${summary()}` : summary();
   const p = state.point;
   const t = p && interp(p.t, p.temp, Date.now());
   document.getElementById("nowTemp").textContent = t != null ? Math.round(t) + "°" : "–°";
@@ -1993,6 +2037,7 @@ playBtn.addEventListener("click", () => (state.playing ? stop() : play()));
 function needsGrid() { return cur().frames.some((f) => f.map.kind === "model" || f.map.kind === "nowcast"); }
 function needsNowcast() { return cur().frames.some((f) => f.map.kind === "nowcast"); }
 function applyView() {
+  if (typeof applyThunderLayers === "function") applyThunderLayers();
   stop();
   updateNodata();
   cur().idx = cur().nowIdx; // every view opens at "now"
@@ -2060,7 +2105,7 @@ async function setLocation(loc, picked, knownName) {
     const satP = fresh || DE_ONLY ? null : loadSatLatest(loc);
     // weather model and radar at the place in parallel (the radar first asks the country)
     const [pointOk] = await Promise.all([loadPoint(loc).then(() => true, (err) => { console.warn(err); return false; }),
-      loadRadarPoint(loc), loadCloudPoint(loc), satP]);
+      loadRadarPoint(loc), loadCloudPoint(loc), satP, loadThunderPoint(loc)]);
     if (!pointOk) {
       if (!(state.point && state.point.loc && sameLoc(state.point.loc, loc))) PLACE_TZ = tzFromLon(loc.lon);
       const same = state.point && state.point.loc && sameLoc(state.point.loc, loc);
@@ -2129,7 +2174,7 @@ function renderPlace() {
 const ALERTS_POSSIBLE = !!API_BASE && "serviceWorker" in navigator;
 const BELL = '<svg viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0-6 6v3.5L4.5 16h15L18 12.5V9a6 6 0 0 0-6-6zM10 19a2 2 0 0 0 4 0" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>';
 // own: warn for "Mein Standort" (the last position the app saw, ~1 km); places: further places with a bell
-const ALERT_DEFAULTS = { places: [], own: false, ownLoc: null, lead: 45, early: true, quiet: true };
+const ALERT_DEFAULTS = { places: [], own: false, ownLoc: null, lead: 45, early: true, quiet: true, thunder: true };
 const LEAD_MIN = 5, LEAD_MAX = 90; // selectable warning time (minutes before the rain)
 function loadAlerts() { try { return { ...ALERT_DEFAULTS, ...JSON.parse(localStorage.getItem("rainy.alerts")) }; } catch { return { ...ALERT_DEFAULTS }; } }
 function saveAlerts(a) { try { localStorage.setItem("rainy.alerts", JSON.stringify(a)); } catch {} }
@@ -2164,7 +2209,7 @@ async function syncAlerts(a) {
     sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64ToBytes(key) });
   }
   const r = await postJSON("/api/push/subscribe", { id: a.id, subscription: sub.toJSON(), places: alertPlaces(a),
-    lead: a.lead, early: a.early, quiet: a.quiet, tz: DEVICE_TZ });
+    lead: a.lead, early: a.early, quiet: a.quiet, thunder: a.thunder, tz: DEVICE_TZ });
   if (!r.ok) throw new Error(`subscribe ${r.status}`);
   const first = !a.id;
   a.id = (await r.json()).id;
@@ -2203,6 +2248,7 @@ async function bellClicked(loc, name) {
 const alertControls = (a) => `<div class="row"><span>Vorwarnzeit</span><span><input type="range" min="${LEAD_MIN}" max="${LEAD_MAX}" step="5" value="${a.lead}" data-lead>
       <span class="lead-val">${a.lead} Min.</span></span></div>
     <label class="row early-row"${a.lead >= 45 ? " hidden" : ""}><span>Bei Starkregen schon ca. 1 Std. vorher</span><input type="checkbox" data-k="early"${a.early ? " checked" : ""}></label>
+    <label class="row"><span>Gewitterwarnung (DWD)</span><input type="checkbox" data-k="thunder"${a.thunder ? " checked" : ""}></label>
     <label class="row"><span>Nachtruhe 22–7 Uhr</span><input type="checkbox" data-k="quiet"${a.quiet ? " checked" : ""}></label>`;
 function bindAlertControls(card, a, update) {
   const lead = card.querySelector("[data-lead]");
@@ -2458,6 +2504,7 @@ async function refreshAll() {
   const btn = document.getElementById("refresh");
   btn.classList.add("spin");
   clearImgFrames();
+  loadThunderLayers();
   state.satLatest = null;
   nowcast.base = null; nowcast.motionFor = null;
   for (const v of Object.values(state.views)) v.idx = v.nowIdx;
