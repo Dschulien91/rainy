@@ -310,7 +310,7 @@
 <script src="https://unpkg.com/@maplibre/maplibre-gl-leaflet@0.0.22/leaflet-maplibre-gl.js"></script>
 <script>
 "use strict";
-const VERSION = "v0.52";
+const VERSION = "v0.53";
 const FALLBACK = { lat: 53.5511, lon: 9.9937, name: "Hamburg" };
 const DWD_WMS = "https://maps.dwd.de/geoserver/dwd/wms";
 const EUM_WMS = "https://view.eumetsat.int/geoserver/ows";
@@ -624,17 +624,27 @@ const RAIN_STOPS = [
   [0.1, [154, 208, 255, 0.55]], [0.5, [75, 163, 255, 0.75]], [2, [47, 107, 245, 0.85]],
   [5, [107, 61, 240, 0.9]], [10, [192, 38, 211, 0.95]], [30, [255, 61, 110, 1]], [75, [255, 212, 0, 1]],
 ];
-function rainColor(mmh) {
-  if (!(mmh >= RAIN_STOPS[0][0])) return null;
+// Other precipitation types from the DWD radar classification (same colours as the server's map tiles).
+const KIND_STOPS = {
+  sleet: [[0.1, [196, 236, 240, 0.6]], [0.5, [150, 214, 232, 0.75]], [2, [112, 182, 222, 0.85]], [5, [100, 140, 225, 0.9]], [30, [90, 100, 220, 1]]],
+  snow: [[0.1, [238, 242, 255, 0.65]], [0.5, [212, 220, 255, 0.78]], [2, [178, 184, 255, 0.88]], [5, [146, 132, 245, 0.93]], [30, [118, 92, 228, 1]]],
+  freezing: [[0.1, [255, 196, 224, 0.7]], [0.5, [255, 150, 204, 0.82]], [2, [242, 92, 172, 0.92]], [5, [214, 40, 142, 0.97]], [30, [170, 0, 110, 1]]],
+  graupel: [[0.1, [204, 244, 206, 0.75]], [2, [124, 214, 146, 0.88]], [10, [60, 172, 96, 0.95]], [30, [30, 130, 70, 1]]],
+  hail: [[0.1, [255, 130, 120, 0.9]], [2, [245, 50, 70, 0.96]], [10, [205, 0, 90, 1]], [30, [150, 0, 125, 1]]],
+};
+const KIND_WORD = { rain: "Regen", sleet: "Schneeregen", snow: "Schnee", freezing: "Glatteisregen", graupel: "Graupel", hail: "Hagel" };
+function rainColor(mmh, kind) {
+  const stops = KIND_STOPS[kind] || RAIN_STOPS;
+  if (!(mmh >= stops[0][0])) return null;
   const l = Math.log(mmh);
-  for (let i = 1; i < RAIN_STOPS.length; i++) {
-    const [v0, c0] = RAIN_STOPS[i - 1], [v1, c1] = RAIN_STOPS[i];
+  for (let i = 1; i < stops.length; i++) {
+    const [v0, c0] = stops[i - 1], [v1, c1] = stops[i];
     if (mmh <= v1) {
       const t = (l - Math.log(v0)) / (Math.log(v1) - Math.log(v0));
       return c0.map((c, k) => c + (c1[k] - c) * t);
     }
   }
-  return RAIN_STOPS[RAIN_STOPS.length - 1][1];
+  return stops[stops.length - 1][1];
 }
 const rgba = (c, alphaScale = 1) => `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${c[3] * alphaScale})`;
 // Clouds: light on the dark map, slate on the light map. Clear sky by day gets a warm sun tint.
@@ -1288,7 +1298,7 @@ async function loadRadarPoint(loc) {
     try {
       await serverReady;
       const d = await getJSON(`${API_BASE}/api/rain/point?lat=${loc.lat.toFixed(2)}&lon=${loc.lon.toFixed(2)}${RAIN_EU ? "&src=eu" : ""}`);
-      state.radarPoint = (d.series || []).map((r) => ({ ts: r.ts, mmh: r.mmh, ref: r.fc ? 1 : null }));
+      state.radarPoint = (d.series || []).map((r) => ({ ts: r.ts, mmh: r.mmh, ref: r.fc ? 1 : null, kind: r.kind }));
       state.radarSource = "rtile"; state.tileKey.rain = d.key;
     } catch { state.radarPoint = []; }
   }
@@ -1411,7 +1421,7 @@ function buildViews() {
 
   // rain, 2 h: 5-minute radar frames (or the model outside radar coverage)
   // radar where available (never mixed with the model); the model only where there is no radar at all
-  const short = R.length ? R.map((r) => ({ ts: r.ts, value: r.mmh, temp: temp(r.ts), map: { kind: state.radarSource, ts: r.ts, ref: r.ref } }))
+  const short = R.length ? R.map((r) => ({ ts: r.ts, value: r.mmh, ptype: r.kind, temp: temp(r.ts), map: { kind: state.radarSource, ts: r.ts, ref: r.ref } }))
     : steps(2).map((ts) => ({ ts, value: modelRain(ts), temp: temp(ts), map: { kind: "model" } }));
   state.views["rain-short"] = finish(short);
 
@@ -1690,13 +1700,13 @@ function summary() {
   const s = cur(), fr = s.frames.slice(s.nowIdx), h = 2;
   if (!fr.length) return "Keine Daten";
   if (state.mode === "rain") {
-    const wet = (f) => f.value >= 0.1;
+    const wet = (f) => f.value >= 0.1, word = (f) => KIND_WORD[f.ptype] || "Regen";
     if (wet(fr[0])) {
       const dry = fr.find((f) => !wet(f));
-      return dry ? `Regen bis ca. ${fmtTime(dry.ts)}` : `Regen hält ${h} Std. an`;
+      return dry ? `${word(fr[0])} bis ca. ${fmtTime(dry.ts)}` : `${word(fr[0])} hält ${h} Std. an`;
     }
     const next = fr.find(wet);
-    return next ? `Regen ab ca. ${fmtTime(next.ts)}` : `${h} Std. trocken`;
+    return next ? `${word(next)} ab ca. ${fmtTime(next.ts)}` : `${h} Std. trocken`;
   }
   const sunny = (f) => f.value >= 0.5;
   if (sunny(fr[0])) {
@@ -1751,7 +1761,7 @@ function drawChart() {
     if (!(v > 0.005)) return;
     const h = Math.max(2, v * plotH);
     const past = i < s.nowIdx;
-    ctx.fillStyle = rain ? rgba(rainColor(Math.max(f.value, 0.1)), past ? 0.5 : 1) : col(past ? "--sun-soft" : "--sun");
+    ctx.fillStyle = rain ? rgba(rainColor(Math.max(f.value, 0.1), f.ptype), past ? 0.5 : 1) : col(past ? "--sun-soft" : "--sun");
     ctx.beginPath();
     ctx.roundRect(i * bw + bw * 0.12, top + plotH - h, bw * 0.76, h, Math.min(3, bw * 0.3));
     ctx.fill();

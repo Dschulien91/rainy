@@ -9,6 +9,7 @@ regularly and merged into one file per day.
 """
 import io
 import json
+import re
 import os
 import time
 import zipfile
@@ -170,6 +171,27 @@ class Recorder:
                             noblend=np.array(noblend, np.float32), **maps)
         self.rain_key, self.rain_at = key, now
 
+    def archive_cells(self):
+        """Keep DWD thunderstorm cell (KONRAD3D) and mesocyclone files that contain anything: there is no format
+        description and no cells in autumn, so real examples are collected for building the cell display."""
+        base = "https://opendata.dwd.de/weather/radar"
+        out = os.path.join(LOG_DIR, "cells")
+        for folder, pattern, empty in (("konrad3d", r"KONRAD3D_\d{8}T\d{6}\.xml", "<feature"), ("mesocyclones", r"meso_\d{8}_\d{4}\.xml", "<meso")):
+            try:
+                names = sorted(set(re.findall(pattern, self.fetch(f"{base}/{folder}/", timeout=60).decode("latin-1"))))[-3:]
+                for n in names:
+                    fp = os.path.join(out, n)
+                    if os.path.exists(fp):
+                        continue
+                    data = self.fetch(f"{base}/{folder}/{n}", timeout=60)
+                    if empty.encode() in data or (folder == "mesocyclones" and len(data) > 400):
+                        os.makedirs(out, exist_ok=True)
+                        with open(fp, "wb") as f:
+                            f.write(data)
+                        self.log(f"recorder: archived {n}")
+            except Exception as e:
+                self.log(f"recorder: cells {folder}: {e}")
+
     def _cleanup(self):
         for f in os.listdir(LOG_DIR):
             fp = os.path.join(LOG_DIR, f)
@@ -183,6 +205,7 @@ class Recorder:
                 self._ensure_stations()
                 self.record_clouds()
                 self.record_rain()
+                self.archive_cells()
                 if time.time() - self.truth_at > TRUTH_EVERY_S:
                     self.fetch_truth()
                     self._cleanup()

@@ -39,9 +39,10 @@ def level(rate):
 
 
 class AlertEngine:
-    def __init__(self, data_dir, regions, log, ua, subject, order=("eu", "us"), thunder=None):
+    def __init__(self, data_dir, regions, log, ua, subject, order=("eu", "us"), thunder=None, kind_at=None):
         self.dir, self.regions, self.log, self.ua, self.subject = data_dir, regions, log, ua, subject
         self.thunder = thunder  # thunder.Thunder (DWD thunderstorm warnings) or None
+        self.kind_at = kind_at  # (lat, lon, ts) -> "rain" | "snow" | "sleet" | "freezing" | "graupel" | "hail"
         self.order = order  # radar sources tried for a place, in this order
         os.makedirs(data_dir, exist_ok=True)
         self.path = os.path.join(data_dir, "subscriptions.json")
@@ -201,6 +202,9 @@ class AlertEngine:
         lv = info["level"]
         dur = "länger anhaltend" if info["open_end"] else f"etwa {max(10, info['minutes'])} Min. lang"
         mins = max(1, info["lead_min"])
+        word = {"snow": "Schnee", "sleet": "Schneeregen", "freezing": "Glatteisregen", "graupel": "Graupel", "hail": "Hagel"}.get(info.get("ptype"))
+        if word:  # same strength levels, other precipitation: "Starker Schnee", "Leichter Schneeregen", ...
+            lv = lv.replace("Regen", word).replace("regen", word.lower())
         if kind == "early":
             title = f"{ICON[lv]} {lv} in ca. 1 Std. – {place}"
             body = f"Voraussichtlich ab ca. {when}, {dur}. Wir melden uns kurz vorher noch einmal."
@@ -254,6 +258,11 @@ class AlertEngine:
                     continue
                 kind, info = self.evaluate(s, now, e["cfg"], st)
                 if kind:
+                    if self.kind_at:  # snow, sleet, ... instead of "Regen"
+                        try:
+                            info["ptype"] = self.kind_at(p["lat"], p["lon"], info["start_ts"])
+                        except Exception:
+                            pass
                     title, body = self.message(kind, info, p["name"] or "dein Ort", e["cfg"]["tz"])
                     self.send(sid, {"title": title, "body": body, "tag": key, "lat": p["lat"], "lon": p["lon"], "name": p["name"]})
                     self.log(f"alert {kind}: {info.get('level')} in {info.get('lead_min')} min")

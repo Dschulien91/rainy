@@ -64,6 +64,7 @@ from pyproj import Transformer
 import alerts
 import clouds
 import mosaic
+import ptype
 import recorder
 import thunder
 
@@ -74,7 +75,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v0.28"
+VERSION = "server-v0.30"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model; no Europe/USA
 # radar, no clouds - their loops are not started); "full" = everything.
 EDITION = os.environ.get("EDITION", "de")
@@ -140,12 +141,22 @@ LUT_N = 256
 LUT_MIN, LUT_MAX = math.log(0.1), math.log(100.0)
 
 
-def _build_lut():
+# colours for the other precipitation types (ptype.py kinds 1-5): sleet, snow, freezing rain, graupel, hail
+KIND_STOPS = [
+    [(0.1, (196, 236, 240, 0.6)), (0.5, (150, 214, 232, 0.75)), (2, (112, 182, 222, 0.85)), (5, (100, 140, 225, 0.9)), (30, (90, 100, 220, 1))],
+    [(0.1, (238, 242, 255, 0.65)), (0.5, (212, 220, 255, 0.78)), (2, (178, 184, 255, 0.88)), (5, (146, 132, 245, 0.93)), (30, (118, 92, 228, 1))],
+    [(0.1, (255, 196, 224, 0.7)), (0.5, (255, 150, 204, 0.82)), (2, (242, 92, 172, 0.92)), (5, (214, 40, 142, 0.97)), (30, (170, 0, 110, 1))],
+    [(0.1, (204, 244, 206, 0.75)), (2, (124, 214, 146, 0.88)), (10, (60, 172, 96, 0.95)), (30, (30, 130, 70, 1))],
+    [(0.1, (255, 130, 120, 0.9)), (2, (245, 50, 70, 0.96)), (10, (205, 0, 90, 1)), (30, (150, 0, 125, 1))],
+]
+
+
+def _build_lut(stops=STOPS):
     lut = np.zeros((LUT_N + 1, 4), np.uint8)  # index 0 = transparent
     for i in range(1, LUT_N + 1):
         mmh = math.exp(LUT_MIN + (LUT_MAX - LUT_MIN) * (i - 1) / (LUT_N - 1))
-        c = STOPS[-1][1]
-        for (v0, c0), (v1, c1) in zip(STOPS, STOPS[1:]):
+        c = stops[-1][1]
+        for (v0, c0), (v1, c1) in zip(stops, stops[1:]):
             if mmh <= v1:
                 t = (math.log(mmh) - math.log(v0)) / (math.log(v1) - math.log(v0))
                 c = tuple(a + (b - a) * t for a, b in zip(c0, c1))
@@ -155,14 +166,15 @@ def _build_lut():
 
 
 LUT = _build_lut()
+LUTS = np.stack([LUT] + [_build_lut(s) for s in KIND_STOPS])  # [kind, index] -> RGBA
 
 
-def colorize(rate):
+def colorize(rate, kind=None):
     idx = np.zeros(rate.shape, np.int32)
     wet = rate >= 0.1
     lr = np.log(np.clip(rate[wet], 0.1, 100.0))
     idx[wet] = 1 + np.round((lr - LUT_MIN) / (LUT_MAX - LUT_MIN) * (LUT_N - 1)).astype(np.int32)
-    return LUT[idx]
+    return LUT[idx] if kind is None else LUTS[kind, idx]
 
 
 def dbz_to_rate(dbz):
@@ -813,6 +825,7 @@ class Handler(BaseHTTPRequestHandler):
                 info = {name: {"frames": len(r.frames()[0]), "ref": r.ref} for name, r in REGIONS.items()}
                 info["clouds"] = {"frames": len(CLOUDS.frames()[0]), "ref": CLOUDS.ref}
                 info["de"] = {"frames": len(DE.frames()[0]), "ref": DE.ref}
+                info["ptype"] = {"frames": len(PTYPE.grids), "ref": max(PTYPE.grids) if PTYPE.grids else None}
                 body = {"version": VERSION, "edition": EDITION, "regions": info, "openmeteo": openmeteo_available(), "rss_mb": rss_mb()}
                 return self.send(200, json.dumps(body).encode(), "application/json", 10)
             if u.path.startswith("/tiles/"):
@@ -935,16 +948,19 @@ class Handler(BaseHTTPRequestHandler):
 
 CLOUDS = clouds.CloudNowcast(fetch, log, OPENMETEO_URL, openmeteo_available, ll_to_3857)
 DE = mosaic.GermanyDwd(fetch, log)
-MOSAIC = mosaic.Mosaic(REGIONS, DE, CLOUDS, sample, colorize, log, de_only=EDITION == "de")
+PTYPE = ptype.PrecipType(fetch, log, DE)
+MOSAIC = mosaic.Mosaic(REGIONS, DE, CLOUDS, sample, colorize, log, de_only=EDITION == "de", ptype=PTYPE)
 THUNDER = thunder.Thunder(fetch, log)
 ALERTS = alerts.AlertEngine(DATA_DIR, {**REGIONS, "de": DE}, log, UA, VAPID_SUBJECT,
-                            order=("de",) if EDITION == "de" else ("eu", "us"), thunder=THUNDER)
+                            order=("de",) if EDITION == "de" else ("eu", "us"), thunder=THUNDER,
+                            kind_at=lambda lat, lon, ts: ptype.NAMES[int(MOSAIC.kind(ts, *(np.array([[v]]) for v in mosaic.merc(lon, lat)))[0, 0])]
+                            if PTYPE.grids else "rain")
 RECORDER = recorder.Recorder(fetch, log, MOSAIC, CLOUDS, mosaic.merc)
 CLOUDS.heavy_lock = SPROG_LOCK  # cloud nowcast and S-PROG take turns (Docker VM memory)
 
 if __name__ == "__main__":
     threading.Thread(target=ALERTS.loop, args=(ll_to_3857,), daemon=True).start()
-    threading.Thread(target=mosaic.de_loop, args=(DE, log), daemon=True).start()
+    threading.Thread(target=mosaic.de_loop, args=(DE, log, PTYPE), daemon=True).start()
     threading.Thread(target=RECORDER.loop, daemon=True).start()
     threading.Thread(target=THUNDER.loop, daemon=True).start()
     threading.Thread(target=memory_loop, daemon=True).start()

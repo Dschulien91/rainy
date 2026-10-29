@@ -57,7 +57,7 @@ class Thunder:
             "service": "WFS", "version": "2.0.0", "request": "GetFeature", "typeName": "dwd:Autowarn_Vorhersage",
             "outputFormat": "application/json", "srsName": "EPSG:4326",
             "CQL_FILTER": f"EXPIRES > '{now}' AND EC_GROUP IN ({groups})",
-            "propertyName": "ID_ALERT,EC_GROUP,EC_II,SEVERITY,ONSET,EXPIRES,the_geom"})
+            "propertyName": "ID_ALERT,EC_GROUP,EC_II,SEVERITY,ONSET,EXPIRES,THE_GEOM"})
         d = json.loads(self.fetch(f"{WFS}?{q}", timeout=60))
         out, feats = [], []
         for f in d.get("features", []):

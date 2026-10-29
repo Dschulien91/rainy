@@ -33,6 +33,8 @@ import cv2
 import numpy as np
 from PIL import Image
 
+from ptype import NAMES as ptype_names
+
 WORLD = 20037508.342789244
 STEP_MS = 5 * 60_000
 TILE = 256
@@ -155,8 +157,9 @@ class GermanyDwd:
 
 
 class Mosaic:
-    def __init__(self, regions, de, clouds, sample, colorize, log, de_only=False):
+    def __init__(self, regions, de, clouds, sample, colorize, log, de_only=False, ptype=None):
         self.regions, self.de, self.clouds, self.sample, self.colorize, self.log = regions, de, clouds, sample, colorize, log
+        self.ptype = ptype  # precipitation type from the DWD radar (Germany), or None
         self.de_only = de_only  # Germany edition: DWD only, fading out 30 km beyond the border, no satellite estimate
         self.cache, self.cache_lock = OrderedDict(), threading.Lock()  # small in-process cache; the CDN does the rest
 
@@ -224,7 +227,7 @@ class Mosaic:
         def make():
             X, Y = tile_xy(z, x, y)
             rate, faint = self.rain(ts, X, Y, use_de)
-            rgba = self.colorize(rate)
+            rgba = self.colorize(rate, self.kind(ts, X, Y))
             rgba[..., 3] = np.where(faint, (rgba[..., 3] * 0.65).astype(np.uint8), rgba[..., 3])
             buf = io.BytesIO()
             Image.fromarray(rgba, "RGBA").save(buf, "PNG", compress_level=6)
@@ -236,6 +239,13 @@ class Mosaic:
         bbox = (-WORLD + x * span, WORLD - (y + 1) * span, -WORLD + (x + 1) * span, WORLD - y * span)
         return self._cached(f"c/{key}/{ts}/{z}/{x}/{y}", lambda: self.clouds.image(ts, bbox, TILE, TILE))
 
+    def kind(self, ts, X, Y):
+        """Precipitation type per point (ptype kinds) or None outside the data / without the classification."""
+        if self.ptype is None:
+            return None
+        obs = [t for t, _ in self.de.obs.items()] if self.de.obs else []
+        return self.ptype.kind(ts, X, Y, forecast=not obs or ts > max(obs))
+
     def rain_point(self, lat, lon, use_de=True):
         """Same composite as the map, mean over ~3 km around the place."""
         cx, cy = merc(lon, lat)
@@ -244,11 +254,15 @@ class Mosaic:
         out = []
         for f in self.frames():
             rate, faint = self.rain(f["ts"], X, Y, use_de)
-            out.append({"ts": f["ts"], "fc": f["fc"], "mmh": round(float(rate.mean()), 3), "est": bool(faint.all())})
+            e = {"ts": f["ts"], "fc": f["fc"], "mmh": round(float(rate.mean()), 3), "est": bool(faint.all())}
+            k = self.kind(f["ts"], X, Y)
+            if k is not None and (rate >= 0.1).any():  # most frequent type where it is wet
+                e["kind"] = ptype_names[int(np.bincount(k[rate >= 0.1].ravel(), minlength=6).argmax())]
+            out.append(e)
         return out
 
 
-def de_loop(de, log):
+def de_loop(de, log, ptype=None):
     while True:
         started = time.time()
         try:
@@ -258,4 +272,9 @@ def de_loop(de, log):
                     f"{datetime.fromtimestamp(de.ref / 1000, timezone.utc):%H:%M}Z, {time.time() - started:.0f}s")
         except Exception as e:  # keep serving the last good data
             log(f"de update failed: {e}")
+        if ptype is not None:
+            try:
+                ptype.update(list(de.obs))
+            except Exception as e:
+                log(f"ptype update failed: {e}")
         time.sleep(60)
