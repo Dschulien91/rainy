@@ -73,7 +73,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v0.25"
+VERSION = "server-v0.26"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model; no Europe/USA
 # radar, no clouds - their loops are not started); "full" = everything.
 EDITION = os.environ.get("EDITION", "de")
@@ -782,6 +782,9 @@ def point_series(lat, lon):
     return None, [], None
 
 
+POINT_CACHE = {}  # (radar key, lat, lon, with DWD) -> rain point answer; the key changes with every new radar run
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "rainy"
     sys_version = ""
@@ -827,7 +830,14 @@ class Handler(BaseHTTPRequestHandler):
                 body = {"key": MOSAIC.key(), "frames": MOSAIC.frames()}
                 return self.send(200, json.dumps(body).encode(), "application/json", 30)
             if u.path == "/api/rain/point":
-                body = {"key": MOSAIC.key(), "series": MOSAIC.rain_point(float(q["lat"]), float(q["lon"]), q.get("src") != "eu")}
+                lat, lon, de = round(float(q["lat"]), 2), round(float(q["lon"]), 2), q.get("src") != "eu"
+                ck = (MOSAIC.key(), lat, lon, de)  # one answer per ~1 km square and radar run, shared by all users
+                body = POINT_CACHE.get(ck)
+                if body is None:
+                    body = {"key": ck[0], "series": MOSAIC.rain_point(lat, lon, de)}
+                    POINT_CACHE[ck] = body
+                    while len(POINT_CACHE) > 20000:
+                        POINT_CACHE.pop(next(iter(POINT_CACHE)))
                 return self.send(200, json.dumps(body).encode(), "application/json", 60)
             if u.path == "/api/cloud/frames":
                 frames, ref = CLOUDS.frames()

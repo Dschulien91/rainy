@@ -309,7 +309,7 @@
 <script src="https://unpkg.com/@maplibre/maplibre-gl-leaflet@0.0.22/leaflet-maplibre-gl.js"></script>
 <script>
 "use strict";
-const VERSION = "v0.50";
+const VERSION = "v0.51";
 const FALLBACK = { lat: 53.5511, lon: 9.9937, name: "Hamburg" };
 const DWD_WMS = "https://maps.dwd.de/geoserver/dwd/wms";
 const EUM_WMS = "https://view.eumetsat.int/geoserver/ows";
@@ -1220,7 +1220,8 @@ async function cityZoom(place) {
 // ---------- Data ----------
 async function loadPoint(loc) {
   await serverReady; // decides between our Open-Meteo and the public one
-  const d = await getJSON(`${OM_BASE}/v1/forecast?latitude=${loc.lat}&longitude=${loc.lon}` +
+  // ~1 km rounding: everyone in the same square asks the same URL, so the server / CDN answers it once
+  const d = await getJSON(`${OM_BASE}/v1/forecast?latitude=${loc.lat.toFixed(2)}&longitude=${loc.lon.toFixed(2)}` +
     `&minutely_15=temperature_2m,precipitation,cloud_cover,is_day` +
     `&past_minutely_15=8&forecast_minutely_15=64` +
     `&hourly=temperature_2m,precipitation,cloud_cover,is_day,weather_code,wind_speed_700hPa,wind_direction_700hPa` +
@@ -1275,7 +1276,7 @@ async function loadRadarPoint(loc) {
     // our server: the same seamless mosaic the map shows (DWD in Germany, OPERA, NOAA, satellite estimate)
     try {
       await serverReady;
-      const d = await getJSON(`${API_BASE}/api/rain/point?lat=${loc.lat}&lon=${loc.lon}${RAIN_EU ? "&src=eu" : ""}`);
+      const d = await getJSON(`${API_BASE}/api/rain/point?lat=${loc.lat.toFixed(2)}&lon=${loc.lon.toFixed(2)}${RAIN_EU ? "&src=eu" : ""}`);
       state.radarPoint = (d.series || []).map((r) => ({ ts: r.ts, mmh: r.mmh, ref: r.fc ? 1 : null }));
       state.radarSource = "rtile"; state.tileKey.rain = d.key;
     } catch { state.radarPoint = []; }
