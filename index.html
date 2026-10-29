@@ -315,7 +315,7 @@
 <script src="vendor/leaflet-maplibre-gl.js"></script>
 <script>
 "use strict";
-const VERSION = "v0.62";
+const VERSION = "v0.63";
 const FALLBACK = { lat: 53.5511, lon: 9.9937, name: "Hamburg" };
 const DWD_WMS = "https://maps.dwd.de/geoserver/dwd/wms";
 const EUM_WMS = "https://view.eumetsat.int/geoserver/ows";
@@ -468,8 +468,8 @@ const map = L.map("map", {
   maxBounds: DE_ONLY ? [[27, -30], [72, 50]] : [[-85, -200], [85, 200]], // full edition: the Americas too
 })
   .setView([FALLBACK.lat, FALLBACK.lon], 10);
-// two steps closer than "all of Europe": Germany and its neighbours is the widest useful view
-const fitMinZoom = () => { if (DE_ONLY && map.getSize().x) map.setMinZoom(Math.max(3, map.getBoundsZoom(EUROPE, false)) + 2); };
+// one step closer than "all of Europe": Germany with plenty of its neighbours is the widest useful view
+const fitMinZoom = () => { if (DE_ONLY && map.getSize().x) map.setMinZoom(Math.max(3, map.getBoundsZoom(EUROPE, false)) + 1); };
 fitMinZoom();
 map.on("resize", fitMinZoom);
 map.createPane("weather").style.zIndex = 350;
