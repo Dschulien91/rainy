@@ -45,6 +45,20 @@ TILE = 256
 FADE_KM = 30.0
 
 
+SPECKLE_PX = 10  # isolated echoes below ~10 km2 on the 1 km DWD grid
+
+
+def despeckle(mm5):
+    """Remove isolated tiny echoes: wind farms, ground clutter and interference show up as a few 1 km pixels with
+    20-60 mm/h in dry surroundings (29.10.: six such spots, no lightning, nothing at WetterOnline). The DWD nowcast
+    extrapolates them as standing 'cells', so they are removed in every frame. Real showers are larger."""
+    wet = (mm5 > 0.1 / 12).astype(np.uint8)
+    n, lab, stats, _ = cv2.connectedComponentsWithStats(wet, connectivity=8)
+    small = np.zeros(n, bool)
+    small[1:] = stats[1:, cv2.CC_STAT_AREA] < SPECKLE_PX
+    return np.where(small[lab], 0.0, mm5).astype(np.float32)
+
+
 def merc(lon, lat):
     x = np.asarray(lon, np.float64) * WORLD / 180.0
     y = np.log(np.tan((90.0 + np.asarray(lat, np.float64)) * np.pi / 360.0)) * WORLD / np.pi
@@ -170,7 +184,7 @@ class GermanyDwd:
                         self.rv_maps = dwd_grid_maps(f, self)
                     w = f["dataset1/data1/what"].attrs
                     raw = f["dataset1/data1/data"][:]
-                    mm5 = np.where(raw == w["nodata"], 0.0, np.maximum(raw * float(w["gain"]) + float(w["offset"]), 0.0)).astype(np.float32)
+                    mm5 = despeckle(np.where(raw == w["nodata"], 0.0, np.maximum(raw * float(w["gain"]) + float(w["offset"]), 0.0)).astype(np.float32))
                 g = cv2.remap(mm5 * 12.0 * self.GAIN_RV, *self.rv_maps, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
                 out[run + lead * 60_000] = g.astype(np.float16)
         return out
