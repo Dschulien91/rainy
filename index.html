@@ -304,7 +304,7 @@
 <script src="https://unpkg.com/@maplibre/maplibre-gl-leaflet@0.0.22/leaflet-maplibre-gl.js"></script>
 <script>
 "use strict";
-const VERSION = "v0.48";
+const VERSION = "v0.49";
 const FALLBACK = { lat: 53.5511, lon: 9.9937, name: "Hamburg" };
 const DWD_WMS = "https://maps.dwd.de/geoserver/dwd/wms";
 const EUM_WMS = "https://view.eumetsat.int/geoserver/ows";
@@ -433,12 +433,17 @@ const RAIN_EU = !DE_ONLY && MAP_STYLE.rain === "eu";
 if (MAP_STYLE.theme !== "auto") document.documentElement.classList.add(`theme-${MAP_STYLE.theme}`);
 const dark = MAP_STYLE.theme === "auto" ? window.matchMedia("(prefers-color-scheme: dark)").matches : MAP_STYLE.theme === "dark";
 document.body.classList.toggle("dark", dark);
-// Zoom out at most to about "all of Europe on a phone screen"; no repeated copies of the world.
+// Zoom out at most until Europe just fits the screen (on any screen size), and stay over Europe.
+const EUROPE = L.latLngBounds([[36, -10], [60, 30]]);
 const map = L.map("map", {
   zoomControl: false, attributionControl: false, fadeAnimation: false,
-  minZoom: 3, maxZoom: 13, maxBounds: [[-85, -200], [85, 200]], maxBoundsViscosity: 1,
+  minZoom: 3, maxZoom: 13, maxBoundsViscosity: 1,
+  maxBounds: DE_ONLY ? [[27, -30], [72, 50]] : [[-85, -200], [85, 200]], // full edition: the Americas too
 })
   .setView([FALLBACK.lat, FALLBACK.lon], 10);
+const fitMinZoom = () => { if (DE_ONLY && map.getSize().x) map.setMinZoom(Math.max(3, map.getBoundsZoom(EUROPE, false))); };
+fitMinZoom();
+map.on("resize", fitMinZoom);
 map.createPane("weather").style.zIndex = 350;
 map.createPane("labels").style.zIndex = 450;
 map.getPane("labels").style.pointerEvents = "none";
@@ -456,6 +461,19 @@ map.getPane("labels").style.pointerEvents = "none";
     for (const l of style.layers) {
       const tf = l.layout && l.layout["text-field"];
       if (tf && JSON.stringify(tf).includes("name")) l.layout["text-field"] = ["coalesce", ["get", `name:${lang}`], ["get", "name"]];
+    }
+    // readable place names: bright (dark map) / near-black (light map) text with a solid halo, a bit larger,
+    // cities and countries bold - the style's own grey labels were hard to read, especially over rain
+    const scale = (v, k) => typeof v === "number" ? v * k
+      : v && v.stops ? { ...v, stops: v.stops.map(([z, x]) => [z, x * k]) }
+      : Array.isArray(v) && v[0] === "interpolate" ? v.map((x, i) => (i >= 4 && i % 2 === 0 && typeof x === "number" ? x * k : x)) : v;
+    for (const l of style.layers) {
+      if (l.type !== "symbol" || l["source-layer"] !== "place") continue;
+      const major = /city|country/.test(l.id);
+      l.layout["text-size"] = scale(l.layout["text-size"] ?? 12, major ? 1.15 : 1.1);
+      if (major) l.layout["text-font"] = ["Noto Sans Bold"];
+      l.paint = { ...l.paint, "text-color": dark ? "#eef1f5" : "#1b1f26", "text-halo-color": dark ? "rgba(18,20,24,0.92)" : "rgba(255,255,255,0.95)",
+        "text-halo-width": major ? 1.8 : 1.5, "text-halo-blur": 0.2 };
     }
     // calmer map: no road names, states or minor places; places only from sensible zoom levels
     const drop = new Set(["road_oneway", "road_oneway_opposite", "highway_name_other", "highway_name_motorway",
@@ -1540,6 +1558,7 @@ function hideTiles() {
 }
 // Load all time steps of the open timeline one after another (from the selected one), drop the others.
 function preloadTiles(s) {
+  if (placeLoading) return; // setLocation preloads once the place's data is in
   const want = [...s.frames.slice(s.idx), ...s.frames.slice(0, s.idx).reverse()]
     .filter((f) => f.map.kind === "rtile" || f.map.kind === "ctile")
     .map((f) => `${f.map.kind === "rtile" ? "rain" : "cloud"}/${state.tileKey[f.map.kind === "rtile" ? "rain" : "cloud"]}/${f.map.ts}`);
@@ -2003,8 +2022,10 @@ window.addEventListener("resize", drawChart);
 
 // ---------- Loading ----------
 // Load timeline data for a location. picked = chosen by long-press (not the user's own position).
+let placeLoading = 0; // while > 0 the place's data is loading: no tile preloading (it would queue in front of it)
 async function setLocation(loc, picked, knownName) {
   const req = ++locRequest;
+  placeLoading++;
   stop();
   state.loc = loc; state.picked = picked;
   if (!picked) pickedMarker.remove();
@@ -2014,8 +2035,9 @@ async function setLocation(loc, picked, knownName) {
   try {
     const fresh = state.satLatest && state.satRegion === satRegion(loc.lon) && Date.now() - state.satLatest < 45 * 60e3;
     const satP = fresh || DE_ONLY ? null : loadSatLatest(loc);
-    const pointOk = await loadPoint(loc).then(() => true, (err) => { console.warn(err); return false; });
-    await Promise.all([loadRadarPoint(loc), loadCloudPoint(loc), satP]);
+    // weather model and radar at the place in parallel (the radar first asks the country)
+    const [pointOk] = await Promise.all([loadPoint(loc).then(() => true, (err) => { console.warn(err); return false; }),
+      loadRadarPoint(loc), loadCloudPoint(loc), satP]);
     if (!pointOk) {
       if (!(state.point && state.point.loc && sameLoc(state.point.loc, loc))) PLACE_TZ = tzFromLon(loc.lon);
       const same = state.point && state.point.loc && sameLoc(state.point.loc, loc);
@@ -2029,6 +2051,8 @@ async function setLocation(loc, picked, knownName) {
     document.getElementById("summary").textContent = "Wetterdaten konnten nicht geladen werden";
     console.error(err);
     return;
+  } finally {
+    placeLoading--;
   }
   if (req !== locRequest) return; // a newer request won
   buildViews();
