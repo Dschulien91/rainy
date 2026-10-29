@@ -73,7 +73,10 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v0.24"
+VERSION = "server-v0.25"
+# Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model; no Europe/USA
+# radar, no clouds - their loops are not started); "full" = everything.
+EDITION = os.environ.get("EDITION", "de")
 PORT = int(os.environ.get("PORT", "8771"))
 UA = "Mozilla/5.0"          # neutral, carries no identity
 HISTORY_MS = 60 * 60_000    # observed frames kept (1 h)
@@ -730,9 +733,18 @@ def render(region, grid, bbox, w, h, ts):
 
 
 def coverage_mask(bbox, w, h):
-    """Opaque where any radar (Europe from OPERA's real coverage, CONUS box for the USA) exists."""
+    """Opaque where any radar (Europe from OPERA's real coverage, CONUS box for the USA) exists;
+    in the Germany edition exactly Germany."""
     X, Y = view_coords(bbox, w, h)
     cov = np.zeros((h, w), bool)
+    if EDITION == "de":
+        col, row = (v.astype(np.float32) for v in DE.to_pixels(X, Y))
+        cov = cv2.remap(DE.weight, col, row, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0) > 0.99
+        img = np.zeros((h, w, 4), np.uint8)
+        img[cov] = (0, 0, 0, 255)
+        buf = io.BytesIO()
+        Image.fromarray(img, "RGBA").save(buf, "PNG", compress_level=3)
+        return buf.getvalue()
     eu = REGIONS["eu"]
     frames, _ = eu.frames()
     if frames:
@@ -797,7 +809,7 @@ class Handler(BaseHTTPRequestHandler):
                 info = {name: {"frames": len(r.frames()[0]), "ref": r.ref} for name, r in REGIONS.items()}
                 info["clouds"] = {"frames": len(CLOUDS.frames()[0]), "ref": CLOUDS.ref}
                 info["de"] = {"frames": len(DE.frames()[0]), "ref": DE.ref}
-                body = {"version": VERSION, "regions": info, "openmeteo": openmeteo_available(), "rss_mb": rss_mb()}
+                body = {"version": VERSION, "edition": EDITION, "regions": info, "openmeteo": openmeteo_available(), "rss_mb": rss_mb()}
                 return self.send(200, json.dumps(body).encode(), "application/json", 10)
             if u.path.startswith("/tiles/"):
                 m = re.fullmatch(r"/tiles/(rain|raineu|cloud)/([\w-]+)/(\d+)/(\d+)/(\d+)/(\d+)\.png", u.path)
@@ -850,7 +862,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(200, json.dumps({"key": ALERTS.public_key}).encode(), "application/json", 3600)
             if u.path == "/api/push/preview":  # what the alert logic sees at a place (for testing, sends nothing)
                 s = ALERTS.series(float(q["lat"]), float(q["lon"]), ll_to_3857)
-                cfg = {"lead": int(q.get("lead", 20)), "early": True, "quiet": False, "tz": q.get("tz", "UTC")}
+                cfg = {"lead": int(q.get("lead", 45)), "early": True, "quiet": False, "tz": q.get("tz", "UTC")}
                 kind, info = alerts.AlertEngine.evaluate(s, int(time.time() * 1000), cfg, {}) if s else (None, {})
                 text = alerts.AlertEngine.message(kind, info, "Test", cfg["tz"]) if kind else None
                 body = {"would_send": kind, "message": text, "info": info,
@@ -890,24 +902,27 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(400, str(e).encode(), "text/plain", 0)
 
 
-ALERTS = alerts.AlertEngine(DATA_DIR, REGIONS, log, UA, VAPID_SUBJECT)
+
 CLOUDS = clouds.CloudNowcast(fetch, log, OPENMETEO_URL, openmeteo_available, ll_to_3857)
 DE = mosaic.GermanyDwd(fetch, log)
-MOSAIC = mosaic.Mosaic(REGIONS, DE, CLOUDS, sample, colorize, log)
+MOSAIC = mosaic.Mosaic(REGIONS, DE, CLOUDS, sample, colorize, log, de_only=EDITION == "de")
+ALERTS = alerts.AlertEngine(DATA_DIR, {**REGIONS, "de": DE}, log, UA, VAPID_SUBJECT,
+                            order=("de",) if EDITION == "de" else ("eu", "us"))
 RECORDER = recorder.Recorder(fetch, log, MOSAIC, CLOUDS, mosaic.merc)
 CLOUDS.heavy_lock = SPROG_LOCK  # cloud nowcast and S-PROG take turns (Docker VM memory)
 
 if __name__ == "__main__":
     threading.Thread(target=ALERTS.loop, args=(ll_to_3857,), daemon=True).start()
-    threading.Thread(target=CLOUDS.loop, daemon=True).start()
     threading.Thread(target=mosaic.de_loop, args=(DE, log), daemon=True).start()
     threading.Thread(target=RECORDER.loop, daemon=True).start()
     threading.Thread(target=memory_loop, daemon=True).start()
-    for r in REGIONS.values():
+    for r in REGIONS.values() if EDITION == "full" else ():
+        if r.name == "eu":
+            threading.Thread(target=CLOUDS.loop, daemon=True).start()
         threading.Thread(target=update_loop, args=(r,), daemon=True).start()
         if r.MODEL_DEG:
             r.model = ModelRain(r)
             threading.Thread(target=model_loop, args=(r.model,), daemon=True).start()
     log(f"nowcast: {'pySTEPS S-PROG' if HAVE_PYSTEPS else 'simple (pySTEPS not installed)'}")
-    log(f"rainy {VERSION} on http://0.0.0.0:{PORT}")
+    log(f"rainy {VERSION} ({EDITION} edition) on http://0.0.0.0:{PORT}")
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()

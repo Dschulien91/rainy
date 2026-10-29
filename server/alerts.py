@@ -1,8 +1,9 @@
 """Rain alerts ("Regenwarnung") for subscribed places, sent as Web Push notifications.
 
 Rules (agreed design):
-  - main alert about LEAD minutes (10/20/30, default 20) before rain starts at a place
-  - early alert ~60 min ahead only for heavy rain (>= 8 mm/h) and only when the forecast is very certain
+  - main alert about LEAD minutes (5-90, default 45) before rain starts at a place
+  - early alert ~60 min ahead only for heavy rain (>= 8 mm/h), only when the forecast is very certain and only with
+    a main warning time below 45 min (otherwise it adds nothing)
   - only on the change from dry to wet: no alert while it rains, and after rain a cooldown of COOLDOWN_H dry hours
   - at most MAX_PER_DAY alerts per place and day, quiet hours 22-7 (optional), one upgrade if it gets heavier
   - "rain at the place" is judged over a ~5 km circle (share of wet pixels), which removes most false alarms
@@ -38,8 +39,9 @@ def level(rate):
 
 
 class AlertEngine:
-    def __init__(self, data_dir, regions, log, ua, subject):
+    def __init__(self, data_dir, regions, log, ua, subject, order=("eu", "us")):
         self.dir, self.regions, self.log, self.ua, self.subject = data_dir, regions, log, ua, subject
+        self.order = order  # radar sources tried for a place, in this order
         os.makedirs(data_dir, exist_ok=True)
         self.path = os.path.join(data_dir, "subscriptions.json")
         self.lock = threading.Lock()
@@ -86,7 +88,8 @@ class AlertEngine:
             tz = str(body.get("tz"))
         except Exception:
             tz = "UTC"
-        cfg = {"lead": int(body.get("lead", 20)) if int(body.get("lead", 20)) in (10, 20, 30) else 20,
+        lead = int(body.get("lead", 45))
+        cfg = {"lead": lead if 5 <= lead <= 90 and lead % 5 == 0 else 45,
                "early": bool(body.get("early", True)), "quiet": bool(body.get("quiet", True)), "tz": tz}
         with self.lock:
             sid = body.get("id") if body.get("id") in self.subs else secrets.token_urlsafe(16)
@@ -105,7 +108,7 @@ class AlertEngine:
     def series(self, lat, lon, ll_to_3857):
         """Rain series around a place: [(ts, is_forecast, wet share of the 5 km circle, rate at the place)] or None."""
         x, y = ll_to_3857.transform(lon, lat)
-        for name in ("eu", "us"):
+        for name in self.order:
             region = self.regions.get(name)
             if region is None:
                 continue
@@ -180,7 +183,7 @@ class AlertEngine:
                 return None, info
             if lead <= cfg["lead"] + 2.5:
                 kind = "main"
-            elif cfg.get("early", True) and peak >= 8.0 and 45 <= lead <= 65 and info["certainty"] >= P_EARLY and not (same_event and st.get("early")):
+            elif cfg.get("early", True) and cfg["lead"] < 45 and peak >= 8.0 and 45 <= lead <= 65 and info["certainty"] >= P_EARLY and not (same_event and st.get("early")):
                 kind = "early"
         if kind:
             if not same_event:

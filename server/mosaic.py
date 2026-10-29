@@ -60,6 +60,7 @@ class GermanyDwd:
     LAYER = "dwd:Niederschlagsradar"
     BBOX = (*merc(2.0, 46.0), *merc(19.0, 56.0))   # x0, y0, x1, y1
     CELL = 1500.0                                   # ~0.95 km on the ground at 51 N
+    KM_PER_PX = 0.95
     # The WMS radar is not gauge-adjusted: against ~300 DWD 10-min gauges it shows 0.65-0.67 of the measured rain
     # (2.5 days and 22 h, server/check_rain_gauges.py); x1.5 matches the gauge totals and gives the best CSI.
     GAIN = 1.5
@@ -150,8 +151,9 @@ class GermanyDwd:
 
 
 class Mosaic:
-    def __init__(self, regions, de, clouds, sample, colorize, log):
+    def __init__(self, regions, de, clouds, sample, colorize, log, de_only=False):
         self.regions, self.de, self.clouds, self.sample, self.colorize, self.log = regions, de, clouds, sample, colorize, log
+        self.de_only = de_only  # Germany edition: DWD only, fading out 30 km beyond the border, no satellite estimate
         self.cache, self.cache_lock = OrderedDict(), threading.Lock()  # small in-process cache; the CDN does the rest
 
     # ---------- timeline ----------
@@ -161,7 +163,7 @@ class Mosaic:
 
     def frames(self):
         now = int(time.time() * 1000)
-        eu_ref = self.regions["eu"].ref or now
+        eu_ref = self.regions["eu"].ref or self.de.ref or now
         start = (now - 60 * 60_000) // STEP_MS * STEP_MS
         end = max(self.de.ref or 0, eu_ref) + 120 * 60_000
         last_obs = min(t for t in (self.de.ref, self.regions["eu"].ref) if t) if (self.de.ref or self.regions["eu"].ref) else now
@@ -192,9 +194,9 @@ class Mosaic:
             col, row = (v.astype(np.float32) for v in self.de.to_pixels(X, Y))
             d = cv2.remap(g.astype(np.float32), col, row, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
             w = cv2.remap(self.de.weight, col, row, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
-            rate = np.where(covered, w * d + (1 - w) * rate, np.where(w > 0, d, rate))
+            rate = np.where(covered, w * d + (1 - w) * rate, w * d if self.de_only else np.where(w > 0, d, rate))
             covered |= w > 0
-        faint = ~covered
+        faint = np.zeros(X.shape, bool) if self.de_only else ~covered
         if faint.any():
             g = self._nearest(self.regions["sat"], ts, 360_000)
             if g is not None:

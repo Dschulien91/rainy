@@ -141,6 +141,10 @@
   .alert-card p { margin: 0 0 12px; font-size: 13px; color: var(--muted); line-height: 1.35; }
   .alert-card .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 0; border-top: 1px solid var(--line); font-size: 14px; }
   .alert-card .seg { display: flex; gap: 4px; }
+  .edition-de #modeSun, .edition-de #favSun { display: none; }
+  .alert-card input[type=range] { width: 150px; accent-color: var(--rain); }
+  .alert-card .row[hidden] { display: none; }
+  .alert-card .lead-val { min-width: 54px; text-align: right; font-variant-numeric: tabular-nums; }
   .alert-card .seg button { border: 1px solid var(--line); background: none; color: var(--fg); font: inherit; font-size: 13px; padding: 5px 10px; border-radius: 999px; cursor: pointer; }
   .alert-card .seg button.on { background: var(--rain); border-color: var(--rain); color: #fff; }
   .alert-card input[type=checkbox] { width: 20px; height: 20px; accent-color: var(--rain); }
@@ -291,7 +295,7 @@
   <div class="hours" id="hours" hidden></div>
   <div class="status">
     <span id="source"></span>
-    <span>Daten: <a href="https://www.dwd.de" target="_blank">DWD</a>, EUMETNET, EUMETSAT, ECCC, NOAA, NASA, Bright Sky, Open-Meteo, © OpenMapTiles, © OpenStreetMap, OpenFreeMap</span>
+    <span id="credits">Daten: <a href="https://www.dwd.de" target="_blank" rel="noreferrer">DWD</a>, EUMETNET, EUMETSAT, ECCC, NOAA, NASA, Bright Sky, Open-Meteo, © OpenMapTiles, © OpenStreetMap, OpenFreeMap</span>
   </div>
 </div>
 
@@ -300,7 +304,7 @@
 <script src="https://unpkg.com/@maplibre/maplibre-gl-leaflet@0.0.22/leaflet-maplibre-gl.js"></script>
 <script>
 "use strict";
-const VERSION = "v0.47";
+const VERSION = "v0.48";
 const FALLBACK = { lat: 53.5511, lon: 9.9937, name: "Hamburg" };
 const DWD_WMS = "https://maps.dwd.de/geoserver/dwd/wms";
 const EUM_WMS = "https://view.eumetsat.int/geoserver/ows";
@@ -416,7 +420,16 @@ const MAP_STYLE = (() => {
   return { sat: st.sat === "photo" ? "photo" : "clouds", theme: ["light", "dark"].includes(st.theme) ? st.theme : "auto",
     rain: st.rain === "eu" ? "eu" : "mix" };
 })();
-const RAIN_EU = MAP_STYLE.rain === "eu";
+// Edition: "de" = first public version (Germany: rain radar 2 h + 24 h / 3 days; sunny and the Europe/USA radar are
+// hidden and everything outside Germany is hatched); "full" = everything (test with ?edition=full).
+const EDITION = new URLSearchParams(location.search).get("edition") === "full" ? "full" : "de";
+const DE_ONLY = EDITION === "de";
+if (DE_ONLY) {
+  document.documentElement.classList.add("edition-de");
+  document.getElementById("credits").innerHTML = 'Daten: <a href="https://www.dwd.de" target="_blank" rel="noreferrer">DWD</a>, ' +
+    "Bright Sky, Open-Meteo, © OpenMapTiles, © OpenStreetMap, OpenFreeMap";
+}
+const RAIN_EU = !DE_ONLY && MAP_STYLE.rain === "eu";
 if (MAP_STYLE.theme !== "auto") document.documentElement.classList.add(`theme-${MAP_STYLE.theme}`);
 const dark = MAP_STYLE.theme === "auto" ? window.matchMedia("(prefers-color-scheme: dark)").matches : MAP_STYLE.theme === "dark";
 document.body.classList.toggle("dark", dark);
@@ -1192,7 +1205,7 @@ async function loadPoint(loc) {
 // Clouds at the place from our server (Europe only; empty elsewhere or without the server).
 async function loadCloudPoint(loc) {
   state.cloudPoint = [];
-  if (!API_BASE || SAT_STYLE !== "clouds") return;
+  if (!API_BASE || SAT_STYLE !== "clouds" || DE_ONLY) return;
   await serverReady;
   try {
     const d = await getJSON(`${API_BASE}/api/cloud/point?lat=${loc.lat}&lon=${loc.lon}`);
@@ -1213,6 +1226,8 @@ async function loadRadarPoint(loc) {
   const now = Date.now(), iso = (t) => new Date(t).toISOString().slice(0, 19) + "Z";
   state.radarPoint = [];
   const cc = await countryOf(loc);
+  // Germany edition: radar only in Germany; elsewhere the timeline falls back to the weather model
+  if (DE_ONLY && cc && cc !== "DE") return;
   // DWD (via Bright Sky) only for places in Germany: Bright Sky answers "0 mm" far beyond the reach of the German
   // radars (e.g. Wroclaw, Amsterdam), which would show rain as dry. Elsewhere our server's OPERA radar is used.
   // Without our server, DWD remains the only European source, so then the rough Germany box decides.
@@ -1239,6 +1254,7 @@ async function loadRadarPoint(loc) {
       state.radarSource = "radar";
     } catch { state.radarPoint = []; }
   }
+  if (DE_ONLY) return;
   if (!state.radarPoint.length && loc.lon < -50 && loc.lat > 15) {
     // North America: country decides the source (Canada has an official nowcast, the USA observations only)
     if (cc === "CA") state.radarPoint = await caFrames().catch(() => []), state.radarSource = "ca";
@@ -1399,6 +1415,11 @@ async function updateNodata() {
   if (state.mode === "sun") {
     // Meteosat (Europe/Africa) and GOES (Americas) cover roughly 75 deg around their positions
     box([[-75, -75], [75, 75]]); box([[-75, -170], [75, -30]]);
+  } else if (DE_ONLY) {
+    // Germany edition: hatch everything outside Germany (the server's mask is the German border)
+    const mask = API_BASE ? await loadImage(`${API_BASE}/api/radar/mask?bbox=${nw.x},${se.y},${se.x},${nw.y}&width=${w}&height=${h}`).catch(() => null) : null;
+    if (token !== nodataToken) return;
+    if (mask) ctx.drawImage(mask, 0, 0, w, h); else box(DE_BOX);
   } else {
     box(DE_BOX); box(CA_BOX);
     if (API_BASE) {
@@ -1565,6 +1586,7 @@ function updateSource() {
     : k === "ca" ? (fc ? "Radar-Vorhersage (Environment Canada)" : "Radar gemessen (Environment Canada)")
     : k === "us" ? "Radar gemessen (NOAA)"
     : k === "rtile" ? (RAIN_EU ? (shown.ref ? "Radar-Vorhersage (rainy, aus EUMETNET OPERA)" : "Radar gemessen (EUMETNET OPERA, NOAA)")
+      : DE_ONLY ? (shown.ref ? "Radar-Vorhersage (DWD)" : "Radar gemessen (DWD)")
       : shown.ref ? "Radar-Vorhersage (DWD in Deutschland, sonst rainy)" : "Radar gemessen (DWD, EUMETNET OPERA, NOAA)")
     : k === "ctile" ? (shown.fc ? `Satellit hochgerechnet + Wettermodell (Bild von ${fmtTime(state.cloudRef)})` : `Satellit (EUMETSAT) · Stand ${fmtTime(f.map.ts)}`)
     : f.map.kind === "sat" ? `Satellit (${state.satRegion === "meteosat" ? "EUMETSAT" : "NOAA GOES / NASA"}) · Stand ${fmtTime(f.map.ts)}`
@@ -1991,7 +2013,7 @@ async function setLocation(loc, picked, knownName) {
   const nameP = knownName ? Promise.resolve(knownName) : reverseGeocode(loc, picked).then((p) => p.name);
   try {
     const fresh = state.satLatest && state.satRegion === satRegion(loc.lon) && Date.now() - state.satLatest < 45 * 60e3;
-    const satP = fresh ? null : loadSatLatest(loc);
+    const satP = fresh || DE_ONLY ? null : loadSatLatest(loc);
     const pointOk = await loadPoint(loc).then(() => true, (err) => { console.warn(err); return false; });
     await Promise.all([loadRadarPoint(loc), loadCloudPoint(loc), satP]);
     if (!pointOk) {
@@ -2059,7 +2081,8 @@ function renderPlace() {
 // (rounded to ~1 km) and the settings - no account. Alerts need our own server and https (or localhost).
 const ALERTS_POSSIBLE = !!API_BASE && "serviceWorker" in navigator;
 const BELL = '<svg viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0-6 6v3.5L4.5 16h15L18 12.5V9a6 6 0 0 0-6-6zM10 19a2 2 0 0 0 4 0" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>';
-const ALERT_DEFAULTS = { places: [], lead: 20, early: true, quiet: true };
+const ALERT_DEFAULTS = { places: [], lead: 45, early: true, quiet: true };
+const LEAD_MIN = 5, LEAD_MAX = 90; // selectable warning time (minutes before the rain)
 function loadAlerts() { try { return { ...ALERT_DEFAULTS, ...JSON.parse(localStorage.getItem("rainy.alerts")) }; } catch { return { ...ALERT_DEFAULTS }; } }
 function saveAlerts(a) { try { localStorage.setItem("rainy.alerts", JSON.stringify(a)); } catch {} }
 const hasAlert = (loc) => loadAlerts().places.some((p) => sameLoc(p, loc));
@@ -2122,17 +2145,18 @@ function showAlertCard(loc, name) {
   const card = document.getElementById("alertCard"), a = loadAlerts();
   card.innerHTML = `<h3>Regenwarnung · ${esc(name || "dieser Ort")}</h3>
     <p>Wir melden uns, bevor hier Regen beginnt – nur beim ersten Schauer, danach erst wieder nach 2 trockenen Stunden.</p>
-    <div class="row"><span>Vorwarnzeit</span><span class="seg">${[10, 20, 30].map((m) =>
-      `<button data-lead="${m}" class="${a.lead === m ? "on" : ""}">${m} Min.</button>`).join("")}</span></div>
-    <label class="row"><span>Bei Starkregen schon ca. 1 Std. vorher</span><input type="checkbox" data-k="early"${a.early ? " checked" : ""}></label>
+    <div class="row"><span>Vorwarnzeit</span><span><input type="range" min="${LEAD_MIN}" max="${LEAD_MAX}" step="5" value="${a.lead}" data-lead>
+      <span class="lead-val">${a.lead} Min.</span></span></div>
+    <label class="row early-row"${a.lead >= 45 ? " hidden" : ""}><span>Bei Starkregen schon ca. 1 Std. vorher</span><input type="checkbox" data-k="early"${a.early ? " checked" : ""}></label>
     <label class="row"><span>Nachtruhe 22–7 Uhr</span><input type="checkbox" data-k="quiet"${a.quiet ? " checked" : ""}></label>
     <div class="actions"><button class="off">Für diesen Ort aus</button><button class="done">Fertig</button></div>`;
   const update = () => { saveAlerts(a); syncAlerts(a).catch((e) => console.warn("alerts", e)); };
-  card.querySelectorAll("[data-lead]").forEach((b) => b.addEventListener("click", () => {
-    a.lead = +b.dataset.lead;
-    card.querySelectorAll("[data-lead]").forEach((x) => x.classList.toggle("on", x === b));
-    update();
-  }));
+  const lead = card.querySelector("[data-lead]");
+  lead.addEventListener("input", () => {
+    card.querySelector(".lead-val").textContent = `${lead.value} Min.`;
+    card.querySelector(".early-row").hidden = +lead.value >= 45; // the 1 h heads-up only adds something to short warning times
+  });
+  lead.addEventListener("change", () => { a.lead = +lead.value; update(); });
   card.querySelectorAll("input[data-k]").forEach((c) => c.addEventListener("change", () => { a[c.dataset.k] = c.checked; update(); }));
   card.querySelector(".off").addEventListener("click", () => {
     a.places = a.places.filter((p) => !sameLoc(p, loc));
@@ -2153,10 +2177,10 @@ function showStyleCard() {
   const seg = (key, opts) => `<span class="seg">${opts.map(([v, label]) =>
     `<button data-${key}="${v}" class="${MAP_STYLE[key] === v ? "on" : ""}">${label}</button>`).join("")}</span>`;
   card.innerHTML = `<h3>Kartenstil</h3>
-    <p>Wie Wolken, Karte und Regen aussehen. Gilt für dieses Gerät.</p>
-    <div class="row"><span>Wolken</span>${seg("sat", [["clouds", "Standard"], ["photo", "Satellitenfoto"]])}</div>
+    <p>${DE_ONLY ? "Wie die Karte aussieht." : "Wie Wolken, Karte und Regen aussehen."} Gilt für dieses Gerät.</p>
+    ${DE_ONLY ? "" : `<div class="row"><span>Wolken</span>${seg("sat", [["clouds", "Standard"], ["photo", "Satellitenfoto"]])}</div>`}
     <div class="row"><span>Karte</span>${seg("theme", [["auto", "Auto"], ["light", "Hell"], ["dark", "Dunkel"]])}</div>
-    <div class="row"><span>Regen</span>${seg("rain", [["mix", "DWD + Europa"], ["eu", "Nur Europa"]])}</div>
+    ${DE_ONLY ? "" : `<div class="row"><span>Regen</span>${seg("rain", [["mix", "DWD + Europa"], ["eu", "Nur Europa"]])}</div>`}
     <div class="actions"><span></span><button class="done">Fertig</button></div>`;
   card.querySelectorAll("[data-sat], [data-theme], [data-rain]").forEach((b) => b.addEventListener("click", () => {
     const key = b.dataset.sat ? "sat" : b.dataset.theme ? "theme" : "rain", next = { ...MAP_STYLE, [key]: b.dataset[key] };
