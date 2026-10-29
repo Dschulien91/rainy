@@ -1,4 +1,4 @@
-# One domain for everything: the app, /api (radar server) and /om (self-hosted Open-Meteo).
+# One domain for everything: the app, /api + /tiles (radar server) and /om (self-hosted Open-Meteo).
 # Caddy obtains and renews the HTTPS certificate automatically. No access logs are written.
 {$DOMAIN} {
 	encode zstd gzip
@@ -8,7 +8,11 @@
 		X-Content-Type-Options nosniff
 	}
 
+	# radar server: JSON API and the map tiles (tile URLs carry the data run, so a CDN may keep them for a day)
 	handle /api/* {
+		reverse_proxy api:8771
+	}
+	handle /tiles/* {
 		reverse_proxy api:8771
 	}
 
@@ -21,9 +25,13 @@
 
 	handle {
 		root * /srv/app
-		# only serve the app files, never the server code or deployment files
-		@private path /server/* /deploy/* /tools/* /.git/* /*.md
+		# only serve the app files, never the server code, tools or deployment files
+		@private path /server/* /deploy/* /tools/* /.git/* /.claude/* /*.md /*.py
 		respond @private 404
+		# the page itself must always be fresh (new versions), the libraries rarely change
+		@page path / /index.html /sw.js
+		header @page Cache-Control "no-cache"
+		header /vendor/* Cache-Control "public, max-age=604800"
 		file_server
 	}
 }

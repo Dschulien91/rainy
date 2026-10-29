@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Datenschutz</title>
+<style>
+  body { font: 16px/1.55 system-ui, sans-serif; max-width: 680px; margin: 0 auto; padding: 24px 16px 48px; color: #1b1f26; background: #fff; }
+  h1 { font-size: 24px; } h2 { font-size: 18px; margin-top: 28px; }
+  .todo { background: #fff3cd; padding: 0 4px; border-radius: 3px; }
+  @media (prefers-color-scheme: dark) { body { background: #1f2329; color: #e8ebf0; } .todo { background: #5c4a12; } a { color: #8ab4ff; } }
+</style>
+</head>
+<body>
+<!-- DRAFT describing what the app and server actually do (as of v0.55 / server-v0.33). Fill in the placeholders and
+     have it checked legally before going live; update it whenever data flows change. -->
+<h1>Datenschutzerklärung</h1>
+
+<h2>Kurz gesagt</h2>
+<p>Kein Konto, keine Werbung, kein Tracking, keine Cookies. Dein Standort wird nur verwendet, um das Wetter für diesen Ort
+zu zeigen, und nur auf etwa 1 km gerundet an unseren Server geschickt. Wir geben keine Daten an Dritte weiter.</p>
+
+<h2>Verantwortlich</h2>
+<p><span class="todo">[Vorname Nachname / Firma, Anschrift, E-Mail]</span></p>
+
+<h2>Welche Daten verarbeitet werden</h2>
+<p><b>Standort.</b> Mit deiner Erlaubnis fragt die App den Standort deines Geräts ab. Für Wetter, Radar und Ortsnamen schickt
+sie die Koordinaten gerundet (Wetter und Radar ca. 1 km, Ortsname ca. 100 m) an unseren Server. Er beantwortet die Anfrage
+und speichert sie nicht; Antworten werden ohne Bezug zu dir zwischengespeichert, damit gleiche Orte nicht neu berechnet werden.
+Ortsnamen und Ortssuche fragt unser Server bei Photon (komoot) bzw. Open-Meteo an – ohne deine IP-Adresse oder Gerätedaten.</p>
+<p><b>Server-Protokolle.</b> Unser Server speichert keine IP-Adressen und keine Zugriffsprotokolle mit Personenbezug.
+Technisch bedingt sieht unser Hosting-Anbieter <span class="todo">[Hetzner Online GmbH, Gunzenhausen]</span> bzw. das
+Auslieferungsnetz <span class="todo">[Cloudflare, Inc.]</span> die IP-Adresse beim Abruf
+(Art. 6 Abs. 1 lit. f DSGVO, sicherer und schneller Betrieb). <span class="todo">[Auftragsverarbeitungsverträge abschließen und hier nennen]</span></p>
+<p><b>Einstellungen und Favoriten</b> liegen nur auf deinem Gerät (Browser-Speicher) und werden nicht übertragen.</p>
+<p><b>Regen- und Gewitterwarnungen (freiwillig).</b> Schaltest du Warnungen ein, speichert unser Server: die Push-Adresse,
+die dein Browser dafür erzeugt, die gewarnten Orte (gerundet auf ca. 1 km, bei „Mein Standort“ der zuletzt gesehene
+Standort), deine Einstellungen (Vorwarnzeit, Nachtruhe usw.) und deine Zeitzone – kein Name, kein Konto, keine
+Gerätekennung. Die Nachricht wird über den Push-Dienst deines Browsers zugestellt
+(z. B. Google, Apple, Mozilla). Schaltest du alle Warnungen aus, wird der Eintrag gelöscht
+(Art. 6 Abs. 1 lit. a DSGVO, Einwilligung).</p>
+<p><b>Karte.</b> Die Kartenbilder kommen von OpenFreeMap (tiles.openfreemap.org); dabei sieht dieser Dienst deine
+IP-Adresse wie bei jedem Bildabruf. Beim Kartendesign „Satellit“ werden Bilder von der NASA (gibs.earthdata.nasa.gov) geladen.
+<span class="todo">[Optional: Kartenbilder über eigenen Server / Cloudflare ausliefern, dann diesen Absatz anpassen]</span></p>
+
+<h2>Deine Rechte</h2>
+<p>Du hast das Recht auf Auskunft, Berichtigung, Löschung, Einschränkung der Verarbeitung, Datenübertragbarkeit und
+Widerspruch sowie auf Beschwerde bei einer Datenschutz-Aufsichtsbehörde. Da wir keine Konten führen, können wir
+Warn-Einträge nur über die App (Warnungen ausschalten) eindeutig zuordnen und löschen.</p>
+<p><a href="./">Zurück zur App</a> · <a href="impressum.html">Impressum</a></p>
+</body>
+</html>

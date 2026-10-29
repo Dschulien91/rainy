@@ -14,6 +14,7 @@ import time
 import urllib.parse
 from datetime import datetime, timezone
 
+import cv2
 import numpy as np
 from PIL import Image
 
@@ -89,14 +90,21 @@ class Thunder:
         url = (f"{EUM}?service=WMS&version=1.3.0&request=GetMap&layers=mtg_fd:li_afa&styles=&crs=EPSG:3857"
                f"&bbox={x0},{y0},{x1},{y1}&width={LIGHTNING_SIZE[0]}&height={LIGHTNING_SIZE[1]}&format=image/png&transparent=true")
         img = Image.open(io.BytesIO(self.fetch(url, timeout=60))).convert("RGBA")
-        a = np.asarray(img).copy()
-        flash = a[..., 3] > 0
-        # one clear colour for "lightning in the last minutes": bright yellow with a dark rim for any background
-        a[flash] = (255, 214, 10, 235)
-        buf = io.BytesIO()
-        Image.fromarray(a, "RGBA").save(buf, "PNG", compress_level=6)
+        self.set_lightning(np.asarray(img)[..., 3] > 0)
+
+    def set_lightning(self, flash):
+        """Flash areas (image over LIGHTNING_BOX in Web Mercator) -> one point per flash cluster for the map."""
+        n, _, _, cent = cv2.connectedComponentsWithStats(flash.astype(np.uint8), connectivity=8)
+        h, w = flash.shape
+        (x0, x1), (y0, y1) = merc(np.array(LIGHTNING_BOX[0::2]), np.array(LIGHTNING_BOX[1::2]))
+        pts = []
+        for cx, cy in cent[1:301]:
+            mx, my = x0 + (cx + 0.5) / w * (x1 - x0), y1 - (cy + 0.5) / h * (y1 - y0)
+            lon = mx / 20037508.342789244 * 180.0
+            lat = np.degrees(2 * np.arctan(np.exp(my / 20037508.342789244 * np.pi)) - np.pi / 2)
+            pts.append([round(float(lat), 3), round(float(lon), 3)])
         with self.lock:
-            self.lightning = (int(time.time() * 1000), buf.getvalue(), int(flash.sum()))
+            self.lightning = (int(time.time() * 1000), pts)
 
     def loop(self):
         while True:

@@ -32,6 +32,25 @@ RADIUS_KM = 5.0
 LEVELS = ((8.0, "starker Regen", "Starker Regen"), (2.0, "mäßiger Regen", "Mäßiger Regen"), (0.0, "leichter Regen", "Leichter Regen"))
 ICON = {"Starker Regen": "⛈", "Mäßiger Regen": "🌧", "Leichter Regen": "🌦"}
 MAX_PLACES = 20
+# Share of alerts that were right (rain at the place within +-15 min of the predicted start), by lead time and
+# predicted peak: server/verify_alerts.py --truth radar (first 1.5 days of recorded forecasts, provisional; rerun
+# with more rainy days). (lead up to min, [light < 1 mm/h, moderate, heavy >= 4 mm/h]) - shown as "ca. X %".
+HIT_RATE = ((30, (30, 60, 70)), (45, (20, 60, 70)), (60, (20, 45, 55)), (90, (15, 40, 50)), (999, (15, 25, 35)))
+MAX_REMINDERS = 10
+
+
+def probability(lead_min, peak):
+    """Rounded alert probability in percent for a lead time and peak rate."""
+    k = 0 if peak < 1.0 else 1 if peak < 4.0 else 2
+    return next(r[k] for lim, r in HIT_RATE if lead_min <= lim)
+
+
+def remind_minutes(lead_min):
+    """'Remind me again' delay: about a third of the remaining time (90 min -> 30, 30 -> 10), at least 5 min,
+    and at least 5 min before the rain; None when there is too little time left."""
+    if lead_min < 15:
+        return None
+    return int(max(5, min(30, round(lead_min / 3 / 5) * 5, lead_min - 5)))
 
 
 def level(rate):
@@ -43,6 +62,7 @@ class AlertEngine:
         self.dir, self.regions, self.log, self.ua, self.subject = data_dir, regions, log, ua, subject
         self.thunder = thunder  # thunder.Thunder (DWD thunderstorm warnings) or None
         self.kind_at = kind_at  # (lat, lon, ts) -> "rain" | "snow" | "sleet" | "freezing" | "graupel" | "hail"
+        self.dev, self.outbox = False, None  # development: "dev:" subscriptions go to this list instead of a push service
         self.order = order  # radar sources tried for a place, in this order
         os.makedirs(data_dir, exist_ok=True)
         self.path = os.path.join(data_dir, "subscriptions.json")
@@ -80,7 +100,8 @@ class AlertEngine:
 
     def subscribe(self, body):
         sub = body.get("subscription") or {}
-        if not str(sub.get("endpoint", "")).startswith("https://") or not sub.get("keys"):
+        dev = self.dev and str(sub.get("endpoint", "")).startswith("dev:")  # devtools.py test subscription
+        if not (str(sub.get("endpoint", "")).startswith("https://") or dev) or not sub.get("keys"):
             raise ValueError("invalid push subscription")
         places = []
         for p in (body.get("places") or [])[:MAX_PLACES]:
@@ -91,16 +112,33 @@ class AlertEngine:
         except Exception:
             tz = "UTC"
         lead = int(body.get("lead", 45))
+        api = str(body.get("api") or "")
         cfg = {"lead": lead if 5 <= lead <= 90 and lead % 5 == 0 else 45,
                "early": bool(body.get("early", True)), "quiet": bool(body.get("quiet", True)), "tz": tz,
-               "thunder": bool(body.get("thunder", True))}
+               "thunder": bool(body.get("thunder", True)),
+               "api": api if api.startswith(("https://", "http://localhost", "http://127.0.0.1")) else ""}
         with self.lock:
             sid = body.get("id") if body.get("id") in self.subs else secrets.token_urlsafe(16)
             old = self.subs.get(sid, {}).get("state", {})
             state = {f"{p['lat']},{p['lon']}": old.get(f"{p['lat']},{p['lon']}", {}) for p in places}
-            self.subs[sid] = {"sub": {"endpoint": sub["endpoint"], "keys": sub["keys"]}, "places": places, "cfg": cfg, "state": state}
+            reminders = self.subs.get(sid, {}).get("reminders", [])
+            self.subs[sid] = {"sub": {"endpoint": sub["endpoint"], "keys": sub["keys"]}, "places": places, "cfg": cfg, "state": state,
+                              "reminders": reminders}
             self._save()
         return sid
+
+    def remind(self, sid, body):
+        """'Remind me again in N min' from the notification button: one more look at the place later."""
+        minutes = int(body.get("minutes", 10))
+        with self.lock:
+            e = self.subs.get(sid)
+            if e is None or not 5 <= minutes <= 60:
+                return False
+            p = {"name": str(body.get("name") or "")[:60], "lat": round(float(body["lat"]), 2), "lon": round(float(body["lon"]), 2)}
+            e.setdefault("reminders", []).append({**p, "due": int(time.time() * 1000) + minutes * 60_000})
+            del e["reminders"][:-MAX_REMINDERS]
+            self._save()
+        return True
 
     def unsubscribe(self, sid):
         with self.lock:
@@ -165,6 +203,7 @@ class AlertEngine:
         lead = (fc[start][0] - now_ms) / 60_000
         lv = level(peak)
         info = {"start_ts": fc[start][0], "lead_min": round(lead), "minutes": (end - start) * 5, "open_end": end == len(fc),
+                "prob": probability(lead, peak),
                 "peak": round(peak, 1), "level": lv[2], "certainty": round(min(s[2] for s in fc[start:start + MIN_STEPS]), 2),
                 "raining_now": raining_now}
         if raining_now:
@@ -200,20 +239,25 @@ class AlertEngine:
     def message(kind, info, place, tz):
         when = datetime.fromtimestamp(info["start_ts"] / 1000, ZoneInfo(tz)).strftime("%H:%M")
         lv = info["level"]
+        icon = {"snow": "🌨", "sleet": "🌨", "freezing": "🧊", "graupel": "🌨", "hail": "⛈"}.get(info.get("ptype"), ICON[lv])
         dur = "länger anhaltend" if info["open_end"] else f"etwa {max(10, info['minutes'])} Min. lang"
         mins = max(1, info["lead_min"])
         word = {"snow": "Schnee", "sleet": "Schneeregen", "freezing": "Glatteisregen", "graupel": "Graupel", "hail": "Hagel"}.get(info.get("ptype"))
         if word:  # same strength levels, other precipitation: "Starker Schnee", "Leichter Schneeregen", ...
             lv = lv.replace("Regen", word).replace("regen", word.lower())
+        chance = f" Wahrscheinlichkeit ca. {info['prob']} %." if info.get("prob") else ""
         if kind == "early":
-            title = f"{ICON[lv]} {lv} in ca. 1 Std. – {place}"
-            body = f"Voraussichtlich ab ca. {when}, {dur}. Wir melden uns kurz vorher noch einmal."
+            title = f"{icon} {lv} in ca. 1 Std. – {place}"
+            body = f"Voraussichtlich ab ca. {when}, {dur}.{chance} Wir melden uns kurz vorher noch einmal."
         elif kind == "upgrade":
             title = f"⛈ Jetzt starker Regen erwartet – {place}"
-            body = f"Ab ca. {when}, {dur}."
+            body = f"Ab ca. {when}, {dur}.{chance}"
+        elif kind == "reminder":
+            title = f"⏰ {lv} in {mins} Min. – {place}"
+            body = f"Erinnerung: ab ca. {when}, {dur}.{chance}"
         else:
-            title = f"{ICON[lv]} {lv} in {mins} Min. – {place}"
-            body = f"Ab ca. {when}, {dur}."
+            title = f"{icon} {lv} in {mins} Min. – {place}"
+            body = f"Ab ca. {when}, {dur}.{chance}"
         return title, body
 
     # ---------- sending ----------
@@ -223,6 +267,9 @@ class AlertEngine:
         except ImportError:
             return False
         entry = self.subs.get(sid)
+        if entry and self.dev and entry["sub"]["endpoint"].startswith("dev:"):
+            self.outbox.append({"sid": sid, **payload})
+            return True
         if not entry or not self.vapid:
             return False
         try:
@@ -258,22 +305,45 @@ class AlertEngine:
                     continue
                 kind, info = self.evaluate(s, now, e["cfg"], st)
                 if kind:
-                    if self.kind_at:  # snow, sleet, ... instead of "Regen"
-                        try:
-                            info["ptype"] = self.kind_at(p["lat"], p["lon"], info["start_ts"])
-                        except Exception:
-                            pass
-                    title, body = self.message(kind, info, p["name"] or "dein Ort", e["cfg"]["tz"])
-                    self.send(sid, {"title": title, "body": body, "tag": key, "lat": p["lat"], "lon": p["lon"], "name": p["name"]})
+                    self.send(sid, self.payload(sid, e["cfg"], kind, info, p, key))
                     self.log(f"alert {kind}: {info.get('level')} in {info.get('lead_min')} min")
                 if json.dumps(st, sort_keys=True) != before:
                     changed = True
             with self.lock:
                 if sid in self.subs:
                     self.subs[sid]["state"] = e["state"]
+            for rem in [r for r in e.get("reminders", []) if r["due"] <= now]:
+                s = self.series(rem["lat"], rem["lon"], ll_to_3857)
+                info = self.evaluate(s, now, e["cfg"], {})[1] if s else {}
+                key = f"{rem['lat']},{rem['lon']}"
+                if info.get("start_ts") and not info.get("raining_now"):
+                    self.send(sid, self.payload(sid, e["cfg"], "reminder", info, rem, key))
+                elif info.get("raining_now"):
+                    self.send(sid, {"title": f"🌧 Jetzt regnet es – {rem['name'] or 'dein Ort'}", "body": "Erinnerung von vorhin.", "tag": key})
+                else:
+                    self.send(sid, {"title": f"🌤 Entwarnung – {rem['name'] or 'dein Ort'}",
+                                    "body": "Der angekündigte Niederschlag kommt voraussichtlich doch nicht (nächste 2 Std.).", "tag": key})
+                changed = True
+            with self.lock:
+                if sid in self.subs:
+                    self.subs[sid]["reminders"] = [r for r in self.subs[sid].get("reminders", []) if r["due"] > now]
         if changed:
             with self.lock:
                 self._save()
+
+    def payload(self, sid, cfg, kind, info, place, key):
+        """Push payload: text, the place, and the data for the 'remind me' button (service worker)."""
+        if self.kind_at:  # snow, sleet, ... instead of "Regen"
+            try:
+                info["ptype"] = self.kind_at(place["lat"], place["lon"], info["start_ts"])
+            except Exception:
+                pass
+        title, body = self.message(kind, info, place["name"] or "dein Ort", cfg["tz"])
+        d = {"title": title, "body": body, "tag": key, "lat": place["lat"], "lon": place["lon"], "name": place["name"]}
+        wait = remind_minutes(info.get("lead_min", 0))
+        if wait and cfg.get("api"):
+            d.update({"id": sid, "api": cfg["api"], "remind": wait})
+        return d
 
     def thunder_alert(self, place, now_ms, cfg, st):
         """One push per DWD thunderstorm warning covering the place (active now or within the hour)."""

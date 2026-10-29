@@ -24,16 +24,18 @@ import json
 import os
 import re
 import threading
+import tarfile
 import time
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 import cv2
+import h5py
 import numpy as np
 from PIL import Image
 
-from ptype import NAMES as ptype_names
+from ptype import NAMES as ptype_names, dwd_grid_maps
 
 WORLD = 20037508.342789244
 STEP_MS = 5 * 60_000
@@ -56,7 +58,15 @@ def tile_xy(z, x, y, size=TILE):
 
 
 class GermanyDwd:
-    """DWD radar composite plus DWD's own nowcast (RV) from the DWD WMS, on a fixed Web Mercator grid."""
+    """DWD radar composite plus DWD's own nowcast (RV) on a fixed Web Mercator grid.
+
+    Source: the DWD open data RV composite (opendata.dwd.de/weather/radar/composite/rv): one file per 5-min run with
+    the analysis and 24 forecast steps to +120 min as real values (mm per 5 min, 1 km). The DWD WMS (colour images
+    in 15 classes) is only the fallback: it stalled for hours on 29.10. while open data kept updating."""
+    RV = "https://opendata.dwd.de/weather/radar/composite/rv/"
+    # Open data RV analysis against ~300 DWD 10-min gauges (1.9 days, server/check_rain_gauges.py --source rv): 0.67 of
+    # the measured rain like the WMS; x1.5 matches the gauge totals (1.01) with the best CSI (>= 1 mm/h: 0.42)
+    GAIN_RV = 1.5
     name = "de"
     WMS = "https://maps.dwd.de/geoserver/dwd/wms"
     LAYER = "dwd:Niederschlagsradar"
@@ -79,6 +89,7 @@ class GermanyDwd:
         self.obs, self.fc, self.ref = {}, {}, None
         self.rgb = np.array([[int(h[i:i + 2], 16) for i in (0, 2, 4)] for h in self.CLASSES], np.int32)
         self.val = np.array(list(self.CLASSES.values()), np.float32)
+        self.rv_maps = None
         self.weight = self._germany_weight()
         # Germany for the hatching: the outline leaves estuaries (Elbe, Weser) and lagoons out as sea, so close
         # gaps up to ~10 km - inland waters must not look like "no data"
@@ -114,8 +125,12 @@ class GermanyDwd:
 
     def _latest_run(self):
         xml = self.fetch(f"{self.WMS.rsplit('/', 1)[0]}/Niederschlagsradar/ows?service=WMS&version=1.3.0&request=GetCapabilities").decode("utf-8", "ignore")
-        m = re.search(r'<Dimension name="REFERENCE_TIME" default="([^"]+)"', xml)
-        return int(datetime.strptime(m.group(1)[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc).timestamp() * 1000)
+        # newest run in the list of available runs: the "default" attribute now and then names a run hours old
+        m = re.search(r'<Dimension name="REFERENCE_TIME"[^>]*>([^<]+)<', xml)
+        runs = [int(datetime.strptime(v.strip()[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc).timestamp() * 1000)
+                for v in m.group(1).split(",") if v.strip()[:2] == "20"]
+        now = time.time() * 1000
+        return max(t for t in runs if t <= now + 300_000)
 
     def _load(self, ts, ref=None):
         x0, y0, x1, y1 = self.BBOX
@@ -137,7 +152,56 @@ class GermanyDwd:
         rate[wet] = np.where(d2.min(-1) <= 3 * 30 * 30, self.val[d2.argmin(-1)], 0.0)  # outline etc. -> 0
         return (rate * self.GAIN).astype(np.float16)
 
+    def _rv_runs(self):
+        names = re.findall(r"composite_rv_(\d{8}_\d{4})\.tar", self.fetch(self.RV, timeout=60).decode("latin-1"))
+        return sorted({int(datetime.strptime(n, "%Y%m%d_%H%M").replace(tzinfo=timezone.utc).timestamp() * 1000) for n in names})
+
+    def _load_rv(self, run):
+        """{ts: rate grid (mm/h, float16)} for the analysis and the 24 forecast steps of one RV run."""
+        name = datetime.fromtimestamp(run / 1000, timezone.utc).strftime("composite_rv_%Y%m%d_%H%M.tar")
+        out = {}
+        with tarfile.open(fileobj=io.BytesIO(self.fetch(self.RV + name, timeout=120))) as tar:
+            for m in tar.getmembers():
+                lead = int(m.name.rsplit("_", 1)[1].split("-")[0])
+                with h5py.File(io.BytesIO(tar.extractfile(m).read()), "r") as f:
+                    if self.rv_maps is None:
+                        self.rv_maps = dwd_grid_maps(f, self)
+                    w = f["dataset1/data1/what"].attrs
+                    raw = f["dataset1/data1/data"][:]
+                    mm5 = np.where(raw == w["nodata"], 0.0, np.maximum(raw * float(w["gain"]) + float(w["offset"]), 0.0)).astype(np.float32)
+                g = cv2.remap(mm5 * 12.0 * self.GAIN_RV, *self.rv_maps, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+                out[run + lead * 60_000] = g.astype(np.float16)
+        return out
+
     def update(self):
+        if getattr(self, "frozen", False):  # devtools.py test scenario in place
+            return 0
+        try:
+            return self._update_rv()
+        except Exception as e:
+            self.log(f"de: open data RV failed ({e}), using the WMS")
+            return self._update_wms()
+
+    def _update_rv(self):
+        runs = self._rv_runs()
+        ref = runs[-1]
+        if ref == self.ref:
+            return 0
+        obs_t = [ref - k * STEP_MS for k in range(12, -1, -1)]
+        got = self._load_rv(ref)
+        obs = {t: g for t, g in self.obs.items() if t in obs_t}
+        obs[ref] = got[ref]
+        n = 25
+        for t in obs_t:  # history (first start): the analysis of each earlier run
+            if t not in obs and t in runs:
+                obs[t] = self._load_rv(t)[t]
+                n += 1
+        with self.lock:
+            self.obs = obs
+            self.fc, self.ref = {t: g for t, g in got.items() if t > ref}, ref
+        return n
+
+    def _update_wms(self):
         ref = self._latest_run()
         if self.ref and ref < self.ref:  # the capabilities now and then announce an old run as the default
             return 0
@@ -272,7 +336,7 @@ def de_loop(de, log, ptype=None):
                     f"{datetime.fromtimestamp(de.ref / 1000, timezone.utc):%H:%M}Z, {time.time() - started:.0f}s")
         except Exception as e:  # keep serving the last good data
             log(f"de update failed: {e}")
-        if ptype is not None:
+        if ptype is not None and not getattr(de, "frozen", False):
             try:
                 ptype.update(list(de.obs))
             except Exception as e:

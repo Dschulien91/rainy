@@ -11,8 +11,8 @@
 <meta name="theme-color" content="#0B2A5B">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="rainy">
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
-<link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
+<link rel="stylesheet" href="vendor/leaflet.css">
+<link rel="stylesheet" href="vendor/maplibre-gl.css">
 <style>
   :root {
     --bg: #ffffff;
@@ -143,8 +143,8 @@
   .alert-card .seg { display: flex; gap: 4px; }
   .edition-de #modeSun, .edition-de #favSun { display: none; }
   .alert-card input[type=range] { width: 150px; accent-color: var(--rain); }
-  .alert-card .row[hidden] { display: none; }
-  .lightning { filter: drop-shadow(0 0 1px rgba(0,0,0,.8)); }
+  .alert-card .row[hidden], .alert-card .hint[hidden] { display: none; }
+  .bolt { filter: drop-shadow(0 0 2px rgba(0,0,0,.6)); }
   .alert-card .seg { flex-wrap: wrap; justify-content: flex-end; }
   .alert-card .sec { margin: 12px 0 2px; font-size: 12px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
   .alert-card .hint { margin: -4px 0 4px; font-size: 12px; color: var(--muted); }
@@ -305,12 +305,12 @@
   </div>
 </div>
 
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
-<script src="https://unpkg.com/@maplibre/maplibre-gl-leaflet@0.0.22/leaflet-maplibre-gl.js"></script>
+<script src="vendor/leaflet.js"></script>
+<script src="vendor/maplibre-gl.js"></script>
+<script src="vendor/leaflet-maplibre-gl.js"></script>
 <script>
 "use strict";
-const VERSION = "v0.53";
+const VERSION = "v0.57";
 const FALLBACK = { lat: 53.5511, lon: 9.9937, name: "Hamburg" };
 const DWD_WMS = "https://maps.dwd.de/geoserver/dwd/wms";
 const EUM_WMS = "https://view.eumetsat.int/geoserver/ows";
@@ -320,6 +320,9 @@ const EUM_WMS = "https://view.eumetsat.int/geoserver/ows";
 const LOCAL_DEV = /^(localhost|127\.0\.0\.1|192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.)/.test(location.hostname);
 const API_BASE = LOCAL_DEV ? `${location.protocol}//${location.hostname}:8771`
   : /github\.io$/.test(location.hostname) || location.protocol === "file:" ? null : location.origin;
+// Place names and search go through our server when there is one, so these services never see users' addresses.
+const GEO_REVERSE = API_BASE ? `${API_BASE}/api/geo/reverse` : "https://photon.komoot.io/reverse";
+const GEO_SEARCH = API_BASE ? `${API_BASE}/api/geo/search` : "https://geocoding-api.open-meteo.com/v1/search";
 // Weather model API: our self-hosted Open-Meteo when the server reports one (no rate limits), else the public API.
 let OM_BASE = "https://api.open-meteo.com";
 const serverReady = API_BASE ? fetch(`${API_BASE}/api/health`).then((r) => r.json()).then((h) => {
@@ -434,7 +437,8 @@ const DE_ONLY = EDITION === "de";
 if (DE_ONLY) {
   document.documentElement.classList.add("edition-de");
   document.getElementById("credits").innerHTML = 'Daten: <a href="https://www.dwd.de" target="_blank" rel="noreferrer">DWD</a>, ' +
-    "Bright Sky, Open-Meteo, © OpenMapTiles, © OpenStreetMap, OpenFreeMap" + (MAP_STYLE.design === "earth" ? ", NASA Blue Marble" : "");
+    "Open-Meteo, EUMETSAT, © OpenMapTiles, © OpenStreetMap, OpenFreeMap" + (MAP_STYLE.design === "earth" ? ", NASA Blue Marble" : "") +
+    ' · <a href="impressum.html">Impressum</a> · <a href="datenschutz.html">Datenschutz</a>';
 }
 const RAIN_EU = !DE_ONLY && MAP_STYLE.rain === "eu";
 if (MAP_STYLE.theme !== "auto") document.documentElement.classList.add(`theme-${MAP_STYLE.theme}`);
@@ -630,7 +634,7 @@ const KIND_STOPS = {
   snow: [[0.1, [238, 242, 255, 0.65]], [0.5, [212, 220, 255, 0.78]], [2, [178, 184, 255, 0.88]], [5, [146, 132, 245, 0.93]], [30, [118, 92, 228, 1]]],
   freezing: [[0.1, [255, 196, 224, 0.7]], [0.5, [255, 150, 204, 0.82]], [2, [242, 92, 172, 0.92]], [5, [214, 40, 142, 0.97]], [30, [170, 0, 110, 1]]],
   graupel: [[0.1, [204, 244, 206, 0.75]], [2, [124, 214, 146, 0.88]], [10, [60, 172, 96, 0.95]], [30, [30, 130, 70, 1]]],
-  hail: [[0.1, [255, 130, 120, 0.9]], [2, [245, 50, 70, 0.96]], [10, [205, 0, 90, 1]], [30, [150, 0, 125, 1]]],
+  hail: [[0.1, [255, 120, 70, 0.92]], [2, [240, 40, 30, 0.97]], [10, [205, 0, 0, 1]], [30, [150, 0, 0, 1]]],
 };
 const KIND_WORD = { rain: "Regen", sleet: "Schneeregen", snow: "Schnee", freezing: "Glatteisregen", graupel: "Graupel", hail: "Hagel" };
 function rainColor(mmh, kind) {
@@ -1209,7 +1213,7 @@ function getPosition() {
 // Place name via Photon (OpenStreetMap data, no API key or app identification needed).
 async function reverseGeocode(loc, detail = false) {
   try {
-    const d = await getJSON(`https://photon.komoot.io/reverse?lat=${loc.lat}&lon=${loc.lon}&lang=de`);
+    const d = await getJSON(`${GEO_REVERSE}?lat=${loc.lat.toFixed(3)}&lon=${loc.lon.toFixed(3)}&lang=de`);
     const a = (d.features && d.features[0] && d.features[0].properties) || {};
     const city = a.city || a.town || a.village || a.county || a.state;
     const part = detail && (a.district || a.locality);
@@ -1221,7 +1225,7 @@ async function reverseGeocode(loc, detail = false) {
 async function cityZoom(place) {
   if (!place || !place.city) return 11;
   try {
-    const d = await getJSON(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(place.city)}` +
+    const d = await getJSON(`${GEO_SEARCH}?name=${encodeURIComponent(place.city)}` +
       `&count=1&language=de&format=json` + (place.country ? `&countryCode=${place.country}` : ""));
     const pop = (d.results && d.results[0] && d.results[0].population) || 0;
     if (!pop) return 11; // unknown size: a city-wide default
@@ -1279,7 +1283,7 @@ const countryCache = new Map();
 async function countryOf(loc) {
   const key = `${loc.lat.toFixed(2)},${loc.lon.toFixed(2)}`;
   if (!countryCache.has(key)) {
-    countryCache.set(key, getJSON(`https://photon.komoot.io/reverse?lat=${loc.lat}&lon=${loc.lon}&lang=en`)
+    countryCache.set(key, getJSON(`${GEO_REVERSE}?lat=${loc.lat.toFixed(3)}&lon=${loc.lon.toFixed(3)}&lang=en`)
       .then((d) => (d.features && d.features[0] && d.features[0].properties.countrycode) || "").catch(() => ""));
   }
   return countryCache.get(key);
@@ -1302,7 +1306,8 @@ async function loadRadarPoint(loc) {
       state.radarSource = "rtile"; state.tileKey.rain = d.key;
     } catch { state.radarPoint = []; }
   }
-  if (!state.radarPoint.length && (cc === "DE" || (!API_BASE && (cc ? false : inBox(DE_BOX, loc.lat, loc.lon))))) {
+  // Bright Sky only without our server: with it, places never go to third parties (privacy)
+  if (!state.radarPoint.length && !API_BASE && (cc === "DE" || (cc ? false : inBox(DE_BOX, loc.lat, loc.lon)))) {
     try {
       const d = await getJSON(`https://api.brightsky.dev/radar?lat=${loc.lat}&lon=${loc.lon}&distance=1000&format=plain` +
         `&date=${iso(now - 3600e3)}&last_date=${iso(now + 2.5 * 3600e3)}`);
@@ -1469,9 +1474,11 @@ async function loadThunderLayers() {
     const li = await getJSON(`${API_BASE}/api/lightning`);
     if (lightningLayer) lightningLayer.remove();
     lightningLayer = null;
-    if (li.ts && li.flashes) {
-      const [x0, y0, x1, y1] = li.box;
-      lightningLayer = L.imageOverlay(`${API_BASE}/api/lightning/${li.ts}.png`, [[y0, x0], [y1, x1]], { pane: "thunder", className: "lightning" });
+    if (li.flashes && li.flashes.length) {
+      // one small bolt per flash cluster of the last minutes
+      const bolt = L.divIcon({ className: "bolt", iconSize: [16, 16], iconAnchor: [8, 8],
+        html: '<svg viewBox="0 0 16 16" width="16" height="16"><path d="M9.5 1 3 9h4.2L6 15l7-8.4H8.6z" fill="#ffd60a" stroke="#3a2a00" stroke-width="1" stroke-linejoin="round"/></svg>' });
+      lightningLayer = L.layerGroup(li.flashes.map(([la, lo]) => L.marker([la, lo], { icon: bolt, pane: "thunder", interactive: false, keyboard: false })));
     }
     applyThunderLayers();
   } catch (e) { console.warn("thunder", e); }
@@ -2219,7 +2226,7 @@ async function syncAlerts(a) {
     sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64ToBytes(key) });
   }
   const r = await postJSON("/api/push/subscribe", { id: a.id, subscription: sub.toJSON(), places: alertPlaces(a),
-    lead: a.lead, early: a.early, quiet: a.quiet, thunder: a.thunder, tz: DEVICE_TZ });
+    lead: a.lead, early: a.early, quiet: a.quiet, thunder: a.thunder, tz: DEVICE_TZ, api: API_BASE });
   if (!r.ok) throw new Error(`subscribe ${r.status}`);
   const first = !a.id;
   a.id = (await r.json()).id;
@@ -2257,6 +2264,7 @@ async function bellClicked(loc, name) {
 // Lead time slider, heavy-rain heads-up and quiet hours: shared by the place card and the settings.
 const alertControls = (a) => `<div class="row"><span>Vorwarnzeit</span><span><input type="range" min="${LEAD_MIN}" max="${LEAD_MAX}" step="5" value="${a.lead}" data-lead>
       <span class="lead-val">${a.lead} Min.</span></span></div>
+    <p class="hint lead-hint"${a.lead > 45 ? "" : " hidden"}>Mehr als 45 Min. vorher werden Warnungen spürbar unsicherer.</p>
     <label class="row early-row"${a.lead >= 45 ? " hidden" : ""}><span>Bei Starkregen schon ca. 1 Std. vorher</span><input type="checkbox" data-k="early"${a.early ? " checked" : ""}></label>
     <label class="row"><span>Gewitterwarnung (DWD)</span><input type="checkbox" data-k="thunder"${a.thunder ? " checked" : ""}></label>
     <label class="row"><span>Nachtruhe 22–7 Uhr</span><input type="checkbox" data-k="quiet"${a.quiet ? " checked" : ""}></label>`;
@@ -2266,6 +2274,7 @@ function bindAlertControls(card, a, update) {
   lead.addEventListener("input", () => {
     card.querySelector(".lead-val").textContent = `${lead.value} Min.`;
     card.querySelector(".early-row").hidden = +lead.value >= 45; // the 1 h heads-up only adds something to short warning times
+    card.querySelector(".lead-hint").hidden = +lead.value <= 45; // backtest: hit rate drops clearly beyond ~45 min
   });
   lead.addEventListener("change", () => { a.lead = +lead.value; update(); });
   card.querySelectorAll("input[data-k]").forEach((c) => c.addEventListener("change", () => { a[c.dataset.k] = c.checked; update(); }));
@@ -2487,7 +2496,7 @@ searchInput.addEventListener("input", () => {
   if (q.length < 2) { lastResults = []; renderResults(); return; }
   searchTimer = setTimeout(async () => {
     try {
-      const d = await getJSON(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(q)}&count=10&language=de&format=json`);
+      const d = await getJSON(`${GEO_SEARCH}?name=${encodeURIComponent(q)}&count=10&language=de&format=json`);
       if (searchInput.value.trim() !== q) return;
       lastResults = d.results || [];
     } catch { lastResults = []; }

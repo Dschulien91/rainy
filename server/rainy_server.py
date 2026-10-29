@@ -25,6 +25,7 @@ Endpoints (all CORS-enabled, cache headers suitable for a CDN):
   GET /api/radar/point?lat=&lon=               -> {"region": "eu"|"us"|"sat"|null, "series": [{"ts", "mmh"}], "ref": ms}
   GET /api/radar/mask?bbox=&width=&height=     -> PNG, opaque where radar coverage exists (for the "no data" hatching)
   Seamless map tiles for the app (server/mosaic.py; DWD + OPERA + NOAA + satellite in one, CDN-cacheable):
+  GET /api/thunder/areas, /api/thunder/point?lat=&lon=, /api/lightning -> DWD thunderstorm warnings, MTG lightning
   GET /api/rain/frames, /api/rain/point?lat=&lon=[&src=eu], /tiles/rain/<key>/<ts>/<z>/<x>/<y>.png, /tiles/cloud/...
       (/tiles/raineu/... and src=eu: Europe composite only, without the DWD source in Germany - user-selectable)
   Clouds for the "sunny" map (server/clouds.py, Europe, EUMETSAT GeoColour + nowcast):
@@ -34,7 +35,7 @@ Endpoints (all CORS-enabled, cache headers suitable for a CDN):
   Rain alerts (server/alerts.py, Web Push):
   GET  /api/push/key                           -> {"key": VAPID public key}
   POST /api/push/subscribe   {id?, subscription, places, lead, early, quiet, tz} -> {"id"}
-  POST /api/push/unsubscribe {id};  POST /api/push/test {id}
+  POST /api/push/unsubscribe {id};  POST /api/push/test {id};  POST /api/push/remind {id, lat, lon, name, minutes}
   GET  /api/push/preview?lat=&lon=&lead=&tz=   -> what the alert logic sees at a place (sends nothing)
 
 Run:  python server/rainy_server.py   (port from env PORT, default 8771)
@@ -75,10 +76,11 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v0.30"
+VERSION = "server-v0.38"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model; no Europe/USA
 # radar, no clouds - their loops are not started); "full" = everything.
 EDITION = os.environ.get("EDITION", "de")
+DEV = os.environ.get("RAINY_DEV") == "1"  # local development only: fake scenarios + dry-run alert outbox (devtools.py)
 PORT = int(os.environ.get("PORT", "8771"))
 UA = "Mozilla/5.0"          # neutral, carries no identity
 HISTORY_MS = 60 * 60_000    # observed frames kept (1 h)
@@ -147,7 +149,7 @@ KIND_STOPS = [
     [(0.1, (238, 242, 255, 0.65)), (0.5, (212, 220, 255, 0.78)), (2, (178, 184, 255, 0.88)), (5, (146, 132, 245, 0.93)), (30, (118, 92, 228, 1))],
     [(0.1, (255, 196, 224, 0.7)), (0.5, (255, 150, 204, 0.82)), (2, (242, 92, 172, 0.92)), (5, (214, 40, 142, 0.97)), (30, (170, 0, 110, 1))],
     [(0.1, (204, 244, 206, 0.75)), (2, (124, 214, 146, 0.88)), (10, (60, 172, 96, 0.95)), (30, (30, 130, 70, 1))],
-    [(0.1, (255, 130, 120, 0.9)), (2, (245, 50, 70, 0.96)), (10, (205, 0, 90, 1)), (30, (150, 0, 125, 1))],
+    [(0.1, (255, 120, 70, 0.92)), (2, (240, 40, 30, 0.97)), (10, (205, 0, 0, 1)), (30, (150, 0, 0, 1))],  # hail: red, unlike heavy rain
 ]
 
 
@@ -798,7 +800,27 @@ def point_series(lat, lon):
 POINT_CACHE = {}  # (radar key, lat, lon, with DWD) -> rain point answer; the key changes with every new radar run
 
 
+GEO_CACHE = {}  # proxied geocoding answers (rounded coordinates / query text) -> bytes
+GEO_UP = {"/api/geo/reverse": ("https://photon.komoot.io/reverse", ("lat", "lon", "lang")),
+          "/api/geo/search": ("https://geocoding-api.open-meteo.com/v1/search", ("name", "count", "language", "format"))}
+
+
 class Handler(BaseHTTPRequestHandler):
+    def geo(self, u):
+        """Forward a geocoding request with only the needed parameters, our neutral User-Agent and no client data."""
+        up, keys = GEO_UP[u.path]
+        q = {k: v[0][:120] for k, v in parse_qs(u.query).items() if k in keys}
+        if "lat" in q:
+            q["lat"], q["lon"] = f"{float(q['lat']):.3f}", f"{float(q['lon']):.3f}"  # ~100 m
+        url = f"{up}?{urllib.parse.urlencode(sorted(q.items()))}"
+        body = GEO_CACHE.get(url)
+        if body is None:
+            body = fetch(url, timeout=20)
+            GEO_CACHE[url] = body
+            while len(GEO_CACHE) > 50000:
+                GEO_CACHE.pop(next(iter(GEO_CACHE)))
+        return self.send(200, body, "application/json", 86400)
+
     server_version = "rainy"
     sys_version = ""
 
@@ -821,6 +843,10 @@ class Handler(BaseHTTPRequestHandler):
             if u.path.startswith("/om/"):  # local stand-in for the production /om route
                 with urllib.request.urlopen(f"{OPENMETEO_URL}{self.path[3:]}", timeout=60) as r:
                     return self.send(r.status, r.read(), r.headers.get("Content-Type", "application/json"), 600)
+            if u.path == "/api/ready":  # for uptime monitors: 503 when the German radar data is stale
+                age = (time.time() * 1000 - DE.ref) / 60_000 if DE.ref else None
+                ok = age is not None and age < 20
+                return self.send(200 if ok else 503, json.dumps({"ok": ok, "radar_age_min": age and round(age)}).encode(), "application/json", 0)
             if u.path == "/api/health":
                 info = {name: {"frames": len(r.frames()[0]), "ref": r.ref} for name, r in REGIONS.items()}
                 info["clouds"] = {"frames": len(CLOUDS.frames()[0]), "ref": CLOUDS.ref}
@@ -840,6 +866,23 @@ class Handler(BaseHTTPRequestHandler):
                 if png is None:
                     return self.send(404, b"unknown frame", "text/plain", 30)
                 return self.send(200, png, "image/png", 86400)  # the key in the URL makes the content immutable
+            if DEV and u.path.startswith("/api/dev/"):  # never in production (env RAINY_DEV=1 only)
+                if u.path == "/api/dev/storm":
+                    devtools.storm(DE, PTYPE, THUNDER, float(q["lat"]), float(q["lon"]), int(q.get("arrive", 40)))
+                elif u.path == "/api/dev/reset":
+                    devtools.reset(DE, PTYPE, THUNDER)
+                elif u.path == "/api/dev/run":  # one alert round now
+                    ALERTS.run_once(ll_to_3857)
+                elif u.path == "/api/dev/due":  # all reminders due now
+                    with ALERTS.lock:
+                        for e in ALERTS.subs.values():
+                            for r in e.get("reminders", []):
+                                r["due"] = 0
+                MOSAIC.cache.clear()
+                POINT_CACHE.clear()
+                return self.send(200, json.dumps({"outbox": devtools.OUTBOX[-10:]}, ensure_ascii=False).encode(), "application/json", 0)
+            if u.path in ("/api/geo/reverse", "/api/geo/search"):  # place names / search, anonymised for the user
+                return self.geo(u)
             if u.path == "/api/thunder/areas":  # DWD thunderstorm / heavy rain warning areas (GeoJSON)
                 with THUNDER.lock:
                     body = THUNDER.geojson
@@ -851,14 +894,8 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/lightning":  # latest satellite lightning over Germany: {ts, flashes, box}
                 with THUNDER.lock:
                     li = THUNDER.lightning
-                body = {"ts": li[0], "flashes": li[2], "box": thunder.LIGHTNING_BOX} if li else {}
+                body = {"ts": li[0], "flashes": li[1]} if li else {}  # flash clusters of the last minutes [[lat, lon]]
                 return self.send(200, json.dumps(body).encode(), "application/json", 60)
-            if u.path.startswith("/api/lightning/") and u.path.endswith(".png"):
-                with THUNDER.lock:
-                    li = THUNDER.lightning
-                if not li:
-                    return self.send(404, b"no lightning image yet", "text/plain", 30)
-                return self.send(200, li[1], "image/png", 86400)  # ts in the URL: immutable
             if u.path == "/api/rain/frames":
                 body = {"key": MOSAIC.key(), "frames": MOSAIC.frames()}
                 return self.send(200, json.dumps(body).encode(), "application/json", 30)
@@ -936,6 +973,9 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/push/unsubscribe":
                 ALERTS.unsubscribe(str(body.get("id")))
                 return self.send(200, b"{}", "application/json", 0)
+            if u.path == "/api/push/remind":  # 'remind me again' button of a notification
+                ok = ALERTS.remind(str(body.get("id")), body)
+                return self.send(200 if ok else 404, json.dumps({"ok": ok}).encode(), "application/json", 0)
             if u.path == "/api/push/test":
                 ok = ALERTS.send(str(body.get("id")), {"title": "🌧 Regenwarnung ist aktiv",
                                                        "body": "So sieht eine Warnung aus, wenn Regen auf dich zukommt."})
@@ -956,6 +996,9 @@ ALERTS = alerts.AlertEngine(DATA_DIR, {**REGIONS, "de": DE}, log, UA, VAPID_SUBJ
                             kind_at=lambda lat, lon, ts: ptype.NAMES[int(MOSAIC.kind(ts, *(np.array([[v]]) for v in mosaic.merc(lon, lat)))[0, 0])]
                             if PTYPE.grids else "rain")
 RECORDER = recorder.Recorder(fetch, log, MOSAIC, CLOUDS, mosaic.merc)
+if DEV:
+    import devtools
+    ALERTS.dev, ALERTS.outbox = True, devtools.OUTBOX
 CLOUDS.heavy_lock = SPROG_LOCK  # cloud nowcast and S-PROG take turns (Docker VM memory)
 
 if __name__ == "__main__":

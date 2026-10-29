@@ -5,6 +5,7 @@ volumes:
   caddy-data:
   model-log:
   push-data:
+  verify-log:
 
 services:
   api:
@@ -12,14 +13,23 @@ services:
     restart: always
     environment:
       PORT: "8771"
+      EDITION: ${EDITION:-de}   # de = first public version (Germany); full = Europe/USA radar + clouds (needs ~8 GB more RAM)
       OPENMETEO: "1"            # tells the app to use /om instead of the public Open-Meteo API
-      OPENMETEO_URL: http://openmeteo:8080   # model rain for blending the second hour of the nowcast
+      OPENMETEO_URL: http://openmeteo:8080
       MODEL_LOG_DIR: /app/model_log
+      VERIFY_LOG_DIR: /app/verify_log
       DATA_DIR: /app/data
       VAPID_SUBJECT: https://${DOMAIN}       # Web Push contact claim: the app's domain, no personal address
+      # never set RAINY_DEV here: it enables fake test scenarios (server/devtools.py)
     volumes:
       - model-log:/app/model_log           # model snapshots for verify_blend.py
-      - push-data:/app/data                # push subscriptions and the VAPID key (must survive updates)
+      - verify-log:/app/verify_log         # forecasts + DWD station truth for score.py / verify_alerts.py
+      - push-data:/app/data                # push subscriptions and the VAPID key (must survive updates; back up)
+    healthcheck:                           # unhealthy when the DWD data is older than 20 min (/api/ready)
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8771/api/ready', timeout=10)"]
+      interval: 2m
+      timeout: 15s
+      retries: 3
 
   openmeteo:
     image: ghcr.io/open-meteo/open-meteo

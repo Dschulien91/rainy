@@ -25,6 +25,21 @@ FILL_KM = 20
 KEEP = 14
 
 
+def dwd_grid_maps(f, de):
+    """cv2.remap tables from our German Web Mercator grid (de) to a DWD composite grid (HDF5 'where' attributes)."""
+    w = f["where"].attrs
+    proj = w["projdef"].decode() if isinstance(w["projdef"], bytes) else w["projdef"]
+    to = Transformer.from_crs("EPSG:4326", proj, always_xy=True)
+    ux, uy = to.transform(float(w["UL_lon"]), float(w["UL_lat"]))
+    cols, rows = np.meshgrid(np.arange(de.nx), np.arange(de.ny))
+    x0, _, _, y1 = de.BBOX
+    mx, my = x0 + (cols + 0.5) * de.CELL, y1 - (rows + 0.5) * de.CELL
+    lon, lat = Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True).transform(mx, my)
+    sx, sy = to.transform(lon, lat)
+    return (((sx - ux) / float(w["xscale"]) - 0.5).astype(np.float32),
+            ((uy - sy) / float(w["yscale"]) - 0.5).astype(np.float32))
+
+
 class PrecipType:
     def __init__(self, fetch, log, de):
         self.fetch, self.log, self.de = fetch, log, de
@@ -32,26 +47,12 @@ class PrecipType:
         self.grids = {}       # ts -> uint8 kind grid on the DE grid (255 = unknown)
         self.maps = None      # remap tables DE grid -> HymecNG pixels
 
-    def _maps(self, f):
-        w = f["where"].attrs
-        proj = w["projdef"].decode() if isinstance(w["projdef"], bytes) else w["projdef"]
-        to = Transformer.from_crs("EPSG:4326", proj, always_xy=True)
-        ux, uy = to.transform(float(w["UL_lon"]), float(w["UL_lat"]))
-        de = self.de
-        cols, rows = np.meshgrid(np.arange(de.nx), np.arange(de.ny))
-        x0, _, _, y1 = de.BBOX
-        mx, my = x0 + (cols + 0.5) * de.CELL, y1 - (rows + 0.5) * de.CELL
-        lon, lat = Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True).transform(mx, my)
-        sx, sy = to.transform(lon, lat)
-        return (((sx - ux) / float(w["xscale"]) - 0.5).astype(np.float32),
-                ((uy - sy) / float(w["yscale"]) - 0.5).astype(np.float32))
-
     def _load(self, ts):
         data = self.fetch(URL.format(datetime.fromtimestamp(ts / 1000, timezone.utc)), timeout=60)
         with h5py.File(io.BytesIO(data), "r") as f:
             cls = f["dataset1/data1/data"][:]
             if self.maps is None:
-                self.maps = self._maps(f)
+                self.maps = dwd_grid_maps(f, self.de)
         lut = np.full(256, 255, np.uint8)
         for c, k in CLASS_TO_KIND.items():
             lut[c] = k
