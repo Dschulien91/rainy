@@ -46,6 +46,12 @@ TREND = 0.0                                              # share of the model's 
 BLUR = 2.0                                               # blur sigma (px) at 10 min lead, grows with sqrt(lead)
 MODEL_DEG, MODEL_BATCH, MODEL_REFRESH_S = 0.25, 2000, 30 * 60
 FLOW_DOWN = 4                                            # optical flow on a 10 km grid: large-scale motion only
+IR_LAYER, IR_STYLE = "mtg_fd:ir105_hrfi", "mtg_fd:mtg_fd_ir105_hrfi_grayscale"
+# all-day cloud test (server/calibrate_clouds_allday.py): IR grey above 80 - 2.5 * T2m (deg C) is cloud, fully at +10;
+# GeoColour blue - red above 20 is the night fog channel; the photo takes over between 6 and 15 deg sun elevation
+IR_CLEAR0, IR_CLEAR_K, IR_SCALE = 80.0, 2.5, 10.0
+FOG_BLUE, FOG_SCALE = 20.0, 2.0
+DAY_E0, DAY_E1 = 6.0, 15.0
 
 
 def sun_elevation(ts, lat, lon):
@@ -61,21 +67,32 @@ def sun_elevation(ts, lat, lon):
     return np.degrees(np.arcsin(np.sin(lat * rad) * math.sin(dec) + np.cos(lat * rad) * math.cos(dec) * np.cos(ha)))
 
 
-def cloudiness(rgb, elev):
-    """0..1 from a GeoColour RGB image (same formula as the app's fallback path).
+def cloudiness(rgb, elev, ir=None, t2m=None):
+    """Cloud cover 0..1 from the GeoColour image, the IR10.5 image and the air temperature.
 
     By day the image is a true-colour photo whose brightness depends on the sun: with a low sun a thick deck is
     only ~190 of 255 and a broken (cumulus / altocumulus) field ~130, so a fixed scale turned broken fields with
     lots of sun into overcast. The scale runs from 110 to a top that follows the local sun elevation; constants
     fitted against DWD sunshine duration (server/calibrate_sun.py, 14 days, 65 stations: sun share MAE 0.085
     on held-out days vs 0.097 before).
-    By night (infrared + fog channel) the brightness does not depend on the sun."""
+    The photo fails at dawn, dusk and night (dim, or infrared clouds and city lights): against ~200 DWD stations'
+    hourly cloud cover (server/calibrate_clouds_allday.py, 12 days, held-out days) the photo-only formula hit only
+    29 % by night and 48 % in twilight. Infrared colder than the clear-sky value for the air temperature marks
+    cloud at any hour, the light-blue GeoColour night channel marks fog/low stratus: 90 % night, 87 % twilight.
+    By day the photo stays alone: infrared would add cold thin cirrus the sun shines through and doubled the sun
+    share error (server/check_sun_ir.py: MAE 0.082 -> 0.160), and sunny mode is about the sun."""
     m = rgb.min(axis=2).astype(np.float32)
     top = 45.0 + 200.0 * np.sqrt(np.clip(np.sin(np.radians(elev)), 0.0, 1.0))  # thick deck brightness by day
     day = np.clip((m - 110.0) / np.maximum(top - 110.0, 30.0), 0.0, 1.0)
-    night = np.clip((m - 80.0) / 90.0, 0.0, 1.0)
-    w = np.clip((elev + 3.0) / 9.0, 0.0, 1.0)  # twilight: GeoColour fades from the IR to the photo
-    c = w * day + (1 - w) * night
+    if ir is None:  # no infrared image: old photo-only night formula
+        w = np.clip((elev + 3.0) / 9.0, 0.0, 1.0)
+        c = w * day + (1 - w) * np.clip((m - 80.0) / 90.0, 0.0, 1.0)
+    else:
+        t = 10.0 if t2m is None else t2m
+        cold = np.clip((ir - (IR_CLEAR0 - IR_CLEAR_K * t)) / IR_SCALE, 0.0, 1.0)   # grey: white = cold
+        fog = np.clip((rgb[..., 2].astype(np.float32) - rgb[..., 0] - FOG_BLUE) / FOG_SCALE, 0.0, 1.0)
+        w = np.clip((elev - DAY_E0) / (DAY_E1 - DAY_E0), 0.0, 1.0)
+        c = w * day + (1 - w) * np.maximum(cold, fog)
     return cv2.GaussianBlur(c, (0, 0), 0.7)  # JPEG noise
 
 
@@ -95,6 +112,7 @@ class CloudNowcast:
         self.raw = {}                                # ts -> darkest RGB channel of the observed image (uint8)
         self.heavy_lock = threading.Lock()           # replaced by the server's S-PROG lock
         self.model = None                            # (times ms, cover (T, nlat, nlon) 0..1)
+        self.model_temp = None                       # (times ms, air temperature deg C (T, nlat, nlon))
         self.model_at = 0
         x0, y0, x1, y1 = BBOX
         # lat/lon of the model grid and where each (coarse) cloud pixel lies in it
@@ -137,7 +155,13 @@ class CloudNowcast:
         url = (f"{WMS}?service=WMS&version=1.1.1&request=GetMap&layers={LAYER}&styles=&srs=EPSG:3857"
                f"&bbox={x0},{y0},{x1},{y1}&width={N}&height={N}&format=image/jpeg&time={stamp}")
         rgb = np.asarray(Image.open(io.BytesIO(self.fetch(url, timeout=120))).convert("RGB"))
-        g = (cloudiness(rgb, cv2.resize(sun_elevation(ts, *self.coarse_ll), (N, N))) * 255).astype(np.uint8)
+        ir = None
+        try:
+            ir_url = url.replace(f"layers={LAYER}&styles=", f"layers={IR_LAYER}&styles={IR_STYLE}").replace("image/jpeg", "image/png")
+            ir = np.asarray(Image.open(io.BytesIO(self.fetch(ir_url, timeout=120))).convert("RGB"))[..., 0].astype(np.float32)
+        except Exception as e:  # keep the photo-only result rather than nothing
+            self.log(f"clouds: infrared image failed: {e}")
+        g = (cloudiness(rgb, cv2.resize(sun_elevation(ts, *self.coarse_ll), (N, N)), ir, self.temp_field(ts)) * 255).astype(np.uint8)
         return g, rgb.min(axis=2)  # the darkest channel is kept to recalibrate the cloudiness against stations
 
     def _log(self, ts, g, raw):
@@ -162,7 +186,7 @@ class CloudNowcast:
             body = urllib.parse.urlencode({
                 "latitude": ",".join(f"{v:.2f}" for v in la[i:i + MODEL_BATCH]),
                 "longitude": ",".join(f"{v:.2f}" for v in lo[i:i + MODEL_BATCH]),
-                "hourly": "cloud_cover", "past_hours": "2", "forecast_hours": "6", "timeformat": "unixtime"}).encode()
+                "hourly": "cloud_cover,temperature_2m", "past_hours": "2", "forecast_hours": "6", "timeformat": "unixtime"}).encode()
             req = urllib.request.Request(f"{self.om_url}/v1/forecast", data=body,
                                          headers={"Content-Type": "application/x-www-form-urlencoded"})
             with urllib.request.urlopen(req, timeout=600) as r:
@@ -171,11 +195,14 @@ class CloudNowcast:
             if times is None:
                 times = np.array(d[0]["hourly"]["time"], np.int64) * 1000
                 cover = np.zeros((len(times), len(la)), np.float32)
+                temp = np.zeros((len(times), len(la)), np.float32)
             for j, e in enumerate(d):
                 cover[:, i + j] = [(v or 0.0) / 100.0 for v in e["hourly"]["cloud_cover"]]
+                temp[:, i + j] = [10.0 if v is None else v for v in e["hourly"]["temperature_2m"]]
         cover = cover.reshape(len(times), len(self.lats), len(self.lons))
+        temp = temp.reshape(len(times), len(self.lats), len(self.lons))
         with self.lock:
-            self.model = (times, cover)
+            self.model, self.model_temp = (times, cover), (times, temp)
         self.model_at = time.time()
         try:  # model snapshot for fair backtests (only data that existed at the forecast time)
             os.makedirs(LOG_DIR, exist_ok=True)
@@ -184,10 +211,19 @@ class CloudNowcast:
             self.log(f"cloud model log failed: {e}")
         self.log(f"[{datetime.now():%H:%M:%S}] clouds: model cloud cover for {len(la)} points")
 
+    def temp_field(self, ts):
+        """Model air temperature (deg C) at time ts on the cloud grid, or None."""
+        with self.lock:
+            m = self.model_temp
+        return self._field(m, ts)
+
     def model_field(self, ts):
         """Model cloud cover 0..1 at time ts on the cloud grid, or None."""
         with self.lock:
             m = self.model
+        return self._field(m, ts)
+
+    def _field(self, m, ts):
         if m is None or not m[0][0] <= ts <= m[0][-1]:
             return None
         times, cover = m
