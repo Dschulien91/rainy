@@ -39,6 +39,8 @@ from ptype import NAMES as ptype_names, dwd_grid_maps
 
 WORLD = 20037508.342789244
 STEP_MS = 5 * 60_000
+PRERENDER_ZOOMS = range(4, 9)  # Germany at zoom 4-8: ~120 tiles per frame
+CACHE_TILES = 12000            # in-process tile cache (~1-3 KB each); holds all pre-rendered tiles of a run
 TILE = 256
 FADE_KM = 30.0
 
@@ -283,7 +285,7 @@ class Mosaic:
         png = make()
         with self.cache_lock:
             self.cache[key] = png
-            while len(self.cache) > 4000:
+            while len(self.cache) > CACHE_TILES:
                 self.cache.popitem(last=False)
         return png
 
@@ -324,6 +326,33 @@ class Mosaic:
                 e["kind"] = ptype_names[int(np.bincount(k[rate >= 0.1].ravel(), minlength=6).argmax())]
             out.append(e)
         return out
+
+
+def prerender_loop(mosaic, log):
+    """Render the German rain tiles of every frame (zoom PRERENDER_ZOOMS) as soon as a new radar run is in, so no
+    user waits for them: the app asks for tiles up to zoom 8 only (enlarges them above), i.e. ~120 tiles per frame."""
+    done = None
+    while True:
+        try:
+            key = mosaic.key()
+            if key != done and mosaic.de.ref:
+                started, n = time.time(), 0
+                (x0, x1), (y0, y1) = merc(np.array([5.5, 15.4]), np.array([47.0, 55.3]))  # Germany + ~30 km
+                now = time.time() * 1000
+                for f in sorted(mosaic.frames(), key=lambda f: abs(f["ts"] - now)):  # frames near "now" first
+                    for z in PRERENDER_ZOOMS:
+                        k = (1 << z) / (2 * WORLD)
+                        for x in range(int((x0 + WORLD) * k), int((x1 + WORLD) * k) + 1):
+                            for y in range(int((WORLD - y1) * k), int((WORLD - y0) * k) + 1):
+                                mosaic.rain_tile(key, f["ts"], z, x, y)
+                                n += 1
+                    if mosaic.key() != key:  # a newer run arrived meanwhile: start over with it
+                        break
+                done = key
+                log(f"[{datetime.now():%H:%M:%S}] prerender: {n} tiles in {time.time() - started:.0f}s")
+        except Exception as e:
+            log(f"prerender failed: {e}")
+        time.sleep(15)
 
 
 def de_loop(de, log, ptype=None):

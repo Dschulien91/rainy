@@ -315,7 +315,7 @@
 <script src="vendor/leaflet-maplibre-gl.js"></script>
 <script>
 "use strict";
-const VERSION = "v0.60";
+const VERSION = "v0.62";
 const FALLBACK = { lat: 53.5511, lon: 9.9937, name: "Hamburg" };
 const DWD_WMS = "https://maps.dwd.de/geoserver/dwd/wms";
 const EUM_WMS = "https://view.eumetsat.int/geoserver/ows";
@@ -460,7 +460,7 @@ const MAP_DESIGNS = {
 };
 const BASEMAP = MAP_DESIGNS[MAP_STYLE.design] || MAP_DESIGNS.plain;
 const mapDark = BASEMAP.dark;
-// Zoom out at most until Europe just fits the screen (on any screen size), and stay over Europe.
+// Zoom out at most to about Germany and its neighbours (any screen size), and stay over Europe.
 const EUROPE = L.latLngBounds([[36, -10], [60, 30]]);
 const map = L.map("map", {
   zoomControl: false, attributionControl: false, fadeAnimation: false,
@@ -468,7 +468,8 @@ const map = L.map("map", {
   maxBounds: DE_ONLY ? [[27, -30], [72, 50]] : [[-85, -200], [85, 200]], // full edition: the Americas too
 })
   .setView([FALLBACK.lat, FALLBACK.lon], 10);
-const fitMinZoom = () => { if (DE_ONLY && map.getSize().x) map.setMinZoom(Math.max(3, map.getBoundsZoom(EUROPE, false))); };
+// two steps closer than "all of Europe": Germany and its neighbours is the widest useful view
+const fitMinZoom = () => { if (DE_ONLY && map.getSize().x) map.setMinZoom(Math.max(3, map.getBoundsZoom(EUROPE, false)) + 2); };
 fitMinZoom();
 map.on("resize", fitMinZoom);
 map.createPane("weather").style.zIndex = 350;
@@ -1618,7 +1619,9 @@ function tileLayer(kind, ts) {
   if (!layer) {
     const url = `${API_BASE}/tiles/${kind === "rain" && RAIN_EU ? "raineu" : kind}/${state.tileKey[kind]}/${ts}/{z}/{x}/{y}.png`;
     layer = kind === "rain"
-      ? L.tileLayer(url, { pane: "weather", opacity: 0, maxNativeZoom: 10, className: "rain-tiles", crossOrigin: "anonymous" })
+      // zoom 8 tiles (~400 m pixels) are finer than the 1 km radar: closer in they are only enlarged, which needs
+      // 16x fewer tiles per frame at city zoom than zoom-10 tiles (the server pre-renders zoom 4-8)
+      ? L.tileLayer(url, { pane: "weather", opacity: 0, maxNativeZoom: 8, className: "rain-tiles", crossOrigin: "anonymous" })
       : new CloudTiles({ pane: "weather", opacity: 0, className: "cloud-tiles", url, ts });
     layer.id = id;
     tileLayers.set(id, layer);
