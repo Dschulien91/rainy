@@ -144,6 +144,11 @@
   .edition-de #modeSun, .edition-de #favSun { display: none; }
   .alert-card input[type=range] { width: 150px; accent-color: var(--rain); }
   .alert-card .row[hidden] { display: none; }
+  .alert-card .seg { flex-wrap: wrap; justify-content: flex-end; }
+  .alert-card .sec { margin: 12px 0 2px; font-size: 12px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+  .alert-card .hint { margin: -4px 0 4px; font-size: 12px; color: var(--muted); }
+  .alert-card .places button { border: 1px solid var(--line); background: none; color: var(--fg); font: inherit; font-size: 13px; padding: 4px 9px; border-radius: 999px; cursor: pointer; margin: 2px 0 2px 4px; }
+  #styleCard { max-height: calc(100vh - var(--sheet-h) - 40px); overflow-y: auto; }
   .alert-card .lead-val { min-width: 54px; text-align: right; font-variant-numeric: tabular-nums; }
   .alert-card .seg button { border: 1px solid var(--line); background: none; color: var(--fg); font: inherit; font-size: 13px; padding: 5px 10px; border-radius: 999px; cursor: pointer; }
   .alert-card .seg button.on { background: var(--rain); border-color: var(--rain); color: #fff; }
@@ -235,9 +240,9 @@
 <div id="map"></div>
 <div class="toast" id="toast" role="status"></div>
 <div class="alert-card" id="alertCard" role="dialog" aria-label="Regenwarnung"></div>
-<div class="alert-card" id="styleCard" role="dialog" aria-label="Kartenstil"></div>
+<div class="alert-card" id="styleCard" role="dialog" aria-label="Einstellungen"></div>
 <div class="brand"><svg class="logo" id="brandLogo"><use href="#logo"/></svg><span id="brandName">rainy</span><span class="version" id="ver"></span></div>
-<button class="fab" id="styleBtn" title="Kartenstil" aria-label="Kartenstil" style="--i:4"><svg viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 3.5l8.5 4.5-8.5 4.5L3.5 8z"/><path d="M3.5 12l8.5 4.5 8.5-4.5"/><path d="M3.5 16l8.5 4.5 8.5-4.5"/></g></svg></button>
+<button class="fab" id="styleBtn" title="Einstellungen" aria-label="Einstellungen" style="--i:4"><svg viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.8l1.6 2.4 2.8-.7.7 2.8 2.4 1.6-1.3 2.6 1.3 2.6-2.4 1.6-.7 2.8-2.8-.7L12 21.2l-1.6-2.4-2.8.7-.7-2.8-2.4-1.6L5.8 12 4.5 9.4l2.4-1.6.7-2.8 2.8.7z"/></g></svg></button>
 <button class="fab" id="favs" title="Favoriten" aria-label="Favoriten" style="--i:3"><svg viewBox="0 0 24 24"><path d="M12 3.5l2.6 5.3 5.8.8-4.2 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.2-4.1 5.8-.8z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg></button>
 <button class="fab" id="search" title="Ort suchen" aria-label="Ort suchen" style="--i:2"><svg viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="10.5" cy="10.5" r="6"/><line x1="15" y1="15" x2="20" y2="20"/></g></svg></button>
 <button class="fab" id="refresh" title="Aktualisieren" aria-label="Aktualisieren" style="--i:1"><svg viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/><path d="M19.5 4.5v4.5H15"/></g></svg></button>
@@ -304,7 +309,7 @@
 <script src="https://unpkg.com/@maplibre/maplibre-gl-leaflet@0.0.22/leaflet-maplibre-gl.js"></script>
 <script>
 "use strict";
-const VERSION = "v0.49";
+const VERSION = "v0.50";
 const FALLBACK = { lat: 53.5511, lon: 9.9937, name: "Hamburg" };
 const DWD_WMS = "https://maps.dwd.de/geoserver/dwd/wms";
 const EUM_WMS = "https://view.eumetsat.int/geoserver/ows";
@@ -418,7 +423,7 @@ const MAP_STYLE = (() => {
   let st = {};
   try { st = JSON.parse(localStorage.getItem("rainy.style")) || {}; } catch {}
   return { sat: st.sat === "photo" ? "photo" : "clouds", theme: ["light", "dark"].includes(st.theme) ? st.theme : "auto",
-    rain: st.rain === "eu" ? "eu" : "mix" };
+    rain: st.rain === "eu" ? "eu" : "mix", design: ["liberty", "bright", "fiord", "earth"].includes(st.design) ? st.design : "plain" };
 })();
 // Edition: "de" = first public version (Germany: rain radar 2 h + 24 h / 3 days; sunny and the Europe/USA radar are
 // hidden and everything outside Germany is hatched); "full" = everything (test with ?edition=full).
@@ -427,12 +432,23 @@ const DE_ONLY = EDITION === "de";
 if (DE_ONLY) {
   document.documentElement.classList.add("edition-de");
   document.getElementById("credits").innerHTML = 'Daten: <a href="https://www.dwd.de" target="_blank" rel="noreferrer">DWD</a>, ' +
-    "Bright Sky, Open-Meteo, © OpenMapTiles, © OpenStreetMap, OpenFreeMap";
+    "Bright Sky, Open-Meteo, © OpenMapTiles, © OpenStreetMap, OpenFreeMap" + (MAP_STYLE.design === "earth" ? ", NASA Blue Marble" : "");
 }
 const RAIN_EU = !DE_ONLY && MAP_STYLE.rain === "eu";
 if (MAP_STYLE.theme !== "auto") document.documentElement.classList.add(`theme-${MAP_STYLE.theme}`);
 const dark = MAP_STYLE.theme === "auto" ? window.matchMedia("(prefers-color-scheme: dark)").matches : MAP_STYLE.theme === "dark";
 document.body.classList.toggle("dark", dark);
+// Map designs, all free also for commercial use: OpenFreeMap styles (OpenStreetMap data) and NASA Blue Marble.
+// "plain" follows the app theme (light / dark); the others have their own look.
+const MAP_DESIGNS = {
+  plain: { label: "Schlicht", style: dark ? "dark" : "positron", dark },
+  liberty: { label: "Bunt", style: "liberty", dark: false },
+  bright: { label: "Klassisch", style: "bright", dark: false },
+  fiord: { label: "Nachtblau", style: "fiord", dark: true },
+  earth: { label: "Satellit (grob)", style: "dark", dark: true },
+};
+const BASEMAP = MAP_DESIGNS[MAP_STYLE.design] || MAP_DESIGNS.plain;
+const mapDark = BASEMAP.dark;
 // Zoom out at most until Europe just fits the screen (on any screen size), and stay over Europe.
 const EUROPE = L.latLngBounds([[36, -10], [60, 30]]);
 const map = L.map("map", {
@@ -451,8 +467,8 @@ map.getPane("labels").style.pointerEvents = "none";
 // weather sits between the map (below) and the place names (above).
 (async function basemap() {
   try {
-    const style = await (await fetch(`https://tiles.openfreemap.org/styles/${dark ? "dark" : "positron"}`)).json();
-    if (dark) { // lift the near-black OpenFreeMap dark style to the app's dark grey, water a shade darker
+    const style = await (await fetch(`https://tiles.openfreemap.org/styles/${BASEMAP.style}`)).json();
+    if (MAP_STYLE.design === "plain" && mapDark) { // lift the near-black OpenFreeMap dark style to the app's dark grey, water a shade darker
       const tone = { background: "#2a2e35", water: "#1c1f24", landuse_residential: "#30343b", building: "#33373e", landcover_wood: "#2f3339", landuse_park: "#2f3339" };
       for (const l of style.layers) if (tone[l.id]) l.paint[l.type === "background" ? "background-color" : "fill-color"] = tone[l.id];
     }
@@ -472,7 +488,7 @@ map.getPane("labels").style.pointerEvents = "none";
       const major = /city|country/.test(l.id);
       l.layout["text-size"] = scale(l.layout["text-size"] ?? 12, major ? 1.15 : 1.1);
       if (major) l.layout["text-font"] = ["Noto Sans Bold"];
-      l.paint = { ...l.paint, "text-color": dark ? "#eef1f5" : "#1b1f26", "text-halo-color": dark ? "rgba(18,20,24,0.92)" : "rgba(255,255,255,0.95)",
+      l.paint = { ...l.paint, "text-color": mapDark ? "#eef1f5" : "#1b1f26", "text-halo-color": mapDark ? "rgba(18,20,24,0.92)" : "rgba(255,255,255,0.95)",
         "text-halo-width": major ? 1.8 : 1.5, "text-halo-blur": 0.2 };
     }
     // calmer map: no road names, states or minor places; places only from sensible zoom levels
@@ -495,30 +511,36 @@ map.getPane("labels").style.pointerEvents = "none";
       { id: "rainy_border_city", type: "line", source: src, "source-layer": "boundary", minzoom: 9,
         filter: ["all", ["match", ["get", "admin_level"], [6, 8], true, false], land],
         layout: { "line-join": "round" },
-        paint: { "line-color": dark ? "#9aa1ad" : "#6f7783", "line-opacity": ["interpolate", ["linear"], ["zoom"], 9, 0.35, 11, 0.7],
+        paint: { "line-color": mapDark ? "#9aa1ad" : "#6f7783", "line-opacity": ["interpolate", ["linear"], ["zoom"], 9, 0.35, 11, 0.7],
           "line-width": ["interpolate", ["linear"], ["zoom"], 9, 0.6, 13, 1.3], "line-dasharray": [3, 2] } },
       { id: "rainy_border_state", type: "line", source: src, "source-layer": "boundary", minzoom: 4,
         filter: ["all", ["==", ["get", "admin_level"], 4], land],
         layout: { "line-join": "round", "line-cap": "round" },
-        paint: { "line-color": dark ? "#8b93a1" : "#7d8593", "line-opacity": 0.75,
+        paint: { "line-color": mapDark ? "#8b93a1" : "#7d8593", "line-opacity": 0.75,
           "line-width": ["interpolate", ["linear"], ["zoom"], 4, 0.6, 7, 1.1, 10, 1.6, 13, 2] } },
       { id: "rainy_border_country", type: "line", source: src, "source-layer": "boundary",
         filter: ["all", ["==", ["get", "admin_level"], 2], land],
         layout: { "line-join": "round", "line-cap": "round" },
-        paint: { "line-color": dark ? "#c3c9d4" : "#4a515d", "line-opacity": 0.95,
+        paint: { "line-color": mapDark ? "#c3c9d4" : "#4a515d", "line-opacity": 0.95,
           "line-width": ["interpolate", ["linear"], ["zoom"], 3, 1.2, 6, 2, 10, 2.8, 13, 3.4] } },
     ];
     const part = (keep) => ({ ...style, layers: style.layers.filter(keep) });
-    const base = L.maplibreGL({ style: part((l) => l.type !== "symbol"), interactive: false }).addTo(map);
-    base.getContainer().classList.add("basemap");
+    if (MAP_STYLE.design === "earth") {
+      // NASA Blue Marble (public domain, ~500 m pixels, so blurry when zoomed in to a city)
+      L.tileLayer("https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/BlueMarble_ShadedRelief_Bathymetry/default/" +
+        "GoogleMapsCompatible_Level8/{z}/{y}/{x}.jpeg", { maxNativeZoom: 8, className: "basemap" }).addTo(map);
+    } else {
+      const base = L.maplibreGL({ style: part((l) => l.type !== "symbol"), interactive: false }).addTo(map);
+      base.getContainer().classList.add("basemap");
+    }
     // borders and place names sit above the weather, so they stay readable under rain and clouds
     // sunny mode: the sun tint and clouds cover the basemap, so water gets its own tint and a coastline on top
     const waterSrc = (style.layers.find((l) => l["source-layer"] === "water") || {}).source || src;
     const sunWater = [
       { id: "rainy_sun_water", type: "fill", source: waterSrc, "source-layer": "water", layout: { visibility: "none" },
-        paint: { "fill-color": dark ? "#0b1a2e" : "#2d6fb4", "fill-opacity": dark ? 0.45 : 0.22 } },
+        paint: { "fill-color": mapDark ? "#0b1a2e" : "#2d6fb4", "fill-opacity": mapDark ? 0.45 : 0.22 } },
       { id: "rainy_sun_coast", type: "line", source: waterSrc, "source-layer": "water", layout: { visibility: "none" },
-        paint: { "line-color": dark ? "#7fa7d6" : "#2d6fb4", "line-opacity": 0.7,
+        paint: { "line-color": mapDark ? "#7fa7d6" : "#2d6fb4", "line-opacity": 0.7,
           "line-width": ["interpolate", ["linear"], ["zoom"], 3, 0.5, 8, 1, 13, 1.5] } },
     ];
     const top = part((l) => l.type === "symbol");
@@ -1168,7 +1190,7 @@ function getPosition() {
   return new Promise((resolve) => {
     if (!navigator.geolocation) return resolve(null);
     navigator.geolocation.getCurrentPosition(
-      (p) => resolve({ lat: p.coords.latitude, lon: p.coords.longitude }),
+      (p) => { const loc = { lat: p.coords.latitude, lon: p.coords.longitude }; ownLocationSeen(loc); resolve(loc); },
       () => resolve(null), { timeout: 6000, maximumAge: 300000 });
   });
 }
@@ -2091,7 +2113,7 @@ function renderPlace() {
   if (!loc) return;
   el.innerHTML = (state.picked ? '<svg class="pin-ico" viewBox="0 0 24 24"><path d="M12 22s-7-7.6-7-13a7 7 0 0 1 14 0c0 5.4-7 13-7 13z" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="9" r="2.4" fill="none" stroke="currentColor" stroke-width="2"/></svg>' : "") + esc(state.placeName || "") +
     `<button class="star-btn${isFav(loc) ? " on" : ""}" aria-label="Favorit">${STAR}</button>` +
-    (ALERTS_POSSIBLE ? `<button class="bell-btn${hasAlert(loc) ? " on" : ""}" aria-label="Regenwarnung">${BELL}</button>` : "") +
+    (ALERTS_POSSIBLE ? `<button class="bell-btn${(state.picked ? hasAlert(loc) : loadAlerts().own) ? " on" : ""}" aria-label="Regenwarnung">${BELL}</button>` : "") +
     (state.picked ? '<button class="back">× zurück</button>' : "") +
     (PLACE_TZ && fmtTime(Date.now(), PLACE_TZ) !== fmtTime(Date.now(), DEVICE_TZ) ? `<span class="tzhint">Ortszeit ${fmtTime(Date.now())}</span>` : "");
   el.querySelector(".star-btn").addEventListener("click", () => toggleFav(state.loc, state.placeName));
@@ -2105,11 +2127,22 @@ function renderPlace() {
 // (rounded to ~1 km) and the settings - no account. Alerts need our own server and https (or localhost).
 const ALERTS_POSSIBLE = !!API_BASE && "serviceWorker" in navigator;
 const BELL = '<svg viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0-6 6v3.5L4.5 16h15L18 12.5V9a6 6 0 0 0-6-6zM10 19a2 2 0 0 0 4 0" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>';
-const ALERT_DEFAULTS = { places: [], lead: 45, early: true, quiet: true };
+// own: warn for "Mein Standort" (the last position the app saw, ~1 km); places: further places with a bell
+const ALERT_DEFAULTS = { places: [], own: false, ownLoc: null, lead: 45, early: true, quiet: true };
 const LEAD_MIN = 5, LEAD_MAX = 90; // selectable warning time (minutes before the rain)
 function loadAlerts() { try { return { ...ALERT_DEFAULTS, ...JSON.parse(localStorage.getItem("rainy.alerts")) }; } catch { return { ...ALERT_DEFAULTS }; } }
 function saveAlerts(a) { try { localStorage.setItem("rainy.alerts", JSON.stringify(a)); } catch {} }
 const hasAlert = (loc) => loadAlerts().places.some((p) => sameLoc(p, loc));
+const alertPlaces = (a) => [...(a.own && a.ownLoc ? [{ name: "Mein Standort", ...a.ownLoc }] : []), ...a.places];
+// A web app cannot follow the user in the background: the "Mein Standort" alert uses the position the app saw last
+// and is updated on the server whenever the app gets a new fix more than ~1 km away.
+function ownLocationSeen(loc) {
+  const a = loadAlerts(), r = { lat: +loc.lat.toFixed(2), lon: +loc.lon.toFixed(2) };
+  if (a.ownLoc && map.distance([r.lat, r.lon], [a.ownLoc.lat, a.ownLoc.lon]) < 1000) return;
+  a.ownLoc = r;
+  saveAlerts(a);
+  if (a.own && ALERTS_POSSIBLE && "Notification" in window && Notification.permission === "granted") syncAlerts(a).catch((e) => console.warn("alerts", e));
+}
 const b64ToBytes = (b64) => Uint8Array.from(atob((b64 + "===".slice((b64.length + 3) % 4)).replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0));
 const postJSON = (path, body) => fetch(`${API_BASE}${path}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
 
@@ -2117,7 +2150,7 @@ const postJSON = (path, body) => fetch(`${API_BASE}${path}`, { method: "POST", h
 async function syncAlerts(a) {
   const reg = await navigator.serviceWorker.register("sw.js");
   let sub = await reg.pushManager.getSubscription();
-  if (!a.places.length) {
+  if (!alertPlaces(a).length) {
     if (a.id) await postJSON("/api/push/unsubscribe", { id: a.id }).catch(() => {});
     if (sub) await sub.unsubscribe().catch(() => {});
     delete a.id;
@@ -2129,7 +2162,7 @@ async function syncAlerts(a) {
     if (!key) throw new Error("server has no push key");
     sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64ToBytes(key) });
   }
-  const r = await postJSON("/api/push/subscribe", { id: a.id, subscription: sub.toJSON(), places: a.places,
+  const r = await postJSON("/api/push/subscribe", { id: a.id, subscription: sub.toJSON(), places: alertPlaces(a),
     lead: a.lead, early: a.early, quiet: a.quiet, tz: DEVICE_TZ });
   if (!r.ok) throw new Error(`subscribe ${r.status}`);
   const first = !a.id;
@@ -2145,6 +2178,7 @@ async function bellClicked(loc, name) {
       ? "Auf dem iPhone: erst über „Teilen → Zum Home-Bildschirm“ hinzufügen, dann dort die Glocke antippen."
       : "Dieser Browser kann keine Benachrichtigungen empfangen.");
   }
+  if (!state.picked) return loadAlerts().own ? showSettings() : enableOwnAlert(loc);
   if (hasAlert(loc)) return showAlertCard(loc, name);
   if ((await Notification.requestPermission()) !== "granted") return toast("Benachrichtigungen sind für rainy blockiert – bitte in den Browser-Einstellungen erlauben.");
   const a = loadAlerts();
@@ -2164,24 +2198,51 @@ async function bellClicked(loc, name) {
   showAlertCard(loc, name);
 }
 
-// Small card: lead time, heads-up for heavy rain, quiet hours, switch off.
-function showAlertCard(loc, name) {
-  const card = document.getElementById("alertCard"), a = loadAlerts();
-  card.innerHTML = `<h3>Regenwarnung · ${esc(name || "dieser Ort")}</h3>
-    <p>Wir melden uns, bevor hier Regen beginnt – nur beim ersten Schauer, danach erst wieder nach 2 trockenen Stunden.</p>
-    <div class="row"><span>Vorwarnzeit</span><span><input type="range" min="${LEAD_MIN}" max="${LEAD_MAX}" step="5" value="${a.lead}" data-lead>
+// Lead time slider, heavy-rain heads-up and quiet hours: shared by the place card and the settings.
+const alertControls = (a) => `<div class="row"><span>Vorwarnzeit</span><span><input type="range" min="${LEAD_MIN}" max="${LEAD_MAX}" step="5" value="${a.lead}" data-lead>
       <span class="lead-val">${a.lead} Min.</span></span></div>
     <label class="row early-row"${a.lead >= 45 ? " hidden" : ""}><span>Bei Starkregen schon ca. 1 Std. vorher</span><input type="checkbox" data-k="early"${a.early ? " checked" : ""}></label>
-    <label class="row"><span>Nachtruhe 22–7 Uhr</span><input type="checkbox" data-k="quiet"${a.quiet ? " checked" : ""}></label>
-    <div class="actions"><button class="off">Für diesen Ort aus</button><button class="done">Fertig</button></div>`;
-  const update = () => { saveAlerts(a); syncAlerts(a).catch((e) => console.warn("alerts", e)); };
+    <label class="row"><span>Nachtruhe 22–7 Uhr</span><input type="checkbox" data-k="quiet"${a.quiet ? " checked" : ""}></label>`;
+function bindAlertControls(card, a, update) {
   const lead = card.querySelector("[data-lead]");
+  if (!lead) return;
   lead.addEventListener("input", () => {
     card.querySelector(".lead-val").textContent = `${lead.value} Min.`;
     card.querySelector(".early-row").hidden = +lead.value >= 45; // the 1 h heads-up only adds something to short warning times
   });
   lead.addEventListener("change", () => { a.lead = +lead.value; update(); });
   card.querySelectorAll("input[data-k]").forEach((c) => c.addEventListener("change", () => { a[c.dataset.k] = c.checked; update(); }));
+}
+// Switch on the alert for "Mein Standort".
+async function enableOwnAlert(loc) {
+  if (!window.isSecureContext) return toast("Warnungen gehen nur über eine sichere Verbindung (https) – mit dem echten Server klappt das.");
+  if (!("PushManager" in window) || !("Notification" in window)) return toast("Dieser Browser kann keine Benachrichtigungen empfangen.");
+  if ((await Notification.requestPermission()) !== "granted") return toast("Benachrichtigungen sind für rainy blockiert – bitte in den Browser-Einstellungen erlauben.");
+  const a = loadAlerts();
+  a.own = true;
+  if (loc) a.ownLoc = { lat: +loc.lat.toFixed(2), lon: +loc.lon.toFixed(2) };
+  try {
+    const first = await syncAlerts(a);
+    if (first) postJSON("/api/push/test", { id: a.id }).catch(() => {});
+    toast(`Regenwarnung für deinen Standort ist an – ${a.lead} Min. vorher.`);
+  } catch (e) {
+    console.warn("alerts", e);
+    a.own = false;
+    saveAlerts(a);
+    toast("Regenwarnung konnte nicht eingerichtet werden. Bitte später noch einmal versuchen.");
+  }
+  renderPlace();
+}
+
+// Small card: lead time, heads-up for heavy rain, quiet hours, switch off.
+function showAlertCard(loc, name) {
+  const card = document.getElementById("alertCard"), a = loadAlerts();
+  card.innerHTML = `<h3>Regenwarnung · ${esc(name || "dieser Ort")}</h3>
+    <p>Wir melden uns, bevor hier Regen beginnt – nur beim ersten Schauer, danach erst wieder nach 2 trockenen Stunden.</p>
+    ${alertControls(a)}
+    <div class="actions"><button class="off">Für diesen Ort aus</button><button class="done">Fertig</button></div>`;
+  const update = () => { saveAlerts(a); syncAlerts(a).catch((e) => console.warn("alerts", e)); };
+  bindAlertControls(card, a, update);
   card.querySelector(".off").addEventListener("click", () => {
     a.places = a.places.filter((p) => !sameLoc(p, loc));
     update();
@@ -2194,20 +2255,39 @@ function showAlertCard(loc, name) {
 }
 map.on("click", () => document.getElementById("alertCard").classList.remove("show"));
 
-// ---------- Map style card ----------
-// Switching style re-initialises map colours and image frames, so the page simply reloads with the new choice.
-function showStyleCard() {
-  const card = document.getElementById("styleCard");
+// ---------- Settings ----------
+// Rain alert for the own position (plus its settings and further places) and the map look. Map changes re-initialise
+// the map colours, so the page reloads with the new choice; alert changes apply at once.
+function showSettings() {
+  const card = document.getElementById("styleCard"), a = loadAlerts();
   const seg = (key, opts) => `<span class="seg">${opts.map(([v, label]) =>
     `<button data-${key}="${v}" class="${MAP_STYLE[key] === v ? "on" : ""}">${label}</button>`).join("")}</span>`;
-  card.innerHTML = `<h3>Kartenstil</h3>
-    <p>${DE_ONLY ? "Wie die Karte aussieht." : "Wie Wolken, Karte und Regen aussehen."} Gilt für dieses Gerät.</p>
-    ${DE_ONLY ? "" : `<div class="row"><span>Wolken</span>${seg("sat", [["clouds", "Standard"], ["photo", "Satellitenfoto"]])}</div>`}
-    <div class="row"><span>Karte</span>${seg("theme", [["auto", "Auto"], ["light", "Hell"], ["dark", "Dunkel"]])}</div>
-    ${DE_ONLY ? "" : `<div class="row"><span>Regen</span>${seg("rain", [["mix", "DWD + Europa"], ["eu", "Nur Europa"]])}</div>`}
+  card.innerHTML = `<h3>Einstellungen</h3>
+    ${ALERTS_POSSIBLE ? `<div class="sec">Regenwarnung</div>
+    <label class="row"><span>Für meinen Standort</span><input type="checkbox" data-own${a.own ? " checked" : ""}></label>
+    <p class="hint">Gilt für den Ort, an dem du rainy zuletzt geöffnet hast.</p>
+    ${alertControls(a)}
+    ${a.places.length ? `<div class="row places"><span>Weitere Orte</span><span>${a.places.map((p, i) =>
+      `<button data-rm="${i}" title="Warnung aus">${esc(p.name || "Ort")} ×</button>`).join("")}</span></div>` : ""}` : ""}
+    <div class="sec">Karte</div>
+    <div class="row"><span>Design</span>${seg("design", Object.entries(MAP_DESIGNS).map(([k, d]) => [k, d.label]))}</div>
+    <div class="row"><span>Farben</span>${seg("theme", [["auto", "Auto"], ["light", "Hell"], ["dark", "Dunkel"]])}</div>
+    ${DE_ONLY ? "" : `<div class="row"><span>Wolken</span>${seg("sat", [["clouds", "Standard"], ["photo", "Satellitenfoto"]])}</div>
+    <div class="row"><span>Regen</span>${seg("rain", [["mix", "DWD + Europa"], ["eu", "Nur Europa"]])}</div>`}
     <div class="actions"><span></span><button class="done">Fertig</button></div>`;
-  card.querySelectorAll("[data-sat], [data-theme], [data-rain]").forEach((b) => b.addEventListener("click", () => {
-    const key = b.dataset.sat ? "sat" : b.dataset.theme ? "theme" : "rain", next = { ...MAP_STYLE, [key]: b.dataset[key] };
+  const update = () => { saveAlerts(a); syncAlerts(a).catch((e) => console.warn("alerts", e)); };
+  bindAlertControls(card, a, update);
+  const own = card.querySelector("[data-own]");
+  if (own) own.addEventListener("change", async () => {
+    if (own.checked) { await enableOwnAlert(state.picked ? null : state.loc); Object.assign(a, loadAlerts()); own.checked = a.own; }
+    else { a.own = false; update(); renderPlace(); }
+  });
+  card.querySelectorAll("[data-rm]").forEach((b) => b.addEventListener("click", () => {
+    a.places.splice(+b.dataset.rm, 1);
+    update(); renderPlace(); showSettings();
+  }));
+  card.querySelectorAll("[data-sat], [data-theme], [data-rain], [data-design]").forEach((b) => b.addEventListener("click", () => {
+    const key = ["sat", "theme", "rain", "design"].find((k) => b.dataset[k] != null), next = { ...MAP_STYLE, [key]: b.dataset[key] };
     if (next[key] === MAP_STYLE[key]) return;
     try { localStorage.setItem("rainy.style", JSON.stringify(next)); } catch {}
     location.reload();
@@ -2218,7 +2298,7 @@ function showStyleCard() {
 }
 document.getElementById("styleBtn").addEventListener("click", () => {
   const card = document.getElementById("styleCard");
-  if (card.classList.contains("show")) card.classList.remove("show"); else showStyleCard();
+  if (card.classList.contains("show")) card.classList.remove("show"); else showSettings();
 });
 map.on("click", () => document.getElementById("styleCard").classList.remove("show"));
 
