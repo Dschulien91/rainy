@@ -17,6 +17,7 @@ import os
 import secrets
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -37,6 +38,11 @@ MAX_PLACES = 20
 # with more rainy days). (lead up to min, [light < 1 mm/h, moderate, heavy >= 4 mm/h]) - shown as "ca. X %".
 HIT_RATE = ((30, (30, 60, 70)), (45, (20, 60, 70)), (60, (20, 45, 55)), (90, (15, 40, 50)), (999, (15, 25, 35)))
 MAX_REMINDERS = 10
+# Sending: pywebpush encrypts each message (~3 ms CPU) and waits for the push service (~50-150 ms), so messages go
+# out in parallel. server/bench_push.py on 16 cores: 1 worker 12/s, 16 workers 188/s, 64 workers 395/s (CPU-bound).
+# On the 4-vCPU production server 16 workers and at most 50 messages/s leave room for the map: 1000 alerts in ~20 s.
+PUSH_WORKERS = 16
+PUSH_PER_S = 50
 
 
 def probability(lead_min, peak):
@@ -63,6 +69,8 @@ class AlertEngine:
         self.thunder = thunder  # thunder.Thunder (DWD thunderstorm warnings) or None
         self.kind_at = kind_at  # (lat, lon, ts) -> "rain" | "snow" | "sleet" | "freezing" | "graupel" | "hail"
         self.dev, self.outbox = False, None  # development: "dev:" subscriptions go to this list instead of a push service
+        self.pool = ThreadPoolExecutor(PUSH_WORKERS)
+        self.rate_lock, self.next_slot = threading.Lock(), 0.0  # at most PUSH_PER_S messages per second
         self.order = order  # radar sources tried for a place, in this order
         os.makedirs(data_dir, exist_ok=True)
         self.path = os.path.join(data_dir, "subscriptions.json")
@@ -261,6 +269,19 @@ class AlertEngine:
         return title, body
 
     # ---------- sending ----------
+    def _wait_slot(self):
+        with self.rate_lock:
+            now = time.monotonic()
+            slot = max(now, self.next_slot)
+            self.next_slot = slot + 1.0 / PUSH_PER_S
+        if slot > now:
+            time.sleep(slot - now)
+
+    def send_many(self, batch):
+        """Send [(urgency, sid, payload)] in parallel, most urgent first (shortest time until the weather), rate-limited."""
+        for _, sid, payload in sorted(batch, key=lambda b: b[0]):
+            self.pool.submit(lambda s=sid, p=payload: (self._wait_slot(), self.send(s, p)))
+
     def send(self, sid, payload):
         try:
             from pywebpush import WebPushException, webpush
@@ -290,6 +311,7 @@ class AlertEngine:
         with self.lock:
             items = [(sid, json.loads(json.dumps(e))) for sid, e in self.subs.items()]
         changed = False
+        batch = []  # (urgency in minutes, sid, payload): sent after the round, most urgent first
         for sid, e in items:
             for p in e["places"]:
                 key = f"{p['lat']},{p['lon']}"
@@ -297,7 +319,7 @@ class AlertEngine:
                 before = json.dumps(st, sort_keys=True)
                 thunder = self.thunder_alert(p, now, e["cfg"], st)
                 if thunder:
-                    self.send(sid, {**thunder, "tag": f"t{key}", "lat": p["lat"], "lon": p["lon"], "name": p["name"]})
+                    batch.append((-1, sid, {**thunder, "tag": f"t{key}", "lat": p["lat"], "lon": p["lon"], "name": p["name"]}))
                     self.log(f"alert thunder: {thunder['title']}")
                     changed = True
                 s = self.series(p["lat"], p["lon"], ll_to_3857)
@@ -305,7 +327,7 @@ class AlertEngine:
                     continue
                 kind, info = self.evaluate(s, now, e["cfg"], st)
                 if kind:
-                    self.send(sid, self.payload(sid, e["cfg"], kind, info, p, key))
+                    batch.append((info.get("lead_min", 0), sid, self.payload(sid, e["cfg"], kind, info, p, key)))
                     self.log(f"alert {kind}: {info.get('level')} in {info.get('lead_min')} min")
                 if json.dumps(st, sort_keys=True) != before:
                     changed = True
@@ -317,12 +339,12 @@ class AlertEngine:
                 info = self.evaluate(s, now, e["cfg"], {})[1] if s else {}
                 key = f"{rem['lat']},{rem['lon']}"
                 if info.get("start_ts") and not info.get("raining_now"):
-                    self.send(sid, self.payload(sid, e["cfg"], "reminder", info, rem, key))
+                    batch.append((info.get("lead_min", 0), sid, self.payload(sid, e["cfg"], "reminder", info, rem, key)))
                 elif info.get("raining_now"):
-                    self.send(sid, {"title": f"🌧 Jetzt regnet es – {rem['name'] or 'dein Ort'}", "body": "Erinnerung von vorhin.", "tag": key})
+                    batch.append((0, sid, {"title": f"🌧 Jetzt regnet es – {rem['name'] or 'dein Ort'}", "body": "Erinnerung von vorhin.", "tag": key}))
                 else:
-                    self.send(sid, {"title": f"🌤 Entwarnung – {rem['name'] or 'dein Ort'}",
-                                    "body": "Der angekündigte Niederschlag kommt voraussichtlich doch nicht (nächste 2 Std.).", "tag": key})
+                    batch.append((60, sid, {"title": f"🌤 Entwarnung – {rem['name'] or 'dein Ort'}",
+                                    "body": "Der angekündigte Niederschlag kommt voraussichtlich doch nicht (nächste 2 Std.).", "tag": key}))
                 changed = True
             with self.lock:
                 if sid in self.subs:
@@ -330,6 +352,11 @@ class AlertEngine:
         if changed:
             with self.lock:
                 self._save()
+        if self.dev:  # dry-run outbox: synchronous, so tests see the messages at once
+            for _, sid, payload in sorted(batch, key=lambda b: b[0]):
+                self.send(sid, payload)
+        else:
+            self.send_many(batch)
 
     def payload(self, sid, cfg, kind, info, place, key):
         """Push payload: text, the place, and the data for the 'remind me' button (service worker)."""
