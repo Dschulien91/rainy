@@ -73,7 +73,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v0.22"
+VERSION = "server-v0.23"
 PORT = int(os.environ.get("PORT", "8771"))
 UA = "Mozilla/5.0"          # neutral, carries no identity
 HISTORY_MS = 60 * 60_000    # observed frames kept (1 h)
@@ -486,9 +486,15 @@ class Region:
                     log(f"{self.name} S-PROG failed, using simple nowcast: {e}")
         if fc is None:
             fc = nowcast(prev.astype(np.float32), last.astype(np.float32), last_t - prev_t, FC_STEPS, self.SMOOTH, self.FLOW_DOWN)
+        raw = None
         if self.model:  # backtest (verify_blend.py, variant N): same skill as radar only, plus showers yet to form
+            # the forecast without the model's new cells is kept at 1/3 resolution for the gauge verification
+            raw = {last_t + (i + 1) * STEP_MS: cv2.resize(np.asarray(g, np.float32), (g.shape[1] // 3, g.shape[0] // 3),
+                                                          interpolation=cv2.INTER_AREA).astype(np.float16)
+                   for i, g in enumerate(fc)}
             fc = blend_new_cells(self.model, fc, last_t)
         with self.lock:
+            self.fc_raw = raw
             self.fc = {last_t + (i + 1) * STEP_MS: g.astype(np.float16) for i, g in enumerate(fc)}
             self.ref = last_t
         return len(new)

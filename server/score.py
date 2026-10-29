@@ -122,8 +122,9 @@ def score_rain(hours):
                     continue
                 fc = np.interp([t - 7.5 * 60_000, t - 2.5 * 60_000], ts, series).mean()
                 preds = [("rainy", fc), ("persist", at_issue)]
-                if "opera" in r:  # shadow variant: Europe composite + our nowcast only, no DWD
-                    preds.append(("opera", np.interp([t - 7.5 * 60_000, t - 2.5 * 60_000], ts, r["opera"][:, j]).mean()))
+                for name in ("opera", "noblend"):  # shadows: Europe composite only; same without model new cells
+                    if name in r:
+                        preds.append((name, np.interp([t - 7.5 * 60_000, t - 2.5 * 60_000], ts, r[name][:, j]).mean()))
                 for k, p in preds:
                     for th, (to, tf) in (("nass", (0.05, 0.3)), (">=1mm/h", (1 / 6, 1.0))):
                         e = acc.setdefault((k, b, th), [0, 0, 0])
@@ -131,7 +132,7 @@ def score_rain(hours):
                         e[0] += wo and wf; e[1] += wo and not wf; e[2] += wf and not wo
     print("REGEN  (CSI / POD / FAR)")
     for th in ("nass", ">=1mm/h"):
-        for k in ("rainy", "opera", "persist"):
+        for k in ("rainy", "opera", "noblend", "persist"):
             if not any(key[0] == k for key in acc):
                 continue
             cells = []

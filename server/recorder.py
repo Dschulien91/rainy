@@ -148,19 +148,26 @@ class Recorder:
         k = (1 / np.cos(np.radians(s["lat"])))[:, None]
         PX, PY = X[:, None] + dx.ravel()[None] * k, Y[:, None] + dy.ravel()[None] * k  # 3x3 like /api/rain/point
         frames = self.mosaic.frames()
-        ts, fc, rate, opera, maps = [], [], [], [], {}
+        ts, fc, rate, opera, noblend, maps = [], [], [], [], [], {}
+        eu = self.mosaic.regions["eu"]
+        raw = getattr(eu, "fc_raw", None) or {}
+        ec, er = (((np.asarray(v, np.float64) + 0.5) / 3 - 0.5).astype(np.float32) for v in eu.to_pixels(PX, PY))
         ref = max((f["ts"] for f in frames if not f["fc"]), default=now)
         for f in frames:
             r, _ = self.mosaic.rain(f["ts"], PX, PY)
             ts.append(f["ts"]); fc.append(f["fc"]); rate.append(r.mean(axis=1))
             o, _ = self.mosaic.rain(f["ts"], PX, PY, use_de=False)  # shadow: Europe composite only
             opera.append(o.mean(axis=1))
+            g = raw.get(f["ts"]) if f["fc"] else None  # shadow 2: OPERA nowcast without the model's new cells
+            noblend.append(o.mean(axis=1) if g is None else
+                           cv2.remap(np.maximum(g.astype(np.float32), 0), ec, er, cv2.INTER_LINEAR).mean(axis=1))
             if any(f["ts"] == ref + lead * 60_000 for lead in MAP_LEADS):
                 m, _ = self.mosaic.rain(f["ts"], *self.map_xy)
                 maps[f"map{(f['ts'] - ref) // 60_000}"] = np.clip(m * 10, 0, 65535).astype(np.uint16)  # 0.1 mm/h
         np.savez_compressed(os.path.join(LOG_DIR, f"fc_rain_{ref}_{now}.npz"), issued=now, ref=ref, ts=np.array(ts),
                             ids=np.array(s["id"]), lat=s["lat"], lon=s["lon"],
-                            fc=np.array(fc), rate=np.array(rate, np.float32), opera=np.array(opera, np.float32), **maps)
+                            fc=np.array(fc), rate=np.array(rate, np.float32), opera=np.array(opera, np.float32),
+                            noblend=np.array(noblend, np.float32), **maps)
         self.rain_key, self.rain_at = key, now
 
     def _cleanup(self):
