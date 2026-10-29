@@ -45,17 +45,21 @@ TILE = 256
 FADE_KM = 30.0
 
 
-SPECKLE_PX = 10  # isolated echoes below ~10 km2 on the 1 km DWD grid
+SPECKLE_PX = 10        # isolated echoes below ~10 km2 on the 1 km DWD grid ...
+SPECKLE_MMH = 3.0      # ... that are also strong: clutter spikes are 20-60 mm/h, small real drizzle spots are weak
 
 
 def despeckle(mm5):
     """Remove isolated tiny echoes: wind farms, ground clutter and interference show up as a few 1 km pixels with
     20-60 mm/h in dry surroundings (29.10.: six such spots, no lightning, nothing at WetterOnline). The DWD nowcast
-    extrapolates them as standing 'cells', so they are removed in every frame. Real showers are larger."""
-    wet = (mm5 > 0.1 / 12).astype(np.uint8)
+    extrapolates them as standing 'cells', so they are removed in every frame. Small weak spots (drizzle) stay:
+    WetterOnline shows them too."""
+    wet = (mm5 > 0.05 / 12 / GermanyDwd.GAIN_RV).astype(np.uint8)  # the lowest drawn rate: drizzle fields stay whole
     n, lab, stats, _ = cv2.connectedComponentsWithStats(wet, connectivity=8)
+    peak = np.zeros(n, np.float32)
+    np.maximum.at(peak, lab.ravel(), mm5.ravel())
     small = np.zeros(n, bool)
-    small[1:] = stats[1:, cv2.CC_STAT_AREA] < SPECKLE_PX
+    small[1:] = (stats[1:, cv2.CC_STAT_AREA] < SPECKLE_PX) & (peak[1:] * 12 * GermanyDwd.GAIN_RV > SPECKLE_MMH)
     return np.where(small[lab], 0.0, mm5).astype(np.float32)
 
 

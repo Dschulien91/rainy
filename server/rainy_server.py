@@ -76,7 +76,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v0.43"
+VERSION = "server-v0.45"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model; no Europe/USA
 # radar, no clouds - their loops are not started); "full" = everything.
 EDITION = os.environ.get("EDITION", "de")
@@ -137,19 +137,21 @@ def log(msg):
 
 
 # ---------- palette (same stops as the app, log interpolation) ----------
-STOPS = [(0.1, (154, 208, 255, 0.55)), (0.5, (75, 163, 255, 0.75)), (2, (47, 107, 245, 0.85)),
+# 0.05-0.1 mm/h: faint "a few drops" (gauges: showing it finds 75 % instead of 67 % of light rain at equal CSI)
+STOPS = [(0.05, (170, 214, 255, 0.45)), (0.1, (154, 208, 255, 0.55)), (0.5, (75, 163, 255, 0.75)), (2, (47, 107, 245, 0.85)),
          (5, (107, 61, 240, 0.9)), (10, (192, 38, 211, 0.95)), (30, (255, 61, 110, 1)), (75, (255, 212, 0, 1))]
 LUT_N = 256
-LUT_MIN, LUT_MAX = math.log(0.1), math.log(100.0)
+DRAW_MIN = 0.05  # mm/h drawn on the map (timeline and alerts keep their own thresholds)
+LUT_MIN, LUT_MAX = math.log(DRAW_MIN), math.log(100.0)
 
 
 # colours for the other precipitation types (ptype.py kinds 1-5): sleet, snow, freezing rain, graupel, hail
 KIND_STOPS = [
-    [(0.1, (196, 236, 240, 0.6)), (0.5, (150, 214, 232, 0.75)), (2, (112, 182, 222, 0.85)), (5, (100, 140, 225, 0.9)), (30, (90, 100, 220, 1))],
-    [(0.1, (238, 242, 255, 0.65)), (0.5, (212, 220, 255, 0.78)), (2, (178, 184, 255, 0.88)), (5, (146, 132, 245, 0.93)), (30, (118, 92, 228, 1))],
-    [(0.1, (255, 196, 224, 0.7)), (0.5, (255, 150, 204, 0.82)), (2, (242, 92, 172, 0.92)), (5, (214, 40, 142, 0.97)), (30, (170, 0, 110, 1))],
-    [(0.1, (204, 244, 206, 0.75)), (2, (124, 214, 146, 0.88)), (10, (60, 172, 96, 0.95)), (30, (30, 130, 70, 1))],
-    [(0.1, (255, 120, 70, 0.92)), (2, (240, 40, 30, 0.97)), (10, (205, 0, 0, 1)), (30, (150, 0, 0, 1))],  # hail: red, unlike heavy rain
+    [(0.05, (205, 238, 242, 0.3)), (0.1, (196, 236, 240, 0.6)), (0.5, (150, 214, 232, 0.75)), (2, (112, 182, 222, 0.85)), (5, (100, 140, 225, 0.9)), (30, (90, 100, 220, 1))],
+    [(0.05, (240, 243, 255, 0.32)), (0.1, (238, 242, 255, 0.65)), (0.5, (212, 220, 255, 0.78)), (2, (178, 184, 255, 0.88)), (5, (146, 132, 245, 0.93)), (30, (118, 92, 228, 1))],
+    [(0.05, (255, 205, 228, 0.35)), (0.1, (255, 196, 224, 0.7)), (0.5, (255, 150, 204, 0.82)), (2, (242, 92, 172, 0.92)), (5, (214, 40, 142, 0.97)), (30, (170, 0, 110, 1))],
+    [(0.05, (212, 245, 214, 0.35)), (0.1, (204, 244, 206, 0.75)), (2, (124, 214, 146, 0.88)), (10, (60, 172, 96, 0.95)), (30, (30, 130, 70, 1))],
+    [(0.05, (255, 140, 100, 0.45)), (0.1, (255, 120, 70, 0.92)), (2, (240, 40, 30, 0.97)), (10, (205, 0, 0, 1)), (30, (150, 0, 0, 1))],  # hail: red, unlike heavy rain
 ]
 
 
@@ -173,8 +175,8 @@ LUTS = np.stack([LUT] + [_build_lut(s) for s in KIND_STOPS])  # [kind, index] ->
 
 def colorize(rate, kind=None):
     idx = np.zeros(rate.shape, np.int32)
-    wet = rate >= 0.1
-    lr = np.log(np.clip(rate[wet], 0.1, 100.0))
+    wet = rate >= DRAW_MIN
+    lr = np.log(np.clip(rate[wet], DRAW_MIN, 100.0))
     idx[wet] = 1 + np.round((lr - LUT_MIN) / (LUT_MAX - LUT_MIN) * (LUT_N - 1)).astype(np.int32)
     return LUT[idx] if kind is None else LUTS[kind, idx]
 

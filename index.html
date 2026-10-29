@@ -315,7 +315,7 @@
 <script src="vendor/leaflet-maplibre-gl.js"></script>
 <script>
 "use strict";
-const VERSION = "v0.63";
+const VERSION = "v0.65";
 const FALLBACK = { lat: 53.5511, lon: 9.9937, name: "Hamburg" };
 const DWD_WMS = "https://maps.dwd.de/geoserver/dwd/wms";
 const EUM_WMS = "https://view.eumetsat.int/geoserver/ows";
@@ -631,7 +631,7 @@ function loadImage(url) {
 // ---------- Palettes ----------
 // Rain intensity (mm/h) -> color stops, interpolated in log space. Used for maps and timeline bars.
 const RAIN_STOPS = [
-  [0.1, [154, 208, 255, 0.55]], [0.5, [75, 163, 255, 0.75]], [2, [47, 107, 245, 0.85]],
+  [0.05, [170, 214, 255, 0.45]], [0.1, [154, 208, 255, 0.55]], [0.5, [75, 163, 255, 0.75]], [2, [47, 107, 245, 0.85]],
   [5, [107, 61, 240, 0.9]], [10, [192, 38, 211, 0.95]], [30, [255, 61, 110, 1]], [75, [255, 212, 0, 1]],
 ];
 // Other precipitation types from the DWD radar classification (same colours as the server's map tiles).
