@@ -78,6 +78,10 @@ class GermanyDwd:
         self.rgb = np.array([[int(h[i:i + 2], 16) for i in (0, 2, 4)] for h in self.CLASSES], np.int32)
         self.val = np.array(list(self.CLASSES.values()), np.float32)
         self.weight = self._germany_weight()
+        # Germany for the hatching: the outline leaves estuaries (Elbe, Weser) and lagoons out as sea, so close
+        # gaps up to ~10 km - inland waters must not look like "no data"
+        inside = (self.weight > 0.99).astype(np.uint8)
+        self.inside = cv2.morphologyEx(inside, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))).astype(np.float32)
         self.pool = ThreadPoolExecutor(4)
 
     def _germany_weight(self):

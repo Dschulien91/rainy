@@ -73,7 +73,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v0.26"
+VERSION = "server-v0.27"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model; no Europe/USA
 # radar, no clouds - their loops are not started); "full" = everything.
 EDITION = os.environ.get("EDITION", "de")
@@ -739,7 +739,7 @@ def coverage_mask(bbox, w, h):
     cov = np.zeros((h, w), bool)
     if EDITION == "de":
         col, row = (v.astype(np.float32) for v in DE.to_pixels(X, Y))
-        cov = cv2.remap(DE.weight, col, row, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0) > 0.99
+        cov = cv2.remap(DE.inside, col, row, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0) > 0.5
         img = np.zeros((h, w, 4), np.uint8)
         img[cov] = (0, 0, 0, 255)
         buf = io.BytesIO()
