@@ -64,6 +64,7 @@ from pyproj import Transformer
 
 import alerts
 import clouds
+import gauges
 import mosaic
 import ptype
 import recorder
@@ -76,7 +77,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v0.45"
+VERSION = "server-v0.46"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model; no Europe/USA
 # radar, no clouds - their loops are not started); "full" = everything.
 EDITION = os.environ.get("EDITION", "de")
@@ -991,6 +992,7 @@ class Handler(BaseHTTPRequestHandler):
 CLOUDS = clouds.CloudNowcast(fetch, log, OPENMETEO_URL, openmeteo_available, ll_to_3857)
 DE = mosaic.GermanyDwd(fetch, log)
 PTYPE = ptype.PrecipType(fetch, log, DE)
+DE.drizzle = gauges.GaugeDrizzle(fetch, log, DE, mosaic.merc)
 MOSAIC = mosaic.Mosaic(REGIONS, DE, CLOUDS, sample, colorize, log, de_only=EDITION == "de", ptype=PTYPE)
 THUNDER = thunder.Thunder(fetch, log)
 ALERTS = alerts.AlertEngine(DATA_DIR, {**REGIONS, "de": DE}, log, UA, VAPID_SUBJECT,
@@ -1006,6 +1008,7 @@ CLOUDS.heavy_lock = SPROG_LOCK  # cloud nowcast and S-PROG take turns (Docker VM
 if __name__ == "__main__":
     threading.Thread(target=ALERTS.loop, args=(ll_to_3857,), daemon=True).start()
     threading.Thread(target=mosaic.de_loop, args=(DE, log, PTYPE), daemon=True).start()
+    threading.Thread(target=DE.drizzle.loop, daemon=True).start()
     threading.Thread(target=mosaic.prerender_loop, args=(MOSAIC, log), daemon=True).start()
     threading.Thread(target=RECORDER.loop, daemon=True).start()
     threading.Thread(target=THUNDER.loop, daemon=True).start()
