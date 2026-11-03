@@ -21,7 +21,7 @@ import numpy as np
 from PIL import Image
 
 DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fc_shots")
-MATCH_MIN = 10  # an actual image within this many minutes of the forecast's valid time
+MATCH_MIN = 5   # an actual image within this many minutes of the forecast's valid time (frames are 5 min)
 AREA = {        # (x0, y0, x1, y1) of the map without UI, as a fraction of the image size
     "ours": (0.0, 0.0, 0.92, 0.66),
     "wo": (0.02, 0.10, 0.89, 0.86),
@@ -47,6 +47,8 @@ def rain_mask(path, src):
 
 
 def score(fc, act, tol):
+    if act.shape != fc.shape:  # browser crops differ by a pixel now and then
+        act = cv2.resize(act.astype(np.uint8), fc.shape[::-1], interpolation=cv2.INTER_NEAREST) > 0
     if not fc.any() and not act.any():
         return None
     d_act = cv2.distanceTransform((~act).astype(np.uint8), cv2.DIST_L2, 3)
