@@ -24,7 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from clouds import sun_elevation  # noqa: E402
 from recorder import LOG_DIR, MAP_BOX, MAP_H, MAP_W  # noqa: E402
 
-BUCKETS = [("jetzt", -15, 15), ("+30", 15, 45), ("+60", 45, 75), ("+90", 75, 105), ("+120", 105, 135)]
+BUCKETS = [("jetzt", -5, 5), ("+10", 5, 20), ("+30", 20, 45), ("+60", 45, 75), ("+90", 75, 105), ("+120", 105, 135)]
 TEN = 600_000
 
 
