@@ -113,6 +113,7 @@ class GermanyDwd:
         self.nx, self.ny = int(round((x1 - x0) / self.CELL)), int(round((y1 - y0) / self.CELL))
         self.lock = threading.Lock()
         self.obs, self.fc, self.ref = {}, {}, None
+        self.fc_own, self.own_ref = {}, None  # our own nowcast (rainy_server.OwnNowcast) for the same runs
         self.rgb = np.array([[int(h[i:i + 2], 16) for i in (0, 2, 4)] for h in self.CLASSES], np.int32)
         self.val = np.array(list(self.CLASSES.values()), np.float32)
         self.rv_maps = None
@@ -163,9 +164,15 @@ class GermanyDwd:
             return ([{"ts": t, "fc": False} for t in sorted(self.obs)] +
                     [{"ts": t, "fc": True} for t in sorted(self.fc)]), self.ref
 
-    def grid(self, ts):
+    def grid(self, ts, variant="dwd"):
+        """Rate grid of a frame: measured frames are the same for both variants; forecast frames come from the DWD
+        nowcast or from our own (variant "own", when it exists for the current run, else DWD)."""
         with self.lock:
-            return self.obs.get(ts) if ts in self.obs else self.fc.get(ts)
+            if ts in self.obs:
+                return self.obs[ts]
+            if variant == "own" and self.own_ref == self.ref and ts in self.fc_own:
+                return self.fc_own[ts]
+            return self.fc.get(ts)
 
     def _latest_run(self):
         xml = self.fetch(f"{self.WMS.rsplit('/', 1)[0]}/Niederschlagsradar/ows?service=WMS&version=1.3.0&request=GetCapabilities").decode("utf-8", "ignore")
@@ -276,9 +283,11 @@ class Mosaic:
         self.cache, self.cache_lock = OrderedDict(), threading.Lock()  # small in-process cache; the CDN does the rest
 
     # ---------- timeline ----------
-    def key(self):
+    def key(self, variant="dwd"):
         refs = [self.de.ref] + [self.regions[n].ref for n in ("eu", "us", "sat")]
-        return "-".join(str((r or 0) // 60_000) for r in refs)
+        k = "-".join(str((r or 0) // 60_000) for r in refs)
+        # own forecast: the key changes again once it is ready for the run (tiles before that show the DWD forecast)
+        return k + ("-o1" if self.de.own_ref == self.de.ref else "-o0") if variant == "own" else k
 
     def frames(self):
         now = int(time.time() * 1000)
@@ -287,6 +296,13 @@ class Mosaic:
         end = max(self.de.ref or 0, eu_ref) + 120 * 60_000
         last_obs = min(t for t in (self.de.ref, self.regions["eu"].ref) if t) if (self.de.ref or self.regions["eu"].ref) else now
         return [{"ts": t, "fc": t > last_obs} for t in range(start, end + 1, STEP_MS)]
+
+    def _nearest_de(self, ts, variant, tol_ms=150_000):
+        frames, _ = self.de.frames()
+        if not frames:
+            return None
+        best = min(frames, key=lambda f: abs(f["ts"] - ts))
+        return self.de.grid(best["ts"], variant) if abs(best["ts"] - ts) <= tol_ms else None
 
     @staticmethod
     def _nearest(src, ts, tol_ms):
@@ -297,7 +313,7 @@ class Mosaic:
         return src.grid(best["ts"]) if abs(best["ts"] - ts) <= tol_ms else None
 
     # ---------- composite ----------
-    def rain(self, ts, X, Y, use_de=True):
+    def rain(self, ts, X, Y, use_de=True, variant="dwd"):
         """Rain rate and a 'faint' flag (satellite estimate) at Web Mercator points X, Y.
         use_de=False: OPERA + our nowcast only (recorded in parallel to decide whether DWD is worth keeping)."""
         rate = np.zeros(X.shape, np.float32)
@@ -308,7 +324,7 @@ class Mosaic:
                 r, cov = self.sample(self.regions[name], g, X, Y)
                 rate[cov] = r[cov]
                 covered |= cov
-        g = self._nearest(self.de, ts, 150_000) if use_de else None
+        g = self._nearest_de(ts, variant) if use_de else None
         if g is not None:
             col, row = (v.astype(np.float32) for v in self.de.to_pixels(X, Y))
             d = cv2.remap(g.astype(np.float32), col, row, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
@@ -335,16 +351,16 @@ class Mosaic:
                 self.cache.popitem(last=False)
         return png
 
-    def rain_tile(self, key, ts, z, x, y, use_de=True):
+    def rain_tile(self, key, ts, z, x, y, use_de=True, variant="dwd"):
         def make():
             X, Y = tile_xy(z, x, y)
-            rate, faint = self.rain(ts, X, Y, use_de)
+            rate, faint = self.rain(ts, X, Y, use_de, variant)
             rgba = self.colorize(rate, self.kind(ts, X, Y))
             rgba[..., 3] = np.where(faint, (rgba[..., 3] * 0.65).astype(np.uint8), rgba[..., 3])
             buf = io.BytesIO()
             Image.fromarray(rgba, "RGBA").save(buf, "PNG", compress_level=6)
             return buf.getvalue()
-        return self._cached(f"{'r' if use_de else 're'}/{key}/{ts}/{z}/{x}/{y}", make)
+        return self._cached(f"{'r' if use_de else 're'}{variant}/{key}/{ts}/{z}/{x}/{y}", make)
 
     def cloud_tile(self, key, ts, z, x, y):
         span = 2 * WORLD / (1 << z)
@@ -366,14 +382,14 @@ class Mosaic:
         ok = 0 <= row < self.de.ny and 0 <= col < self.de.nx
         return bool(ok and self.de.inside[row, col] > 0.5)
 
-    def rain_point(self, lat, lon, use_de=True):
+    def rain_point(self, lat, lon, use_de=True, variant="dwd"):
         """Same composite as the map, mean over ~3 km around the place."""
         cx, cy = merc(lon, lat)
         d = np.array([-1500.0, 0.0, 1500.0]) / np.cos(np.radians(lat))
         X, Y = np.meshgrid(cx + d, cy + d)
         out = []
         for f in self.frames():
-            rate, faint = self.rain(f["ts"], X, Y, use_de)
+            rate, faint = self.rain(f["ts"], X, Y, use_de, variant)
             e = {"ts": f["ts"], "fc": f["fc"], "mmh": round(float(rate.mean()), 3), "est": bool(faint.all())}
             k = self.kind(f["ts"], X, Y)
             if k is not None and (rate >= 0.1).any():  # most frequent type where it is wet
@@ -388,7 +404,7 @@ def prerender_loop(mosaic, log):
     done = None
     while True:
         try:
-            key = mosaic.key()
+            key = mosaic.key() + "|" + mosaic.key("own")
             if key != done and mosaic.de.ref:
                 started, n = time.time(), 0
                 m = (BORDER_KM + FADE_KM) / 111.0  # Germany + the shown border zone
@@ -400,9 +416,12 @@ def prerender_loop(mosaic, log):
                         k = (1 << z) / (2 * WORLD)
                         for x in range(int((x0 + WORLD) * k), int((x1 + WORLD) * k) + 1):
                             for y in range(int((WORLD - y1) * k), int((WORLD - y0) * k) + 1):
-                                mosaic.rain_tile(key, f["ts"], z, x, y)
+                                mosaic.rain_tile(mosaic.key(), f["ts"], z, x, y)
                                 n += 1
-                    if mosaic.key() != key:  # a newer run arrived meanwhile: start over with it
+                                if f["fc"] and mosaic.de.own_ref == mosaic.de.ref:  # our own forecast, once ready
+                                    mosaic.rain_tile(mosaic.key("own"), f["ts"], z, x, y, variant="own")
+                                    n += 1
+                    if mosaic.key() + "|" + mosaic.key("own") != key:  # newer run or own forecast: start over
                         break
                 done = key
                 log(f"[{datetime.now():%H:%M:%S}] prerender: {n} tiles in {time.time() - started:.0f}s")

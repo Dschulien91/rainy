@@ -78,7 +78,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v0.49"
+VERSION = "server-v0.50"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model; no Europe/USA
 # radar, no clouds - their loops are not started); "full" = everything.
 EDITION = os.environ.get("EDITION", "de")
@@ -444,6 +444,48 @@ def sprog_nowcast(seq, mot, steps, down):
         g[last < 0] = NODATA
         out.append(g.astype(np.float16))  # compact right away: 24 full-size float32 frames would need ~1.6 GB
     return out
+
+
+# ---------- our own nowcast for Germany ----------
+class OwnNowcast:
+    """Our own 2 h forecast on the DWD radar analyses, next to DWD's (RV) - selectable in the app, scored by
+    fcverify.py against the later radar image just like DWD's. pySTEPS S-PROG: motion per region (Lucas-Kanade
+    optical flow, so showers in different areas can move in different directions) and each spatial scale decays at
+    its own observed rate (small showers and drizzle fade, large rain areas persist) - DWD's RV only shifts the
+    image. Inputs: analyses 10/5/0 min old (S-PROG) and 30/15/0 min old (motion)."""
+    DOWN = 2  # ~2 km
+
+    def __init__(self, de):
+        self.de, self.done = de, None
+
+    def step(self):
+        de = self.de
+        if not HAVE_PYSTEPS or getattr(de, "frozen", False):
+            return
+        with de.lock:
+            ref, obs = de.ref, dict(de.obs)
+        if ref is None or ref == self.done or ref not in obs:
+            return
+        near = lambda dt: obs.get(ref - dt * 60_000)
+        seq, mot = [near(10), near(5), near(0)], [near(30), near(15), near(0)]
+        if any(g is None for g in seq + mot):
+            return
+        started = time.time()
+        fc = sprog_nowcast([g.astype(np.float32) for g in seq], [g.astype(np.float32) for g in mot], FC_STEPS, self.DOWN)
+        grids = {ref + (i + 1) * STEP_MS: g for i, g in enumerate(fc)}
+        with de.lock:
+            if de.ref == ref:
+                de.fc_own, de.own_ref = grids, ref
+        self.done = ref
+        log(f"[{datetime.now():%H:%M:%S}] own nowcast: run {datetime.fromtimestamp(ref / 1000, timezone.utc):%H:%M}Z in {time.time() - started:.0f}s")
+
+    def loop(self):
+        while True:
+            try:
+                self.step()
+            except Exception as e:
+                log(f"own nowcast failed: {e}")
+            time.sleep(10)
 
 
 # ---------- regions ----------
@@ -859,14 +901,15 @@ class Handler(BaseHTTPRequestHandler):
                 body = {"version": VERSION, "edition": EDITION, "regions": info, "openmeteo": openmeteo_available(), "rss_mb": rss_mb()}
                 return self.send(200, json.dumps(body).encode(), "application/json", 10)
             if u.path.startswith("/tiles/"):
-                m = re.fullmatch(r"/tiles/(rain|raineu|cloud)/([\w-]+)/(\d+)/(\d+)/(\d+)/(\d+)\.png", u.path)
+                m = re.fullmatch(r"/tiles/(rain|rainown|raineu|cloud)/([\w-]+)/(\d+)/(\d+)/(\d+)/(\d+)\.png", u.path)
                 if not m:
                     return self.send(404, b"not found", "text/plain", 60)
                 kind, key, ts, z, x, y = m.group(1), m.group(2), *map(int, m.groups()[2:])
+                variant = "own" if kind == "rainown" else "dwd"
                 if not (2 <= z <= 13 and 0 <= x < (1 << z) and 0 <= y < (1 << z)):
                     return self.send(404, b"bad tile", "text/plain", 3600)
                 png = (MOSAIC.cloud_tile(key, ts, z, x, y) if kind == "cloud"
-                       else MOSAIC.rain_tile(key, ts, z, x, y, use_de=kind == "rain"))
+                       else MOSAIC.rain_tile(key, ts, z, x, y, use_de=kind != "raineu", variant=variant))
                 if png is None:
                     return self.send(404, b"unknown frame", "text/plain", 30)
                 return self.send(200, png, "image/png", 86400)  # the key in the URL makes the content immutable
@@ -901,14 +944,15 @@ class Handler(BaseHTTPRequestHandler):
                 body = {"ts": li[0], "flashes": li[1]} if li else {}  # flash clusters of the last minutes [[lat, lon]]
                 return self.send(200, json.dumps(body).encode(), "application/json", 60)
             if u.path == "/api/rain/frames":
-                body = {"key": MOSAIC.key(), "frames": MOSAIC.frames()}
+                body = {"key": MOSAIC.key(q.get("fc", "dwd")), "frames": MOSAIC.frames()}
                 return self.send(200, json.dumps(body).encode(), "application/json", 30)
             if u.path == "/api/rain/point":
                 lat, lon, de = round(float(q["lat"]), 2), round(float(q["lon"]), 2), q.get("src") != "eu"
-                ck = (MOSAIC.key(), lat, lon, de)  # one answer per ~1 km square and radar run, shared by all users
+                variant = "own" if q.get("fc") == "own" else "dwd"  # forecast: DWD nowcast or our own (OwnNowcast)
+                ck = (MOSAIC.key(variant), lat, lon, de)  # one answer per ~1 km square and radar run, shared by all users
                 body = POINT_CACHE.get(ck)
                 if body is None:
-                    body = {"key": ck[0], "series": MOSAIC.rain_point(lat, lon, de), "covered": MOSAIC.covered(lat, lon)}
+                    body = {"key": ck[0], "series": MOSAIC.rain_point(lat, lon, de, variant), "covered": MOSAIC.covered(lat, lon)}
                     POINT_CACHE[ck] = body
                     while len(POINT_CACHE) > 20000:
                         POINT_CACHE.pop(next(iter(POINT_CACHE)))
@@ -995,6 +1039,7 @@ DE = mosaic.GermanyDwd(fetch, log)
 PTYPE = ptype.PrecipType(fetch, log, DE)
 DE.drizzle = gauges.GaugeDrizzle(fetch, log, DE, mosaic.merc)
 GRID_VERIFY = fcverify.GridVerify(DE, log)
+OWN = OwnNowcast(DE)
 MOSAIC = mosaic.Mosaic(REGIONS, DE, CLOUDS, sample, colorize, log, de_only=EDITION == "de", ptype=PTYPE)
 THUNDER = thunder.Thunder(fetch, log)
 ALERTS = alerts.AlertEngine(DATA_DIR, {**REGIONS, "de": DE}, log, UA, VAPID_SUBJECT,
@@ -1012,6 +1057,8 @@ if __name__ == "__main__":
     threading.Thread(target=mosaic.de_loop, args=(DE, log, PTYPE), daemon=True).start()
     threading.Thread(target=DE.drizzle.loop, daemon=True).start()
     threading.Thread(target=GRID_VERIFY.loop, daemon=True).start()
+    if EDITION == "de":
+        threading.Thread(target=OWN.loop, daemon=True).start()
     threading.Thread(target=mosaic.prerender_loop, args=(MOSAIC, log), daemon=True).start()
     threading.Thread(target=RECORDER.loop, daemon=True).start()
     threading.Thread(target=THUNDER.loop, daemon=True).start()

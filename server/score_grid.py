@@ -32,23 +32,28 @@ def main():
                 for kind in ("fc", "pers"):
                     v = r.get(f"{kind}{th}")
                     if v:
-                        t = tot[(th, kind, r["lead"])]
+                        name = "pers" if kind == "pers" else r.get("variant", "dwd")
+                        t = tot[(th, name, r["lead"])]
                         t[0] += v[0]; t[1] += v[1]; t[2] += v[2]
-                runs[r["lead"]].add(r["ref"])
-    leads = sorted(runs)
+                runs[(r.get("variant", "dwd"), r["lead"])].add(r["ref"])
+    leads = sorted({lead for _, lead in runs})
     if not leads:
         print("no verified forecasts yet")
         return
     print(f"Vorhersage vs. spaeteres DWD-Radarbild (~9 km Toleranz), letzte {a.hours:.0f} h   CSI (POD/FAR)")
     for th, name in (("0.1", "nass >= 0.1 mm/h"), ("1.0", "Regen >= 1 mm/h")):
         print(f"  {name}")
-        for kind, label in (("fc", "rainy  "), ("pers", "bleibt ")):
+        for kind, label in (("dwd", "DWD    "), ("own", "eigene "), ("pers", "bleibt ")):
+            if not any(tot[(th, kind, lead)] != [0, 0, 0] for lead in leads):
+                continue
             cells = []
             for lead in leads:
                 c, p, f = csi(*tot[(th, kind, lead)])
                 cells.append(f"+{lead}: {c:.2f} ({p:.2f}/{f:.2f})")
             print(f"    {label} " + " | ".join(cells))
-    print("  Laeufe je Vorlauf: " + ", ".join(f"+{l}: {len(runs[l])}" for l in leads))
+    for v in ("dwd", "own"):
+        if any(runs[(v, l)] for l in leads):
+            print(f"  Laeufe {v}: " + ", ".join(f"+{l}: {len(runs[(v, l)])}" for l in leads))
 
 
 if __name__ == "__main__":

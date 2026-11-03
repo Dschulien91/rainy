@@ -4,6 +4,7 @@ For each new DWD run the forecast frames at LEADS are kept (downsampled to ~3 km
 frame's valid time has arrived, both are compared inside the area the map shows (Germany + border zone): a forecast
 pixel is a hit when real rain lies within TOL_PX (~9 km), so small position errors are forgiven. Persistence (the
 analysis at issue time, i.e. "it stays as it is") is scored alongside as the baseline any forecast must beat.
+Both forecasts are scored: DWD's own nowcast ("dwd") and ours ("own", rainy_server.OwnNowcast), same runs, same rules.
 
 One JSON line per (run, lead) in verify_log/fcgrid_<YYYYMMDD>.jsonl; server/score_grid.py sums them up. No downloads,
 no screenshots: thousands of comparisons per rainy day instead of a few.
@@ -41,9 +42,9 @@ class GridVerify:
     def __init__(self, de, log):
         self.de, self.log = de, log
         self.lock = threading.Lock()
-        self.pending = {}  # (ref, lead) -> forecast grid (down)
+        self.pending = {}  # (variant, ref, lead) -> forecast grid (down)
         self.issued = {}   # ref -> analysis at issue time (down), for persistence
-        self.done_ref = None
+        self.done_ref, self.done_own = None, None
         self.shape = (de.nx // DOWN, de.ny // DOWN)  # cv2 (w, h)
         self.mask = None   # area the map shows, downsampled
 
@@ -53,32 +54,39 @@ class GridVerify:
             return
         with de.lock:
             ref, obs, fc = de.ref, dict(de.obs), dict(de.fc)
+            own_ref, own = de.own_ref, dict(de.fc_own)
         if ref != self.done_ref and ref in obs:
             self.mask = _down(de.inside, self.shape) > 0.5  # Germany + border zone (radar range known after 1st run)
             self.issued[ref] = _down(obs[ref], self.shape)
             for lead in LEADS:
                 g = fc.get(ref + lead * 60_000)
                 if g is not None:
-                    self.pending[(ref, lead)] = _down(g, self.shape)
+                    self.pending[("dwd", ref, lead)] = _down(g, self.shape)
             self.done_ref = ref
+        if own_ref is not None and own_ref != self.done_own:
+            for lead in LEADS:
+                g = own.get(own_ref + lead * 60_000)
+                if g is not None:
+                    self.pending[("own", own_ref, lead)] = _down(g, self.shape)
+            self.done_own = own_ref
         lines = []
-        for (r, lead), g in list(self.pending.items()):
+        for (variant, r, lead), g in list(self.pending.items()):
             valid = r + lead * 60_000
             if valid not in obs:
                 if ref - r > KEEP_MS:
-                    del self.pending[(r, lead)]
+                    del self.pending[(variant, r, lead)]
                 continue
             a = _down(obs[valid], self.shape)
             p = self.issued.get(r)
-            row = {"ref": r, "lead": lead, "valid": valid}
+            row = {"variant": variant, "ref": r, "lead": lead, "valid": valid}
             for th in THRESHOLDS:
                 o = a >= th
                 row[f"obs{th}"] = int((o & self.mask).sum())
                 row[f"fc{th}"] = list(_counts(g >= th, o, self.mask))
-                if p is not None:
+                if p is not None and variant == "dwd":  # persistence once per run
                     row[f"pers{th}"] = list(_counts(p >= th, o, self.mask))
             lines.append(row)
-            del self.pending[(r, lead)]
+            del self.pending[(variant, r, lead)]
         for r in [r for r in self.issued if ref - r > KEEP_MS]:
             del self.issued[r]
         if lines:

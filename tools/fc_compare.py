@@ -2,7 +2,8 @@
 later radar image?
 
 Screenshots live in tools/fc_shots/ named <src>_<valid UTC YYYYmmddHHMM>_L<lead min>.png (L0 = the actual image at
-that time). src "ours" = tools/compare_shot.ps1 (900x820, light theme, Germany zoom 6); src "wo" = the WetterOnline
+that time). src "ours" = tools/compare_shot.ps1 (DWD forecast), src "own" = the same with our own forecast (scored
+against ours_..._L0, the same measured image) (900x820, light theme, Germany zoom 6); src "wo" = the WetterOnline
 RegenRadar Deutschland map cropped to (0,30)-(520,590) at scale 0.6. Rain = saturated, bright pixels inside the
 map area (UI elements masked). A forecast pixel counts as a hit when actual rain lies within TOL_PX (~10 km), so
 small position errors are forgiven like in a gauge check with a window.
@@ -26,7 +27,8 @@ AREA = {        # (x0, y0, x1, y1) of the map without UI, as a fraction of the i
     "ours": (0.0, 0.0, 0.92, 0.66),
     "wo": (0.02, 0.10, 0.89, 0.86),
 }
-TOL_PX = {"ours": 4, "wo": 3}
+TOL_PX = {"ours": 4, "own": 4, "wo": 3}
+AREA["own"] = AREA["ours"]
 
 
 def rain_mask(path, src):
@@ -40,7 +42,7 @@ def rain_mask(path, src):
     x0, y0, x1, y1 = AREA[src]
     keep = np.zeros_like(m)
     keep[int(y0 * h):int(y1 * h), int(x0 * w):int(x1 * w)] = True
-    if src == "ours":  # location dot in the middle of the map, logo top left
+    if src in ("ours", "own"):  # location dot in the middle of the map, logo top left
         cv2.circle(keep.view(np.uint8), (int(0.501 * w), int(0.337 * h)), int(0.02 * w), 0, -1)
         keep[:int(0.07 * h), :int(0.17 * w)] = False
     return m & keep
@@ -66,7 +68,7 @@ def main():
         if m:
             shots[m.group(1)][(datetime.strptime(m.group(2), "%Y%m%d%H%M"), int(m.group(3)))] = p
     for src, d in sorted(shots.items()):
-        actual = {v: p for (v, lead), p in d.items() if lead == 0}
+        actual = {v: p for (v, lead), p in (shots["ours"] if src == "own" else d).items() if lead == 0}
         tot = defaultdict(lambda: [0, 0, 0, 0])
         for (valid, lead), p in sorted(d.items()):
             if lead == 0 or not actual:

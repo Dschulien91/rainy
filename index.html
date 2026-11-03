@@ -315,7 +315,7 @@
 <script src="vendor/leaflet-maplibre-gl.js"></script>
 <script>
 "use strict";
-const VERSION = "v0.66";
+const VERSION = "v0.67";
 const FALLBACK = { lat: 53.5511, lon: 9.9937, name: "Hamburg" };
 const DWD_WMS = "https://maps.dwd.de/geoserver/dwd/wms";
 const EUM_WMS = "https://view.eumetsat.int/geoserver/ows";
@@ -428,12 +428,13 @@ const imgFrames = new Map();
 // ---------- Map ----------
 // Map style (style card, stored on the device; ?sat=photo still works for testing):
 // sat = "clouds" (our cloud layer + sun tint) | "photo" (EUMETSAT satellite photo); theme = "auto" | "light" | "dark";
-// rain = "mix" (DWD in Germany, OPERA elsewhere) | "eu" (EUMETNET OPERA everywhere, for comparison)
+// rain = "mix" (DWD in Germany, OPERA elsewhere) | "eu" (EUMETNET OPERA everywhere, for comparison);
+// fc = "dwd" (DWD's 2 h radar forecast) | "own" (our own pySTEPS forecast on the same radar, being tuned)
 const MAP_STYLE = (() => {
   let st = {};
   try { st = JSON.parse(localStorage.getItem("rainy.style")) || {}; } catch {}
   return { sat: st.sat === "photo" ? "photo" : "clouds", theme: ["light", "dark"].includes(st.theme) ? st.theme : "auto",
-    rain: st.rain === "eu" ? "eu" : "mix", design: ["liberty", "bright", "fiord", "earth"].includes(st.design) ? st.design : "plain" };
+    rain: st.rain === "eu" ? "eu" : "mix", fc: (new URLSearchParams(location.search).get("fc") || st.fc) === "own" ? "own" : "dwd", design: ["liberty", "bright", "fiord", "earth"].includes(st.design) ? st.design : "plain" };
 })();
 // Edition: "de" = first public version (Germany: rain radar 2 h + 24 h / 3 days; sunny and the Europe/USA radar are
 // hidden and everything outside Germany is hatched); "full" = everything (test with ?edition=full).
@@ -446,6 +447,7 @@ if (DE_ONLY) {
     ' · <a href="impressum.html">Impressum</a> · <a href="datenschutz.html">Datenschutz</a>';
 }
 const RAIN_EU = !DE_ONLY && MAP_STYLE.rain === "eu";
+const FC_OWN = DE_ONLY && MAP_STYLE.fc === "own"; // our own forecast (server variant "own") instead of DWD's
 if (MAP_STYLE.theme !== "auto") document.documentElement.classList.add(`theme-${MAP_STYLE.theme}`);
 const dark = MAP_STYLE.theme === "auto" ? window.matchMedia("(prefers-color-scheme: dark)").matches : MAP_STYLE.theme === "dark";
 document.body.classList.toggle("dark", dark);
@@ -1308,7 +1310,7 @@ async function loadRadarPoint(loc) {
     // our server: the same seamless mosaic the map shows (DWD in Germany, OPERA, NOAA, satellite estimate)
     try {
       await serverReady;
-      const d = await getJSON(`${API_BASE}/api/rain/point?lat=${loc.lat.toFixed(2)}&lon=${loc.lon.toFixed(2)}${RAIN_EU ? "&src=eu" : ""}`);
+      const d = await getJSON(`${API_BASE}/api/rain/point?lat=${loc.lat.toFixed(2)}&lon=${loc.lon.toFixed(2)}${RAIN_EU ? "&src=eu" : ""}${FC_OWN ? "&fc=own" : ""}`);
       state.radarPoint = DE_ONLY && d.covered === false ? [] :
         (d.series || []).map((r) => ({ ts: r.ts, mmh: r.mmh, ref: r.fc ? 1 : null, kind: r.kind }));
       state.radarSource = "rtile"; state.tileKey.rain = d.key;
@@ -1619,7 +1621,7 @@ function tileLayer(kind, ts) {
   const id = `${kind}/${state.tileKey[kind]}/${ts}`;
   let layer = tileLayers.get(id);
   if (!layer) {
-    const url = `${API_BASE}/tiles/${kind === "rain" && RAIN_EU ? "raineu" : kind}/${state.tileKey[kind]}/${ts}/{z}/{x}/{y}.png`;
+    const url = `${API_BASE}/tiles/${kind === "rain" && RAIN_EU ? "raineu" : kind === "rain" && FC_OWN ? "rainown" : kind}/${state.tileKey[kind]}/${ts}/{z}/{x}/{y}.png`;
     layer = kind === "rain"
       // zoom 8 tiles (~400 m pixels) are finer than the 1 km radar: closer in they are only enlarged, which needs
       // 16x fewer tiles per frame at city zoom than zoom-10 tiles (the server pre-renders zoom 4-8)
@@ -1702,7 +1704,7 @@ function updateSource() {
     : k === "ca" ? (fc ? "Radar-Vorhersage (Environment Canada)" : "Radar gemessen (Environment Canada)")
     : k === "us" ? "Radar gemessen (NOAA)"
     : k === "rtile" ? (RAIN_EU ? (shown.ref ? "Radar-Vorhersage (rainy, aus EUMETNET OPERA)" : "Radar gemessen (EUMETNET OPERA, NOAA)")
-      : DE_ONLY ? (shown.ref ? "Radar-Vorhersage (DWD)" : "Radar gemessen (DWD)")
+      : DE_ONLY ? (shown.ref ? (FC_OWN ? "Radar-Vorhersage (rainy, aus DWD-Radar)" : "Radar-Vorhersage (DWD)") : "Radar gemessen (DWD)")
       : shown.ref ? "Radar-Vorhersage (DWD in Deutschland, sonst rainy)" : "Radar gemessen (DWD, EUMETNET OPERA, NOAA)")
     : k === "ctile" ? (shown.fc ? `Satellit hochgerechnet + Wettermodell (Bild von ${fmtTime(state.cloudRef)})` : `Satellit (EUMETSAT) · Stand ${fmtTime(f.map.ts)}`)
     : f.map.kind === "sat" ? `Satellit (${state.satRegion === "meteosat" ? "EUMETSAT" : "NOAA GOES / NASA"}) · Stand ${fmtTime(f.map.ts)}`
@@ -2357,6 +2359,7 @@ function showSettings() {
     <div class="row"><span>Farben</span>${seg("theme", [["auto", "Auto"], ["light", "Hell"], ["dark", "Dunkel"]])}</div>
     ${DE_ONLY ? "" : `<div class="row"><span>Wolken</span>${seg("sat", [["clouds", "Standard"], ["photo", "Satellitenfoto"]])}</div>
     <div class="row"><span>Regen</span>${seg("rain", [["mix", "DWD + Europa"], ["eu", "Nur Europa"]])}</div>`}
+    ${DE_ONLY && API_BASE ? `<div class="row"><span>Vorhersage</span>${seg("fc", [["dwd", "DWD"], ["own", "rainy (Test)"]])}</div>` : ""}
     <div class="actions"><span></span><button class="done">Fertig</button></div>`;
   const update = () => { saveAlerts(a); syncAlerts(a).catch((e) => console.warn("alerts", e)); };
   bindAlertControls(card, a, update);
@@ -2369,8 +2372,8 @@ function showSettings() {
     a.places.splice(+b.dataset.rm, 1);
     update(); renderPlace(); showSettings();
   }));
-  card.querySelectorAll("[data-sat], [data-theme], [data-rain], [data-design]").forEach((b) => b.addEventListener("click", () => {
-    const key = ["sat", "theme", "rain", "design"].find((k) => b.dataset[k] != null), next = { ...MAP_STYLE, [key]: b.dataset[key] };
+  card.querySelectorAll("[data-sat], [data-theme], [data-rain], [data-fc], [data-design]").forEach((b) => b.addEventListener("click", () => {
+    const key = ["sat", "theme", "rain", "fc", "design"].find((k) => b.dataset[k] != null), next = { ...MAP_STYLE, [key]: b.dataset[key] };
     if (next[key] === MAP_STYLE[key]) return;
     try { localStorage.setItem("rainy.style", JSON.stringify(next)); } catch {}
     location.reload();
