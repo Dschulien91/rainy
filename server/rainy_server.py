@@ -26,7 +26,7 @@ Endpoints (all CORS-enabled, cache headers suitable for a CDN):
   GET /api/radar/mask?bbox=&width=&height=     -> PNG, opaque where radar coverage exists (for the "no data" hatching)
   Seamless map tiles for the app (server/mosaic.py; DWD + OPERA + NOAA + satellite in one, CDN-cacheable):
   GET /api/thunder/areas, /api/thunder/point?lat=&lon=, /api/lightning -> DWD thunderstorm warnings, MTG lightning
-  GET /api/rain/frames, /api/rain/point?lat=&lon=[&src=eu], /tiles/rain/<key>/<ts>/<z>/<x>/<y>.png, /tiles/cloud/...
+  GET /api/rain/frames, /api/rain/point?lat=&lon=[&src=eu] (+ "covered": inside the shown radar area), /tiles/rain/<key>/<ts>/<z>/<x>/<y>.png, /tiles/cloud/...
       (/tiles/raineu/... and src=eu: Europe composite only, without the DWD source in Germany - user-selectable)
   Clouds for the "sunny" map (server/clouds.py, Europe, EUMETSAT GeoColour + nowcast):
   GET /api/cloud/frames                        -> {"frames": [{"ts", "fc"}], "ref": ms}
@@ -77,7 +77,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v0.47"
+VERSION = "server-v0.48"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model; no Europe/USA
 # radar, no clouds - their loops are not started); "full" = everything.
 EDITION = os.environ.get("EDITION", "de")
@@ -907,7 +907,7 @@ class Handler(BaseHTTPRequestHandler):
                 ck = (MOSAIC.key(), lat, lon, de)  # one answer per ~1 km square and radar run, shared by all users
                 body = POINT_CACHE.get(ck)
                 if body is None:
-                    body = {"key": ck[0], "series": MOSAIC.rain_point(lat, lon, de)}
+                    body = {"key": ck[0], "series": MOSAIC.rain_point(lat, lon, de), "covered": MOSAIC.covered(lat, lon)}
                     POINT_CACHE[ck] = body
                     while len(POINT_CACHE) > 20000:
                         POINT_CACHE.pop(next(iter(POINT_CACHE)))

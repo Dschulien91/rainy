@@ -22,6 +22,9 @@ opening the app to users; until then first requests per region can take 10-30 s.
 nowcast and the cloud map ("sunny"); it needs about 8 GB more RAM. The app shows the matching edition by itself
 (`?edition=full` only for testing).
 
+`BORDER_KM` (default 50): how far beyond the German border the DWD radar is shown without hatching (always only as far
+as the DWD radars reach). Places in that zone get the radar timeline too; beyond it the app uses the weather model.
+
 ## Requirements
 
 - Linux server, Germany edition: **4 vCPU, 8 GB RAM, 160 GB SSD** (e.g. Hetzner CPX31). The radar server needs ~0.6 GB;

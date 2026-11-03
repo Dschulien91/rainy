@@ -315,7 +315,7 @@
 <script src="vendor/leaflet-maplibre-gl.js"></script>
 <script>
 "use strict";
-const VERSION = "v0.65";
+const VERSION = "v0.66";
 const FALLBACK = { lat: 53.5511, lon: 9.9937, name: "Hamburg" };
 const DWD_WMS = "https://maps.dwd.de/geoserver/dwd/wms";
 const EUM_WMS = "https://view.eumetsat.int/geoserver/ows";
@@ -1298,8 +1298,9 @@ async function loadRadarPoint(loc) {
   const now = Date.now(), iso = (t) => new Date(t).toISOString().slice(0, 19) + "Z";
   state.radarPoint = [];
   const cc = await countryOf(loc);
-  // Germany edition: radar only in Germany; elsewhere the timeline falls back to the weather model
-  if (DE_ONLY && cc && cc !== "DE") return;
+  // Germany edition: radar in Germany and the border zone the map shows (the server answers "covered");
+  // elsewhere the timeline falls back to the weather model
+  if (DE_ONLY && cc && cc !== "DE" && !API_BASE) return;
   // DWD (via Bright Sky) only for places in Germany: Bright Sky answers "0 mm" far beyond the reach of the German
   // radars (e.g. Wroclaw, Amsterdam), which would show rain as dry. Elsewhere our server's OPERA radar is used.
   // Without our server, DWD remains the only European source, so then the rough Germany box decides.
@@ -1308,7 +1309,8 @@ async function loadRadarPoint(loc) {
     try {
       await serverReady;
       const d = await getJSON(`${API_BASE}/api/rain/point?lat=${loc.lat.toFixed(2)}&lon=${loc.lon.toFixed(2)}${RAIN_EU ? "&src=eu" : ""}`);
-      state.radarPoint = (d.series || []).map((r) => ({ ts: r.ts, mmh: r.mmh, ref: r.fc ? 1 : null, kind: r.kind }));
+      state.radarPoint = DE_ONLY && d.covered === false ? [] :
+        (d.series || []).map((r) => ({ ts: r.ts, mmh: r.mmh, ref: r.fc ? 1 : null, kind: r.kind }));
       state.radarSource = "rtile"; state.tileKey.rain = d.key;
     } catch { state.radarPoint = []; }
   }

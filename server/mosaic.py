@@ -7,7 +7,8 @@ Every tile URL carries a key of the data runs it was made from, so a URL never c
 
 Rain mosaic (5 min steps, last hour + 2 h):
   Germany  - DWD radar composite with DWD's official 2 h nowcast (RV), fetched here once for all users;
-             its weight fades from 1 inside Germany to 0 at FADE_KM beyond the border, so there is no seam
+             shown in full up to BORDER_KM beyond the border (and only where the DWD radars reach), then fading
+             to 0 over FADE_KM, so there is no seam
   Europe   - EUMETNET OPERA + our nowcast (rainy_server Region "eu")
   USA      - NOAA + our nowcast (Region "us")
   elsewhere on the Meteosat disc - EUMETSAT H SAF satellite estimate (Region "sat"), drawn fainter
@@ -43,6 +44,11 @@ PRERENDER_ZOOMS = range(4, 9)  # Germany at zoom 4-8: ~120 tiles per frame
 CACHE_TILES = 12000            # in-process tile cache (~1-3 KB each); holds all pre-rendered tiles of a run
 TILE = 256
 FADE_KM = 30.0
+# The DWD composite reaches 50-190 km beyond the border (Denmark ~55 km, Netherlands ~130 km, Prague ~190 km, measured
+# 03.11.). BORDER_KM of it is shown like Germany (no hatching); 0 = Germany only.
+BORDER_KM = float(os.environ.get("BORDER_KM", "50"))
+COVER_ERODE_KM = 10.0  # stay clear of the ragged outer edge of the radar range
+GERMANY_BOX = (5.87, 47.27, 15.04, 55.06)  # lon0, lat0, lon1, lat1
 
 
 SPECKLE_PX = 10        # isolated echoes below ~10 km2 on the 1 km DWD grid ...
@@ -110,15 +116,13 @@ class GermanyDwd:
         self.rgb = np.array([[int(h[i:i + 2], 16) for i in (0, 2, 4)] for h in self.CLASSES], np.int32)
         self.val = np.array(list(self.CLASSES.values()), np.float32)
         self.rv_maps = None
-        self.weight = self._germany_weight()
-        # Germany for the hatching: the outline leaves estuaries (Elbe, Weser) and lagoons out as sea, so close
-        # gaps up to ~10 km - inland waters must not look like "no data"
-        inside = (self.weight > 0.99).astype(np.uint8)
-        self.inside = cv2.morphologyEx(inside, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))).astype(np.float32)
+        self.border_km = self._border_km()
+        self.covered = None   # where the DWD radars reach (from the first RV file); until then: everywhere
+        self._set_area()
         self.pool = ThreadPoolExecutor(4)
 
-    def _germany_weight(self):
-        """1 inside Germany, fading to 0 at FADE_KM outside (Natural Earth outline, public domain)."""
+    def _border_km(self):
+        """km beyond the German border per pixel (0 inside; Natural Earth outline, public domain)."""
         with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "germany.json"), encoding="utf-8") as f:
             polys = json.load(f)["coordinates"]
         mask = np.zeros((self.ny, self.nx), np.uint8)
@@ -127,8 +131,28 @@ class GermanyDwd:
             col, row = self.to_pixels(*merc(ring[:, 0], ring[:, 1]))
             cv2.fillPoly(mask, [np.stack([col, row], 1).round().astype(np.int32)], 1)
         dist_px = cv2.distanceTransform((1 - mask).astype(np.uint8), cv2.DIST_L2, 5)
-        km = dist_px * self.CELL * np.cos(np.radians(51.0)) / 1000.0
-        return np.clip(1.0 - km / FADE_KM, 0.0, 1.0).astype(np.float32)
+        return (dist_px * self.CELL * np.cos(np.radians(51.0)) / 1000.0).astype(np.float32)
+
+    def _set_area(self):
+        """weight: 1 up to BORDER_KM beyond the border, fading to 0 over FADE_KM, 0 where the radars do not reach.
+        inside (no hatching): the full-weight area."""
+        weight = np.clip(1.0 - (self.border_km - BORDER_KM) / FADE_KM, 0.0, 1.0)
+        if self.covered is not None:
+            weight = np.minimum(weight, self.covered)
+        self.weight = weight.astype(np.float32)
+        # the outline leaves estuaries (Elbe, Weser) and lagoons out as sea, so close gaps up to ~10 km - inland
+        # waters must not look like "no data"
+        inside = (self.weight > 0.99).astype(np.uint8)
+        self.inside = cv2.morphologyEx(inside, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))).astype(np.float32)
+        if self.covered is not None:  # Germany itself always counts as covered
+            self.inside = np.maximum(self.inside, (self.border_km <= 0.5).astype(np.float32))
+
+    def _set_coverage(self, valid, maps):
+        """Radar range from an RV file's no-data mask, eroded by COVER_ERODE_KM and softened over FADE_KM."""
+        v = cv2.remap(valid.astype(np.float32), *maps, cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        km_in = cv2.distanceTransform((v > 0.5).astype(np.uint8), cv2.DIST_L2, 5) * self.KM_PER_PX
+        self.covered = np.clip((km_in - COVER_ERODE_KM) / FADE_KM, 0.0, 1.0).astype(np.float32)
+        self._set_area()
 
     def to_pixels(self, x, y):
         x0, y0, x1, y1 = self.BBOX
@@ -188,6 +212,8 @@ class GermanyDwd:
                         self.rv_maps = dwd_grid_maps(f, self)
                     w = f["dataset1/data1/what"].attrs
                     raw = f["dataset1/data1/data"][:]
+                    if self.covered is None and BORDER_KM > 0:
+                        self._set_coverage(raw != w["nodata"], self.rv_maps)
                     mm5 = despeckle(np.where(raw == w["nodata"], 0.0, np.maximum(raw * float(w["gain"]) + float(w["offset"]), 0.0)).astype(np.float32))
                 g = cv2.remap(mm5 * 12.0 * self.GAIN_RV, *self.rv_maps, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
                 out[run + lead * 60_000] = g.astype(np.float16)
@@ -332,6 +358,14 @@ class Mosaic:
         obs = [t for t, _ in self.de.obs.items()] if self.de.obs else []
         return self.ptype.kind(ts, X, Y, forecast=not obs or ts > max(obs))
 
+    def covered(self, lat, lon):
+        """Inside the area the map shows without hatching (Germany edition: Germany + BORDER_KM within radar range)."""
+        if not self.de_only:
+            return True
+        col, row = (int(round(float(v))) for v in self.de.to_pixels(*merc(lon, lat)))
+        ok = 0 <= row < self.de.ny and 0 <= col < self.de.nx
+        return bool(ok and self.de.inside[row, col] > 0.5)
+
     def rain_point(self, lat, lon, use_de=True):
         """Same composite as the map, mean over ~3 km around the place."""
         cx, cy = merc(lon, lat)
@@ -357,7 +391,9 @@ def prerender_loop(mosaic, log):
             key = mosaic.key()
             if key != done and mosaic.de.ref:
                 started, n = time.time(), 0
-                (x0, x1), (y0, y1) = merc(np.array([5.5, 15.4]), np.array([47.0, 55.3]))  # Germany + ~30 km
+                m = (BORDER_KM + FADE_KM) / 111.0  # Germany + the shown border zone
+                lon0, lat0, lon1, lat1 = GERMANY_BOX
+                (x0, x1), (y0, y1) = merc(np.array([lon0 - m * 1.6, lon1 + m * 1.6]), np.array([lat0 - m, lat1 + m]))
                 now = time.time() * 1000
                 for f in sorted(mosaic.frames(), key=lambda f: abs(f["ts"] - now)):  # frames near "now" first
                     for z in PRERENDER_ZOOMS:
