@@ -36,6 +36,7 @@ def main():
                         t = tot[(th, name, r["lead"])]
                         t[0] += v[0]; t[1] += v[1]; t[2] += v[2]
                 runs[(r.get("variant", "dwd"), r["lead"])].add(r["ref"])
+    # eigene = what "rainy (Test)" shows (S-PROG + model in the 2nd hour); o.Mod = same without the model (shadow)
     leads = sorted({lead for _, lead in runs})
     if not leads:
         print("no verified forecasts yet")
@@ -43,7 +44,7 @@ def main():
     print(f"Vorhersage vs. spaeteres DWD-Radarbild (~9 km Toleranz), letzte {a.hours:.0f} h   CSI (POD/FAR)")
     for th, name in (("0.1", "nass >= 0.1 mm/h"), ("1.0", "Regen >= 1 mm/h")):
         print(f"  {name}")
-        for kind, label in (("dwd", "DWD    "), ("own", "eigene "), ("pers", "bleibt ")):
+        for kind, label in (("dwd", "DWD    "), ("own", "eigene "), ("sprog", "  o.Mod"), ("pers", "bleibt ")):
             if not any(tot[(th, kind, lead)] != [0, 0, 0] for lead in leads):
                 continue
             cells = []
@@ -51,7 +52,7 @@ def main():
                 c, p, f = csi(*tot[(th, kind, lead)])
                 cells.append(f"+{lead}: {c:.2f} ({p:.2f}/{f:.2f})")
             print(f"    {label} " + " | ".join(cells))
-    for v in ("dwd", "own"):
+    for v in ("dwd", "own", "sprog"):
         if any(runs[(v, l)] for l in leads):
             print(f"  Laeufe {v}: " + ", ".join(f"+{l}: {len(runs[(v, l)])}" for l in leads))
 

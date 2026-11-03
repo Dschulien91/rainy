@@ -55,6 +55,7 @@ class GridVerify:
         with de.lock:
             ref, obs, fc = de.ref, dict(de.obs), dict(de.fc)
             own_ref, own = de.own_ref, dict(de.fc_own)
+            shadow = {k: dict(v) for k, v in getattr(de, "fc_shadow", {}).items()}
         if ref != self.done_ref and ref in obs:
             self.mask = _down(de.inside, self.shape) > 0.5  # Germany + border zone (radar range known after 1st run)
             self.issued[ref] = _down(obs[ref], self.shape)
@@ -65,9 +66,10 @@ class GridVerify:
             self.done_ref = ref
         if own_ref is not None and own_ref != self.done_own:
             for lead in LEADS:
-                g = own.get(own_ref + lead * 60_000)
-                if g is not None:
-                    self.pending[("own", own_ref, lead)] = _down(g, self.shape)
+                for name, grids in [("own", own)] + list(shadow.items()):  # shadows: variants being tested
+                    g = grids.get(own_ref + lead * 60_000)
+                    if g is not None:
+                        self.pending[(name, own_ref, lead)] = _down(g, self.shape)
             self.done_own = own_ref
         lines = []
         for (variant, r, lead), g in list(self.pending.items()):

@@ -113,7 +113,7 @@ class GermanyDwd:
         self.nx, self.ny = int(round((x1 - x0) / self.CELL)), int(round((y1 - y0) / self.CELL))
         self.lock = threading.Lock()
         self.obs, self.fc, self.ref = {}, {}, None
-        self.fc_own, self.own_ref = {}, None  # our own nowcast (rainy_server.OwnNowcast) for the same runs
+        self.fc_own, self.own_ref, self.fc_shadow = {}, None, {}  # our own nowcast (rainy_server.OwnNowcast) for the same runs
         self.rgb = np.array([[int(h[i:i + 2], 16) for i in (0, 2, 4)] for h in self.CLASSES], np.int32)
         self.val = np.array(list(self.CLASSES.values()), np.float32)
         self.rv_maps = None

@@ -78,7 +78,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v0.50"
+VERSION = "server-v0.51"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model; no Europe/USA
 # radar, no clouds - their loops are not started); "full" = everything.
 EDITION = os.environ.get("EDITION", "de")
@@ -447,16 +447,40 @@ def sprog_nowcast(seq, mot, steps, down):
 
 
 # ---------- our own nowcast for Germany ----------
+class DeModelArea:
+    """The German radar grid as a ModelRain region: model points only where the map shows the radar."""
+    name, MODEL_DEG = "de_model", 0.05  # ICON-D2 has ~2.2 km; 0.05 deg (~4-5 km) is plenty for blending
+
+    def __init__(self, de):
+        self.de, self.KM_PER_PX = de, de.KM_PER_PX
+        self.to_ll = Transformer.from_crs("EPSG:3857", "EPSG:4326", always_xy=True)
+
+    def latest(self):
+        return np.where(self.de.weight > 0, 0.0, NODATA).astype(np.float32) if self.de.ref else None
+
+    def to_pixels(self, x, y):
+        return self.de.to_pixels(x, y)
+
+    def pixel_lonlat(self, col, row):
+        x0, _, _, y1 = self.de.BBOX
+        return self.to_ll.transform(x0 + (np.asarray(col) + 0.5) * self.de.CELL, y1 - (np.asarray(row) + 0.5) * self.de.CELL)
+
+
 class OwnNowcast:
     """Our own 2 h forecast on the DWD radar analyses, next to DWD's (RV) - selectable in the app, scored by
     fcverify.py against the later radar image just like DWD's. pySTEPS S-PROG: motion per region (Lucas-Kanade
     optical flow, so showers in different areas can move in different directions) and each spatial scale decays at
     its own observed rate (small showers and drizzle fade, large rain areas persist) - DWD's RV only shifts the
-    image. Inputs: analyses 10/5/0 min old (S-PROG) and 30/15/0 min old (motion)."""
+    image. Inputs: analyses 10/5/0 min old (S-PROG) and 30/15/0 min old (motion).
+    Second hour: the DWD model (ICON-D2, 15 min, local Open-Meteo) is mixed in like DWD's own SINFONY/INTENSE does
+    (Region.blend + blend_new_cells: radar only for the first hour, then fading towards the model; showers the model
+    forms away from radar rain are added). The pure S-PROG forecast is kept as shadow "sprog" for fcverify, so the
+    effect of the model is measured, not assumed."""
     DOWN = 2  # ~2 km
 
     def __init__(self, de):
         self.de, self.done = de, None
+        self.model = ModelRain(DeModelArea(de))
 
     def step(self):
         de = self.de
@@ -472,10 +496,14 @@ class OwnNowcast:
             return
         started = time.time()
         fc = sprog_nowcast([g.astype(np.float32) for g in seq], [g.astype(np.float32) for g in mot], FC_STEPS, self.DOWN)
-        grids = {ref + (i + 1) * STEP_MS: g for i, g in enumerate(fc)}
+        pure = {ref + (i + 1) * STEP_MS: g for i, g in enumerate(fc)}
+        mixed = [g.astype(np.float32) for g in fc]
+        mixed = blend_new_cells(self.model, self.model.blend(mixed, ref), ref, km_per_px=de.KM_PER_PX)
+        grids = {ref + (i + 1) * STEP_MS: g.astype(np.float16) for i, g in enumerate(mixed)}
         with de.lock:
             if de.ref == ref:
                 de.fc_own, de.own_ref = grids, ref
+                de.fc_shadow = {"sprog": pure}  # scored by fcverify only
         self.done = ref
         log(f"[{datetime.now():%H:%M:%S}] own nowcast: run {datetime.fromtimestamp(ref / 1000, timezone.utc):%H:%M}Z in {time.time() - started:.0f}s")
 
@@ -1059,6 +1087,7 @@ if __name__ == "__main__":
     threading.Thread(target=GRID_VERIFY.loop, daemon=True).start()
     if EDITION == "de":
         threading.Thread(target=OWN.loop, daemon=True).start()
+        threading.Thread(target=model_loop, args=(OWN.model,), daemon=True).start()
     threading.Thread(target=mosaic.prerender_loop, args=(MOSAIC, log), daemon=True).start()
     threading.Thread(target=RECORDER.loop, daemon=True).start()
     threading.Thread(target=THUNDER.loop, daemon=True).start()
