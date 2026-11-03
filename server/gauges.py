@@ -24,10 +24,11 @@ import numpy as np
 
 CDC = "https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/10_minutes/precipitation/now/"
 # Polling: ~1350 files from the same DWD host as the radar. Single files now and then take 15 s, and many at once
-# got connections reset. So a slow sweep over all stations (2 at a time, about once an hour) finds new drizzle, and
-# a second loop re-reads only the damp stations every 10 min.
+# got connections reset. So a sweep over all stations (2 at a time, ~2.5 min when DWD answers quickly) starts every
+# 15 min - about 1.5 requests/s on average - and a second loop re-reads only the damp stations every 10 min. Hourly
+# sweeps were too slow on 03.11.: coastal drizzle (Flensburg, Ruegen) ran for 1.5 h before a sweep could see it.
 EVERY_S = 600
-SWEEP_EVERY_S = 3600
+SWEEP_EVERY_S = 900
 WORKERS = 2
 MAX_AGE_MIN = 70     # newest value older than this (station late or broken): ignore the station
 MIN_SUM_MM = 0.07    # last two 10-min values together (~0.2 mm/h)
