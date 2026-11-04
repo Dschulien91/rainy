@@ -78,7 +78,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v0.51"
+VERSION = "server-v0.52"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model; no Europe/USA
 # radar, no clouds - their loops are not started); "full" = everything.
 EDITION = os.environ.get("EDITION", "de")
@@ -420,25 +420,26 @@ def _coarse(g, down):
 SPROG_LOCK = threading.Lock()  # S-PROG needs a lot of memory: never run two regions at the same time
 
 
-def sprog_nowcast(seq, mot, steps, down):
+def sprog_nowcast(seq, mot, steps, down, thr=0.1):
     """pySTEPS S-PROG: like `nowcast`, but each spatial scale decays at its own observed rate (small showers fade
     fast, large rain areas persist). seq: frames 10/5/0 min old; mot: frames 30/15/0 min old (for the motion).
     Runs on a grid `down` times coarser and is scaled back up. Backtests: equal to `nowcast` for widespread rain,
     clearly better for showers in the second hour (user-view CSI 60-120 min, USA: 0.42 vs 0.35)."""
     last = seq[-1].astype(np.float32)
     ny, nx = last.shape
-    dbz = lambda gs: ps_transformation.dB_transform(np.stack(gs), threshold=0.1, zerovalue=-15.0)[0]
+    zero = 10 * math.log10(thr) - 5.0  # dB value for "dry", below the threshold
+    dbz = lambda gs: ps_transformation.dB_transform(np.stack(gs), threshold=thr, zerovalue=zero)[0]
     m = [_coarse(g, down) for g in mot]
     velocity = ps_motion.get_method("LK")(dbz([np.where(g < 0, np.nan, g) for g in m])) / 3.0  # per 15 min -> per 5 min
     s = [_coarse(g, down) for g in seq]
     with SPROG_LOCK, contextlib.redirect_stdout(io.StringIO()):  # one region at a time; pySTEPS prints long tables
         fc = ps_nowcasts.get_method("sprog")(dbz([np.where(g < 0, 0, g) for g in s]), velocity, steps,
-                                             precip_thr=-10.0,  # 0.1 mm/h in dB
+                                             precip_thr=10 * math.log10(thr),  # threshold in dB
                                              n_cascade_levels=6, num_workers=min(4, os.cpu_count() or 1), probmatching_method="cdf")
     out = []
     for i in range(len(fc)):  # frame by frame: converting all at once would copy the whole stack several times
         g = np.where(np.isfinite(fc[i]), 10.0 ** (fc[i].astype(np.float32) / 10.0), 0.0).astype(np.float32)  # dB -> mm/h
-        g[g < 0.1] = 0  # below 0.1 mm/h counts as dry, as in pySTEPS' inverse dB transform
+        g[g < thr] = 0  # below the threshold counts as dry, as in pySTEPS' inverse dB transform
         g = cv2.resize(g, (nx, ny), interpolation=cv2.INTER_LINEAR) if down > 1 else g
         g[g < 0.05] = 0
         g[last < 0] = NODATA
@@ -476,7 +477,11 @@ class OwnNowcast:
     (Region.blend + blend_new_cells: radar only for the first hour, then fading towards the model; showers the model
     forms away from radar rain are added). The pure S-PROG forecast is kept as shadow "sprog" for fcverify, so the
     effect of the model is measured, not assumed."""
-    DOWN = 2  # ~2 km
+    DOWN = 2    # ~2 km (1 km: +0.01..0.03 CSI for twice the CPU - not worth it yet)
+    # wet threshold for S-PROG: 0.1 (pySTEPS default) turned light drizzle into "dry" and missed most of it;
+    # server/tune_own.py, 8 DWD runs 03./04.11. (drizzle), CSI +15/+30/+60/+90: 0.1 -> 0.38/0.24/0.13/0.01,
+    # 0.03 -> 0.72/0.50/0.22/0.04, DWD RV 0.66/0.40/0.23/0.09
+    THR = 0.03
 
     def __init__(self, de):
         self.de, self.done = de, None
@@ -495,7 +500,8 @@ class OwnNowcast:
         if any(g is None for g in seq + mot):
             return
         started = time.time()
-        fc = sprog_nowcast([g.astype(np.float32) for g in seq], [g.astype(np.float32) for g in mot], FC_STEPS, self.DOWN)
+        fc = sprog_nowcast([g.astype(np.float32) for g in seq], [g.astype(np.float32) for g in mot], FC_STEPS, self.DOWN,
+                           thr=self.THR)
         pure = {ref + (i + 1) * STEP_MS: g for i, g in enumerate(fc)}
         mixed = [g.astype(np.float32) for g in fc]
         mixed = blend_new_cells(self.model, self.model.blend(mixed, ref), ref, km_per_px=de.KM_PER_PX)
