@@ -24,7 +24,7 @@ import io
 import threading
 import time
 import zipfile
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
 from datetime import datetime, timezone
 
 import cv2
@@ -38,6 +38,7 @@ CDC = "https://opendata.dwd.de/climate_environment/CDC/observations_germany/clim
 EVERY_S = 600
 SWEEP_EVERY_S = 900
 WORKERS = 2
+READ_DEADLINE_S = 600  # a full sweep normally takes 150-400 s
 MAX_AGE_MIN = 70     # newest value older than this (station late or broken): ignore the station
 MIN_SUM_MM = 0.07    # last two 10-min values together (~0.2 mm/h)
 RADIUS_KM = 6.0      # drizzle disc around a wet gauge
@@ -60,7 +61,6 @@ class GaugeDrizzle:
         self.lock = threading.Lock()
         self.stations = []   # (id, lat, lon)
         self.latest = {}     # id -> (end time of the newest value in ms, [previous, newest] mm)
-        self.pool = ThreadPoolExecutor(WORKERS)
 
     def _station_list(self):
         text = self.fetch(f"{CDC}zehn_now_rr_Beschreibung_Stationen.txt", timeout=60).decode("latin-1")
@@ -97,7 +97,17 @@ class GaugeDrizzle:
         return ts, [v for _, v in vals]
 
     def _read(self, sids):
-        got = dict(zip(sids, self.pool.map(self._last_two, sids)))
+        # a fresh pool per read with an overall deadline: on 04.11. one download hung for hours (no answer, no
+        # timeout) and blocked every later sweep; now a stuck download is left behind and the next sweep runs
+        pool = ThreadPoolExecutor(WORKERS)
+        futs = {pool.submit(self._last_two, sid): sid for sid in sids}
+        got = {}
+        try:
+            for f in as_completed(futs, timeout=READ_DEADLINE_S):
+                got[futs[f]] = f.result()
+        except TimeoutError:
+            self.log(f"gauges: {len(sids) - len(got)} stations did not answer within {READ_DEADLINE_S}s, skipped")
+        pool.shutdown(wait=False, cancel_futures=True)
         with self.lock:
             for sid, v in got.items():
                 if v is None:
