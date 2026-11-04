@@ -242,8 +242,9 @@ class GermanyDwd:
             return 0
         obs_t = [ref - k * STEP_MS for k in range(12, -1, -1)]
         got = self._load_rv(ref)
-        if getattr(self, "drizzle", None) is not None:  # gauges.py: drizzle the gauges measure below the radar beam
-            self.drizzle.apply(got, ref)
+        if getattr(self, "drizzle", None) is not None:  # gauges.py: drizzle the gauges measure below the radar beam,
+            self.drizzle.apply(got, ref)                # and weak echoes aloft that never reach the dry gauges
+            self.vetoed = self.drizzle.veto(got, ref, self.obs.get(ref - 30 * 60_000))
         obs = {t: g for t, g in self.obs.items() if t in obs_t}
         obs[ref] = got[ref]
         n = 25

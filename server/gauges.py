@@ -12,6 +12,13 @@ amounts without them. Backtest 30.10. 00-07 UTC: only Saxon stations qualified (
 WetterOnline showed drizzle; none of the trace stations in the north. Where the radar is already wet within
 NEAR_KM, the radar wins. The drizzle is painted as a small disc around the gauge (no motion: this kind of drizzle
 stays put) and fades out over the first FADE_MIN of the forecast.
+
+The other way round (veto): weak radar echoes that do not reach the ground. Radar beams over the Alps or under dry
+low-level air see precipitation aloft that evaporates on the way down (Berchtesgaden/Hallein 04.11.: 0.1-0.3 mm/h on
+the radar for 1.5 h, all 16 gauges there 0.0; MV and Altmark bands 03.11.: 0 of 1348 gauges damp). WetterOnline
+does not show these. Weak echoes (< VETO_MAX mm/h) are removed where at least VETO_MIN_DRY gauges within VETO_KM
+measured exactly 0 in both of their last values and no gauge there is damp - but only where the echo was already
+there VETO_PERSIST_MIN earlier, because the gauges report 20-40 min late: a rain front that has just arrived stays.
 """
 import io
 import threading
@@ -20,6 +27,7 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
+import cv2
 import numpy as np
 
 CDC = "https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/10_minutes/precipitation/now/"
@@ -39,6 +47,11 @@ MAX_MMH = 1.0        # drizzle, not a downpour: cap what one gauge can paint
 MAX_10MIN_MM = 0.3   # more than this in 10 min with a dry radar is a gauge fault, not drizzle (Moos 30.10.: 7 mm/h)
 MAX_HEIGHT_M = 1000  # summit gauges (Fichtelberg, Brocken) collect fog inside the cloud: not drizzle around them
 FADE_MIN = 60
+VETO_KM = 15.0
+VETO_MIN_DRY = 2
+VETO_MAX = 0.5       # mm/h: only weak echoes; real showers are stronger and the gauges would show them soon
+VETO_PERSIST_MIN = 30
+VETO_MAX_AGE_MIN = 150  # the "now" files are 20-110 min behind (04.11. morning: 105 min); dry air changes slowly
 
 
 class GaugeDrizzle:
@@ -105,6 +118,44 @@ class GaugeDrizzle:
             if sid in where and now - ts <= MAX_AGE_MIN * 60_000 and a > 0 and b > 0 and a + b >= MIN_SUM_MM and max(a, b) <= MAX_10MIN_MM:
                 out.append((sid, *where[sid], min((a + b) * 3.0, MAX_MMH)))
         return out
+
+    def veto(self, grids, ref, before):
+        """Remove weak echoes over dry gauges from the analysis (ref) and the forecast frames, in place.
+        before: the analysis VETO_PERSIST_MIN earlier (or None: no veto). Returns the number of pixels removed."""
+        if before is None or ref not in grids:
+            return 0
+        now = time.time() * 1000
+        where = {sid: (lat, lon) for sid, lat, lon in self.stations}
+        with self.lock:
+            items = list(self.latest.items())
+        dry = np.zeros(grids[ref].shape, np.float32)
+        damp = np.zeros(grids[ref].shape, np.uint8)
+        for sid, (ts, vals) in items:
+            if sid not in where or now - ts > VETO_MAX_AGE_MIN * 60_000:
+                continue
+            col, row = (int(round(float(v))) for v in self.de.to_pixels(*self.merc(where[sid][1], where[sid][0])))
+            if 0 <= row < dry.shape[0] and 0 <= col < dry.shape[1]:
+                if max(vals) > 0:
+                    damp[row, col] = 1
+                else:
+                    dry[row, col] += 1
+        if not dry.any():
+            return 0
+        r = int(round(VETO_KM / self.de.KM_PER_PX))
+        disc = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
+        n_dry = cv2.filter2D(dry, -1, disc.astype(np.float32), borderType=cv2.BORDER_CONSTANT)
+        any_damp = cv2.dilate(damp, disc) > 0
+        was_wet = cv2.dilate((np.asarray(before, np.float32) >= 0.05).astype(np.uint8), np.ones((7, 7), np.uint8)) > 0
+        area = (n_dry >= VETO_MIN_DRY - 0.5) & ~any_damp & was_wet
+        removed = 0
+        for ts, g in grids.items():
+            if ts < ref:
+                continue
+            weak = area & (np.asarray(g, np.float32) < VETO_MAX)
+            if ts == ref:
+                removed = int((weak & (np.asarray(g, np.float32) > 0)).sum())
+            g[weak] = 0
+        return removed
 
     def apply(self, grids, ref):
         """Add the gauge drizzle to the radar analysis (ref) and the forecast frames (faded), in place."""

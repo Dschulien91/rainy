@@ -78,7 +78,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v0.52"
+VERSION = "server-v0.53"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model; no Europe/USA
 # radar, no clouds - their loops are not started); "full" = everything.
 EDITION = os.environ.get("EDITION", "de")
@@ -930,7 +930,7 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/health":
                 info = {name: {"frames": len(r.frames()[0]), "ref": r.ref} for name, r in REGIONS.items()}
                 info["clouds"] = {"frames": len(CLOUDS.frames()[0]), "ref": CLOUDS.ref}
-                info["de"] = {"frames": len(DE.frames()[0]), "ref": DE.ref}
+                info["de"] = {"frames": len(DE.frames()[0]), "ref": DE.ref, "vetoed_px": getattr(DE, "vetoed", 0)}
                 info["ptype"] = {"frames": len(PTYPE.grids), "ref": max(PTYPE.grids) if PTYPE.grids else None}
                 body = {"version": VERSION, "edition": EDITION, "regions": info, "openmeteo": openmeteo_available(), "rss_mb": rss_mb()}
                 return self.send(200, json.dumps(body).encode(), "application/json", 10)
