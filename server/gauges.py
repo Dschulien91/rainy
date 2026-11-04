@@ -82,9 +82,12 @@ class GaugeDrizzle:
         head = [h.strip() for h in rows[0].split(";")]
         k, dur, ind = head.index("RWS_10"), head.index("RWS_DAU_10"), head.index("RWS_IND_10")
         vals = []
-        for r in rows[-2:]:
+        for r in rows[1:][-2:]:  # a file with a single value (new station, new day) must not hand on its header
             p = r.split(";")
-            mm = float(p[k])
+            try:
+                mm = float(p[k])
+            except (ValueError, IndexError):
+                return None
             if mm < 0 or (mm > 0 and (float(p[dur]) <= 0 or int(p[ind]) != 1)):  # missing, or no "it rained" flag
                 return None
             vals.append((p[1].strip(), mm))
