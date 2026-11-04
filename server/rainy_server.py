@@ -420,7 +420,7 @@ def _coarse(g, down):
 SPROG_LOCK = threading.Lock()  # S-PROG needs a lot of memory: never run two regions at the same time
 
 
-def sprog_nowcast(seq, mot, steps, down, thr=0.1):
+def sprog_nowcast(seq, mot, steps, down, thr=0.1, probmatch="cdf"):
     """pySTEPS S-PROG: like `nowcast`, but each spatial scale decays at its own observed rate (small showers fade
     fast, large rain areas persist). seq: frames 10/5/0 min old; mot: frames 30/15/0 min old (for the motion).
     Runs on a grid `down` times coarser and is scaled back up. Backtests: equal to `nowcast` for widespread rain,
@@ -435,7 +435,7 @@ def sprog_nowcast(seq, mot, steps, down, thr=0.1):
     with SPROG_LOCK, contextlib.redirect_stdout(io.StringIO()):  # one region at a time; pySTEPS prints long tables
         fc = ps_nowcasts.get_method("sprog")(dbz([np.where(g < 0, 0, g) for g in s]), velocity, steps,
                                              precip_thr=10 * math.log10(thr),  # threshold in dB
-                                             n_cascade_levels=6, num_workers=min(4, os.cpu_count() or 1), probmatching_method="cdf")
+                                             n_cascade_levels=6, num_workers=min(4, os.cpu_count() or 1), probmatching_method=probmatch)
     out = []
     for i in range(len(fc)):  # frame by frame: converting all at once would copy the whole stack several times
         g = np.where(np.isfinite(fc[i]), 10.0 ** (fc[i].astype(np.float32) / 10.0), 0.0).astype(np.float32)  # dB -> mm/h
