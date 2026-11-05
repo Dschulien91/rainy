@@ -21,6 +21,7 @@ measured exactly 0 in both of their last values and no gauge there is damp - but
 there VETO_PERSIST_MIN earlier, because the gauges report 20-40 min late: a rain front that has just arrived stays.
 """
 import io
+import re
 import threading
 import time
 import zipfile
@@ -31,14 +32,16 @@ import cv2
 import numpy as np
 
 CDC = "https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/10_minutes/precipitation/now/"
-# Polling: ~1350 files from the same DWD host as the radar. Single files now and then take 15 s, and many at once
-# got connections reset. So a sweep over all stations (2 at a time, ~2.5 min when DWD answers quickly) starts every
-# 15 min - about 1.5 requests/s on average - and a second loop re-reads only the damp stations every 10 min. Hourly
-# sweeps were too slow on 03.11.: coastal drizzle (Flensburg, Ruegen) ran for 1.5 h before a sweep could see it.
-EVERY_S = 600
-SWEEP_EVERY_S = 900
+# Polling: ~1350 files from the same DWD host as the radar. Fixed sweeps every 15 min (~9 requests/s) ended in
+# "connection refused" (05.11.: 1133 stations unanswered, 7 s per file). DWD rewrites all files together, so now one
+# listing request every LIST_EVERY_S shows whether anything changed, and only changed files are read: at most
+# PACE_S apart per worker, stopping after MAX_ERRORS failures in a row - the radar from that host matters more.
+FAILED = object()      # _last_two: the download failed (unlike None: the file holds no usable values)
+LIST_EVERY_S = 300
 WORKERS = 2
-READ_DEADLINE_S = 600  # a full sweep normally takes 150-400 s
+PACE_S = 0.7           # ~3 requests/s, a full round in ~8 min
+READ_DEADLINE_S = 1200
+MAX_ERRORS = 10
 MAX_AGE_MIN = 70     # newest value older than this (station late or broken): ignore the station
 MIN_SUM_MM = 0.07    # last two 10-min values together (~0.2 mm/h)
 RADIUS_KM = 6.0      # drizzle disc around a wet gauge
@@ -60,6 +63,7 @@ class GaugeDrizzle:
         self.fetch, self.log, self.de, self.merc = fetch, log, de, merc
         self.lock = threading.Lock()
         self.stations = []   # (id, lat, lon)
+        self.errors = 0
         self.latest = {}     # id -> (end time of the newest value in ms, [previous, newest] mm)
 
     def _station_list(self):
@@ -73,12 +77,17 @@ class GaugeDrizzle:
         return out
 
     def _last_two(self, sid):
-        """(end time of the newest value in ms, [previous, newest] mm) or None."""
+        """(end time of the newest value in ms, [previous, newest] mm), None (no usable values) or FAILED (network)."""
+        if self.errors >= MAX_ERRORS:
+            return FAILED
+        time.sleep(PACE_S)
         try:
             z = zipfile.ZipFile(io.BytesIO(self.fetch(f"{CDC}10minutenwerte_nieder_{sid}_now.zip", timeout=30, tries=1)))
             rows = z.read(z.namelist()[0]).decode("latin-1").splitlines()
+            self.errors = 0
         except Exception:
-            return None
+            self.errors += 1
+            return FAILED
         head = [h.strip() for h in rows[0].split(";")]
         k, dur, ind = head.index("RWS_10"), head.index("RWS_DAU_10"), head.index("RWS_IND_10")
         vals = []
@@ -97,8 +106,10 @@ class GaugeDrizzle:
         return ts, [v for _, v in vals]
 
     def _read(self, sids):
+        """Read these stations; returns those that gave an answer. A failed one keeps its last values and is retried."""
         # a fresh pool per read with an overall deadline: on 04.11. one download hung for hours (no answer, no
-        # timeout) and blocked every later sweep; now a stuck download is left behind and the next sweep runs
+        # timeout) and blocked every later sweep; now a stuck download is left behind and the next round runs
+        self.errors = 0
         pool = ThreadPoolExecutor(WORKERS)
         futs = {pool.submit(self._last_two, sid): sid for sid in sids}
         got = {}
@@ -106,14 +117,22 @@ class GaugeDrizzle:
             for f in as_completed(futs, timeout=READ_DEADLINE_S):
                 got[futs[f]] = f.result()
         except TimeoutError:
-            self.log(f"gauges: {len(sids) - len(got)} stations did not answer within {READ_DEADLINE_S}s, skipped")
+            pass
         pool.shutdown(wait=False, cancel_futures=True)
+        got = {sid: v for sid, v in got.items() if v is not FAILED}
         with self.lock:
             for sid, v in got.items():
                 if v is None:
                     self.latest.pop(sid, None)
                 else:
                     self.latest[sid] = v
+        return set(got)
+
+    def _changed(self):
+        """{station id: time stamp in the DWD listing} of our stations."""
+        text = self.fetch(CDC, timeout=60).decode("latin-1")
+        ids = {s[0] for s in self.stations}
+        return {sid: stamp for sid, stamp in re.findall(r'nieder_(\d{5})_now\.zip</a>\s+(\S+ \S+)', text) if sid in ids}
 
     def damp(self):
         """Stations with any precipitation in their last two values."""
@@ -204,26 +223,19 @@ class GaugeDrizzle:
         self.log(f"[{datetime.now():%H:%M:%S}] gauges: {what} in {time.time() - started:.0f}s, {len(self.damp())} damp, "
                  f"drizzle at {', '.join(s for s, *_ in wet) or '-'}")
 
-    def sweep_loop(self):
-        while True:
-            started = time.time()
-            try:
-                self.stations = self._station_list()
-                self._read([s[0] for s in self.stations])
-                self._say(f"all {len(self.stations)} stations", started)
-            except Exception as e:
-                self.log(f"gauges: {e}")
-            time.sleep(max(60.0, SWEEP_EVERY_S - (time.time() - started)))
-
     def loop(self):
-        threading.Thread(target=self.sweep_loop, daemon=True).start()
+        seen, listed_day = {}, None
         while True:
-            time.sleep(EVERY_S)
             started = time.time()
             try:
-                damp = self.damp()
-                if damp:
-                    self._read(damp)
-                    self._say(f"{len(damp)} damp stations", started)
+                if time.strftime("%Y%m%d") != listed_day:  # stations come and go
+                    self.stations, listed_day = self._station_list(), time.strftime("%Y%m%d")
+                stamps = self._changed()
+                todo = [sid for sid, stamp in stamps.items() if seen.get(sid) != stamp]
+                if todo:
+                    done = self._read(todo)
+                    seen.update({sid: stamps[sid] for sid in done})
+                    self._say(f"{len(done)} of {len(todo)} new files", started)
             except Exception as e:
                 self.log(f"gauges: {e}")
+            time.sleep(max(30.0, LIST_EVERY_S - (time.time() - started)))
