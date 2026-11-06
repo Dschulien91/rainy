@@ -138,8 +138,8 @@ class GermanyDwd:
         """weight: 1 up to BORDER_KM beyond the border, fading to 0 over FADE_KM, 0 where the radars do not reach.
         inside (no hatching): the full-weight area."""
         weight = np.clip(1.0 - (self.border_km - BORDER_KM) / FADE_KM, 0.0, 1.0)
-        if self.covered is not None:
-            weight = np.minimum(weight, self.covered)
+        if self.covered is not None:  # never inside Germany: the composite has gaps there (Black Forest, Bavarian Forest)
+            weight = np.where(self.border_km <= 0.5, weight, np.minimum(weight, self.covered))
         self.weight = weight.astype(np.float32)
         # the outline leaves estuaries (Elbe, Weser) and lagoons out as sea, so close gaps up to ~10 km - inland
         # waters must not look like "no data"
@@ -244,7 +244,7 @@ class GermanyDwd:
         got = self._load_rv(ref)
         if getattr(self, "drizzle", None) is not None:  # gauges.py: drizzle the gauges measure below the radar beam,
             self.drizzle.apply(got, ref)                # and weak echoes aloft that never reach the dry gauges
-            self.vetoed = self.drizzle.veto(got, ref, self.obs.get(ref - 30 * 60_000))
+            self.vetoed = self.drizzle.veto(got, ref, self.obs)
         obs = {t: g for t, g in self.obs.items() if t in obs_t}
         obs[ref] = got[ref]
         n = 25

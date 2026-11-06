@@ -17,8 +17,9 @@ The other way round (veto): weak radar echoes that do not reach the ground. Rada
 low-level air see precipitation aloft that evaporates on the way down (Berchtesgaden/Hallein 04.11.: 0.1-0.3 mm/h on
 the radar for 1.5 h, all 16 gauges there 0.0; MV and Altmark bands 03.11.: 0 of 1348 gauges damp). WetterOnline
 does not show these. Weak echoes (< VETO_MAX mm/h) are removed where at least VETO_MIN_DRY gauges within VETO_KM
-measured exactly 0 in both of their last values and no gauge there is damp - but only where the echo was already
-there VETO_PERSIST_MIN earlier, because the gauges report 20-40 min late: a rain front that has just arrived stays.
+measured exactly 0 in both of their last values and no gauge there is damp - but only where the radar already showed
+the echo during the time those values cover. The gauges report 20-110 min late, so without this a front that has just
+arrived was erased (06.11.: Black Forest edge, gauge 00757 wet, map dry): they cannot know about rain after their last value.
 """
 import io
 import re
@@ -54,7 +55,7 @@ FADE_MIN = 60
 VETO_KM = 15.0
 VETO_MIN_DRY = 2
 VETO_MAX = 0.5       # mm/h: only weak echoes; real showers are stronger and the gauges would show them soon
-VETO_PERSIST_MIN = 30
+VETO_HISTORY_MS = 3 * 3600_000  # radar wet masks kept to compare with the gauges' time
 VETO_MAX_AGE_MIN = 150  # the "now" files are 20-110 min behind (04.11. morning: 105 min); dry air changes slowly
 
 
@@ -64,6 +65,7 @@ class GaugeDrizzle:
         self.lock = threading.Lock()
         self.stations = []   # (id, lat, lon)
         self.errors = 0
+        self.radar_wet = {}  # ts -> packed mask where the radar showed rain (slightly widened)
         self.latest = {}     # id -> (end time of the newest value in ms, [previous, newest] mm)
 
     def _station_list(self):
@@ -153,11 +155,21 @@ class GaugeDrizzle:
                 out.append((sid, *where[sid], min((a + b) * 3.0, MAX_MMH)))
         return out
 
-    def veto(self, grids, ref, before):
+    def _remember(self, ts, grid):
+        wet = cv2.dilate((np.asarray(grid, np.float32) >= 0.05).astype(np.uint8), np.ones((7, 7), np.uint8))
+        self.radar_wet[ts] = np.packbits(wet)
+        for t in [t for t in self.radar_wet if t < ts - VETO_HISTORY_MS]:
+            del self.radar_wet[t]
+
+    def veto(self, grids, ref, obs):
         """Remove weak echoes over dry gauges from the analysis (ref) and the forecast frames, in place.
-        before: the analysis VETO_PERSIST_MIN earlier (or None: no veto). Returns the number of pixels removed."""
-        if before is None or ref not in grids:
+        obs: earlier analyses, to seed the radar history after a start. Returns the number of pixels removed."""
+        if ref not in grids:
             return 0
+        for t, g in obs.items():
+            if t not in self.radar_wet:
+                self._remember(t, g)
+        self._remember(ref, grids[ref])
         now = time.time() * 1000
         where = {sid: (lat, lon) for sid, lat, lon in self.stations}
         with self.lock:
@@ -173,13 +185,18 @@ class GaugeDrizzle:
                     damp[row, col] = 1
                 else:
                     dry[row, col] += 1
-        if not dry.any():
+        fresh = [ts for sid, (ts, _) in items if sid in where and now - ts <= VETO_MAX_AGE_MIN * 60_000]
+        if not dry.any() or not fresh:
             return 0
+        # the radar during the gauges' last interval; unknown (gauges too old, just started): no veto
+        seen = self.radar_wet.get(int(np.median(fresh)) // 300_000 * 300_000 - 600_000)
+        if seen is None:
+            return 0
+        was_wet = np.unpackbits(seen, count=dry.size).reshape(dry.shape).astype(bool)
         r = int(round(VETO_KM / self.de.KM_PER_PX))
         disc = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
         n_dry = cv2.filter2D(dry, -1, disc.astype(np.float32), borderType=cv2.BORDER_CONSTANT)
         any_damp = cv2.dilate(damp, disc) > 0
-        was_wet = cv2.dilate((np.asarray(before, np.float32) >= 0.05).astype(np.uint8), np.ones((7, 7), np.uint8)) > 0
         area = (n_dry >= VETO_MIN_DRY - 0.5) & ~any_damp & was_wet
         removed = 0
         for ts, g in grids.items():
