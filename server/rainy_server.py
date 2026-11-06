@@ -78,7 +78,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v0.56"
+VERSION = "server-v0.58"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model; no Europe/USA
 # radar, no clouds - their loops are not started); "full" = everything.
 EDITION = os.environ.get("EDITION", "de")
@@ -420,7 +420,7 @@ def _coarse(g, down):
 SPROG_LOCK = threading.Lock()  # S-PROG needs a lot of memory: never run two regions at the same time
 
 
-def sprog_nowcast(seq, mot, steps, down, thr=0.1, probmatch="cdf"):
+def sprog_nowcast(seq, mot, steps, down, thr=0.1, probmatch="cdf", levels=6, ar_order=2):
     """pySTEPS S-PROG: like `nowcast`, but each spatial scale decays at its own observed rate (small showers fade
     fast, large rain areas persist). seq: frames 10/5/0 min old; mot: frames 30/15/0 min old (for the motion).
     Runs on a grid `down` times coarser and is scaled back up. Backtests: equal to `nowcast` for widespread rain,
@@ -435,7 +435,7 @@ def sprog_nowcast(seq, mot, steps, down, thr=0.1, probmatch="cdf"):
     with SPROG_LOCK, contextlib.redirect_stdout(io.StringIO()):  # one region at a time; pySTEPS prints long tables
         fc = ps_nowcasts.get_method("sprog")(dbz([np.where(g < 0, 0, g) for g in s]), velocity, steps,
                                              precip_thr=10 * math.log10(thr),  # threshold in dB
-                                             n_cascade_levels=6, num_workers=min(4, os.cpu_count() or 1), probmatching_method=probmatch)
+                                             n_cascade_levels=levels, ar_order=ar_order, num_workers=min(4, os.cpu_count() or 1), probmatching_method=probmatch)
     out = []
     for i in range(len(fc)):  # frame by frame: converting all at once would copy the whole stack several times
         g = np.where(np.isfinite(fc[i]), 10.0 ** (fc[i].astype(np.float32) / 10.0), 0.0).astype(np.float32)  # dB -> mm/h
@@ -506,12 +506,21 @@ class OwnNowcast:
         mixed = [g.astype(np.float32) for g in fc]
         mixed = blend_new_cells(self.model, self.model.blend(mixed, ref), ref, km_per_px=de.KM_PER_PX)
         grids = {ref + (i + 1) * STEP_MS: g.astype(np.float16) for i, g in enumerate(mixed)}
+        dwd_new = self._dwd_new_cells(ref)  # takes de.lock itself: not inside the block below
         with de.lock:
             if de.ref == ref:
                 de.fc_own, de.own_ref = grids, ref
-                de.fc_shadow = {"sprog": pure}  # scored by fcverify only
+                # scored by fcverify only: pure S-PROG; DWD's own forecast plus the model's new showers in the 2nd hour
+                de.fc_shadow = {"sprog": pure, "dwdnew": dwd_new}
         self.done = ref
         log(f"[{datetime.now():%H:%M:%S}] own nowcast: run {datetime.fromtimestamp(ref / 1000, timezone.utc):%H:%M}Z in {time.time() - started:.0f}s")
+
+    def _dwd_new_cells(self, ref):
+        with self.de.lock:
+            fc = dict(self.de.fc)
+        times = sorted(fc)
+        out = blend_new_cells(self.model, [fc[t].astype(np.float32) for t in times], ref, km_per_px=self.de.KM_PER_PX)
+        return {t: g.astype(np.float16) for t, g in zip(times, out)}
 
     def loop(self):
         while True:

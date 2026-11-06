@@ -24,11 +24,12 @@ for t in need:  # analyses of every run, and the full DWD forecast of the issue 
         dwd_fc[t] = got
 shape = (de.nx // fcverify.DOWN, de.ny // fcverify.DOWN)
 mask = fcverify._down(de.inside, shape) > 0.5
-VARIANTS = {  # current: thr 0.03, down 2, cdf
-    "cdf down2": dict(down=2, thr=0.03),
-    "mean down2": dict(down=2, thr=0.03, probmatch="mean"),
-    "none down2": dict(down=2, thr=0.03, probmatch=None),
-    "cdf down1": dict(down=1, thr=0.03),
+VARIANTS = {  # current: thr 0.03, down 2, cdf, 6 levels, AR(2); gain: factor on the forecast rate
+    "current": dict(down=2, thr=0.03),
+    "ar1": dict(down=2, thr=0.03, ar_order=1),
+    "ar1 x1.3": dict(down=2, thr=0.03, ar_order=1, gain=1.3),
+    "ar1 x1.6": dict(down=2, thr=0.03, ar_order=1, gain=1.6),
+    "down1 ar1 x1.3": dict(down=1, thr=0.03, ar_order=1, gain=1.3),
 }
 THS = (0.1, 1.0)  # scoring thresholds: wet, real rain (mm/h)
 issues = [t for t in dwd_fc if t - 30 * 60_000 in obs and t + 90 * 60_000 in obs]
@@ -37,10 +38,11 @@ for issue in issues:
     near = lambda dt: obs[issue - dt * 60_000].astype(np.float32)
     seq, mot = [near(10), near(5), near(0)], [near(30), near(15), near(0)]
     for name, v in VARIANTS.items():
-        fc = rs.sprog_nowcast(seq, mot, 18, v["down"], thr=v["thr"], probmatch=v.get("probmatch", "cdf"))
+        fc = rs.sprog_nowcast(seq, mot, 18, v["down"], thr=v["thr"], probmatch=v.get("probmatch", "cdf"),
+                              levels=v.get("levels", 6), ar_order=v.get("ar_order", 2))
         for lead in LEADS:
             a = fcverify._down(obs[issue + lead * 60_000], shape)
-            g = fcverify._down(fc[lead // 5 - 1], shape)
+            g = fcverify._down(fc[lead // 5 - 1], shape) * v.get("gain", 1.0)
             for th in THS:
                 h, m, f = fcverify._counts(g >= th, a >= th, mask)
                 t = tot.setdefault((th, name, lead), [0, 0, 0])
