@@ -27,13 +27,13 @@ mask = fcverify._down(de.inside, shape) > 0.5
 VARIANTS = {  # current: thr 0.03, down 2, cdf, 6 levels, AR(2); gain: factor on the forecast rate
     "current": dict(down=2, thr=0.03),
     "ar1": dict(down=2, thr=0.03, ar_order=1),
-    "ar1 x1.3": dict(down=2, thr=0.03, ar_order=1, gain=1.3),
-    "ar1 x1.6": dict(down=2, thr=0.03, ar_order=1, gain=1.6),
-    "down1 ar1 x1.3": dict(down=1, thr=0.03, ar_order=1, gain=1.3),
+    "down1": dict(down=1, thr=0.03),
+    "down1 ar1": dict(down=1, thr=0.03, ar_order=1),
 }
 THS = (0.1, 1.0)  # scoring thresholds: wet, real rain (mm/h)
 issues = [t for t in dwd_fc if t - 30 * 60_000 in obs and t + 90 * 60_000 in obs]
 tot = {}
+amount = {}  # (variant, lead) -> [forecast, real]: a variant must not win by showing more rain
 for issue in issues:
     near = lambda dt: obs[issue - dt * 60_000].astype(np.float32)
     seq, mot = [near(10), near(5), near(0)], [near(30), near(15), near(0)]
@@ -43,6 +43,8 @@ for issue in issues:
         for lead in LEADS:
             a = fcverify._down(obs[issue + lead * 60_000], shape)
             g = fcverify._down(fc[lead // 5 - 1], shape) * v.get("gain", 1.0)
+            amounts = amount.setdefault((name, lead), [0.0, 0.0])
+            amounts[0] += float(g[mask].sum()); amounts[1] += float(a[mask].sum())
             for th in THS:
                 h, m, f = fcverify._counts(g >= th, a >= th, mask)
                 t = tot.setdefault((th, name, lead), [0, 0, 0])
@@ -50,10 +52,15 @@ for issue in issues:
     for lead in LEADS:  # DWD's forecast and persistence on the same cases
         a = fcverify._down(obs[issue + lead * 60_000], shape)
         for name, g in (("DWD", dwd_fc[issue][issue + lead * 60_000]), ("persistence", obs[issue])):
+            amounts = amount.setdefault((name, lead), [0.0, 0.0])
+            amounts[0] += float(fcverify._down(g, shape)[mask].sum()); amounts[1] += float(a[mask].sum())
             for th in THS:
                 h, m, f = fcverify._counts(fcverify._down(g, shape) >= th, a >= th, mask)
                 t = tot.setdefault((th, name, lead), [0, 0, 0]); t[0] += h; t[1] += m; t[2] += f
 print(f"{len(issues)} cases   CSI (POD/FAR)")
+print("amount forecast/real")
+for name in ["DWD", "persistence"] + list(VARIANTS):
+    print(f"  {name:13s} " + " | ".join(f"+{lead}: {amount[(name, lead)][0] / max(amount[(name, lead)][1], 1):.2f}" for lead in LEADS))
 for th in THS:
     print(f">= {th} mm/h")
     for name in ["DWD", "persistence"] + list(VARIANTS):
