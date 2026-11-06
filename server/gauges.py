@@ -7,8 +7,8 @@ to the same gauges - showed nothing. WetterOnline showed it.
 Source: the DWD 10-minute gauge files (open data, ~1370 stations, ~0.5 KB each, 20-30 min behind). A station counts
 as wet when its last two 10-min values are both > 0 and together >= 0.07 mm (~0.2 mm/h): one bucket tip, dew or fog
 (0.01 mm) never qualifies.
-Each value must also carry the gauge's own "precipitation yes" indicator and a duration; faulty gauges report
-amounts without them. Backtest 30.10. 00-07 UTC: only Saxon stations qualified (1-5 at a time), exactly where
+A value must not contradict the gauge's own "precipitation" indicator or duration, where the station has them.
+Backtest 30.10. 00-07 UTC: only Saxon stations qualified (1-5 at a time), exactly where
 WetterOnline showed drizzle; none of the trace stations in the north. Where the radar is already wet within
 NEAR_KM, the radar wins. The drizzle is painted as a small disc around the gauge (no motion: this kind of drizzle
 stays put) and fades out over the first FADE_MIN of the forecast.
@@ -97,7 +97,9 @@ class GaugeDrizzle:
                 mm = float(p[k])
             except (ValueError, IndexError):
                 return None
-            if mm < 0 or (mm > 0 and (float(p[dur]) <= 0 or int(p[ind]) != 1)):  # missing, or no "it rained" flag
+            # missing value, or the gauge itself says "no rain"; -999 = this station has no such sensor (many have none,
+            # e.g. Zinnwald, Moos): its amount counts, MAX_10MIN_MM catches faults. Dropping them hid real rain from veto()
+            if mm < 0 or (mm > 0 and (float(p[dur]) == 0 or int(p[ind]) == 0)):
                 return None
             vals.append((p[1].strip(), mm))
         if len(vals) < 2:

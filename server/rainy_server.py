@@ -78,7 +78,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v0.59"
+VERSION = "server-v0.60"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model; no Europe/USA
 # radar, no clouds - their loops are not started); "full" = everything.
 EDITION = os.environ.get("EDITION", "de")
@@ -507,16 +507,11 @@ class OwnNowcast:
         mixed = blend_new_cells(self.model, self.model.blend(mixed, ref), ref, km_per_px=de.KM_PER_PX)
         grids = {ref + (i + 1) * STEP_MS: g.astype(np.float16) for i, g in enumerate(mixed)}
         dwd_new = self._dwd_new_cells(ref)  # takes de.lock itself: not inside the block below
-        # candidate from tune_own.py (8 runs 06.11., rain band): AR(1) x1.6 reaches DWD's CSI at >= 1 mm/h
-        # (.82/.66/.51/.46 vs .85/.65/.50/.48) - shadow first, because the factor could overstate rain amounts
-        ar1 = sprog_nowcast([g.astype(np.float32) for g in seq], [g.astype(np.float32) for g in mot], FC_STEPS, self.DOWN,
-                            thr=self.THR, ar_order=1)
-        ar1 = {ref + (i + 1) * STEP_MS: (g.astype(np.float32) * 1.6).astype(np.float16) for i, g in enumerate(ar1)}
         with de.lock:
             if de.ref == ref:
                 de.fc_own, de.own_ref = grids, ref
                 # scored by fcverify only: pure S-PROG; DWD's own forecast plus the model's new showers in the 2nd hour
-                de.fc_shadow = {"sprog": pure, "dwdnew": dwd_new, "ar1x16": ar1}
+                de.fc_shadow = {"sprog": pure, "dwdnew": dwd_new}
         self.done = ref
         log(f"[{datetime.now():%H:%M:%S}] own nowcast: run {datetime.fromtimestamp(ref / 1000, timezone.utc):%H:%M}Z in {time.time() - started:.0f}s")
 
