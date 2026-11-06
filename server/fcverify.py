@@ -80,7 +80,8 @@ class GridVerify:
                 continue
             a = _down(obs[valid], self.shape)
             p = self.issued.get(r)
-            row = {"variant": variant, "ref": r, "lead": lead, "valid": valid}
+            row = {"variant": variant, "ref": r, "lead": lead, "valid": valid,
+                   "sum": [round(float(g[self.mask].sum()), 1), round(float(a[self.mask].sum()), 1)]}  # rain amount: forecast, real
             for th in THRESHOLDS:
                 o = a >= th
                 row[f"obs{th}"] = int((o & self.mask).sum())
