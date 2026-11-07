@@ -29,7 +29,10 @@ as the DWD radars reach). Places in that zone get the radar timeline too; beyond
 
 - Linux server, Germany edition: **4 vCPU, 8 GB RAM, 160 GB SSD** (e.g. Hetzner CPX31). The radar server needs ~0.6 GB;
   Open-Meteo uses the rest for its cache. Full edition: 16 GB RAM (CPX42).
-- A domain whose DNS `A` record points to the server, proxied through Cloudflare (orange cloud).
+- The domain **hellorainy.com** (bought 07.11.2026): DNS `A` records for `hellorainy.com` and `www.hellorainy.com`
+  (and `AAAA` for IPv6) point to the server, proxied through Cloudflare (orange cloud). `www` redirects to the bare
+  domain (Caddyfile). First start with the records on "DNS only" (grey cloud) until Caddy has its certificates
+  (`docker compose logs caddy`), then switch to the orange cloud and SSL/TLS mode Full (strict).
 
 ## Steps
 

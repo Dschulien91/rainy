@@ -1,5 +1,10 @@
 # One domain for everything: the app, /api + /tiles (radar server) and /om (self-hosted Open-Meteo).
 # Caddy obtains and renews the HTTPS certificate automatically. No access logs are written.
+# www.<domain> only redirects to the main domain
+www.{$DOMAIN} {
+	redir https://{$DOMAIN}{uri} permanent
+}
+
 {$DOMAIN} {
 	encode zstd gzip
 	header {
