@@ -46,6 +46,7 @@ LEAD_SLACK = 7                     # their steps after +35 min are on :00/:15/:3
 # UI on the frame (x0, y0, x1, y1): clock, search, layer buttons, zoom buttons, 15/30 min, info, menu arrow
 UI = [(0, 0, 115, 55), (420, 0, 640, 50), (585, 50, 640, 150), (70, 595, 195, 650), (15, 625, 65, 650),
       (585, 595, 640, 650)]
+# Shots come from tools/wo_capture.py (headless Edge, every 15 min) or, earlier, from the browser pane.
 
 
 def merc(lon, lat):
@@ -156,7 +157,8 @@ def main():
     g, mask = grid()
     mp = maps(g)
     rows = fcgrid_rows()
-    tot = {k: defaultdict(lambda: [0, 0, 0, 0]) for k in ("wo", "dwd", "own")}
+    tot = {k: defaultdict(lambda: [0, 0, 0, 0]) for k in ("wo", "wo-self", "dwd", "own")}
+    l0_imgs = {v: p for v, lead, p in shots() if lead == 0}  # their own radar images: truth for the fair view
     l0 = [0, 0, 0, 0, 0, 0]  # counts vs >= 0.1, wo wet cells, dwd wet cells
     for valid, lead, p in shots():
         a = truth(valid)
@@ -184,13 +186,20 @@ def main():
         for name, t in (("wo", c), ("dwd", d["fc0.1"]), ("own", o_["fc0.1"])):
             s = tot[name][std]
             s[0] += t[0]; s[1] += t[1]; s[2] += t[2]; s[3] += 1
+        cs = None
+        if valid in l0_imgs:  # fair view: their forecast against their own later radar image
+            own_truth, inside2 = to_grid(l0_imgs[valid], g, mp)
+            cs = counts(wet, own_truth, mk & inside2)
+            s = tot["wo-self"][std]
+            s[0] += cs[0]; s[1] += cs[1]; s[2] += cs[2]; s[3] += 1
         if "-v" in sys.argv:
-            print(f"  +{lead:3d} {valid:%d.%m. %H:%M}Z  wo {fmt(c)}  dwd {fmt(d['fc0.1'])}  own {fmt(o_['fc0.1'])}")
+            print(f"  +{lead:3d} {valid:%d.%m. %H:%M}Z  wo {fmt(c)}  wo-self {fmt(cs) if cs else '-':16s}"
+                  f"  dwd {fmt(d['fc0.1'])}  own {fmt(o_['fc0.1'])}")
     if l0[3]:
         print(f"WetterOnline's radar image vs DWD radar ({l0[3]} images): CSI {fmt(l0)}, wet area wo/dwd "
               f"{l0[4] / max(l0[5], 1):.2f}")
-    print(">= 0.1 mm/h (DWD radar), CSI (POD/FAR), same cases")
-    for name in ("wo", "dwd", "own"):
+    print(">= 0.1 mm/h, CSI (POD/FAR) [cases]; truth = DWD radar, for wo-self = WetterOnline's own later radar image")
+    for name in ("wo", "wo-self", "dwd", "own"):
         print(f"  {name:4s}" + " | ".join(f"+{L}: {fmt(tot[name][L])} [{tot[name][L][3]}]" for L in LEADS if tot[name][L][3]))
 
 
