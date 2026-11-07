@@ -78,7 +78,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v0.62"
+VERSION = "server-v0.63"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model; no Europe/USA
 # radar, no clouds - their loops are not started); "full" = everything.
 EDITION = os.environ.get("EDITION", "de")
@@ -507,16 +507,20 @@ class OwnNowcast:
         mixed = blend_new_cells(self.model, self.model.blend(mixed, ref), ref, km_per_px=de.KM_PER_PX)
         grids = {ref + (i + 1) * STEP_MS: g.astype(np.float16) for i, g in enumerate(mixed)}
         dwd_new = self._dwd_new_cells(ref)  # takes de.lock itself: not inside the block below
-        # candidate from tune_own.py on 06.11.: better on the last 10 runs (>= 1 mm/h +60/+90 .70/.59 vs .61/.52, amount
-        # .95-.99), worse on the 8 runs before (+30 .43 vs .56), so it runs next to the others on the same runs first
-        ar1 = sprog_nowcast([g.astype(np.float32) for g in seq], [g.astype(np.float32) for g in mot], FC_STEPS, self.DOWN,
-                            thr=self.THR, ar_order=1)
-        ar1 = {ref + (i + 1) * STEP_MS: g for i, g in enumerate(ar1)}
+        # candidate (07.11., moving rain): DWD is clearly better up to +30 min, own equal from +60 with a better rain
+        # amount, so DWD first, fading to own between +30 and +60; AR(1) was dropped (never ahead of DWD, too much rain)
+        with de.lock:
+            dwd = dict(de.fc)
+        mix = {}
+        for t, g in grids.items():
+            w = min(1.0, max(0.0, ((t - ref) / 60_000 - 30.0) / 30.0))
+            d = dwd.get(t)
+            mix[t] = g if d is None else ((1 - w) * np.asarray(d, np.float32) + w * np.asarray(g, np.float32)).astype(np.float16)
         with de.lock:
             if de.ref == ref:
                 de.fc_own, de.own_ref = grids, ref
                 # scored by fcverify only: pure S-PROG; DWD's own forecast plus the model's new showers in the 2nd hour
-                de.fc_shadow = {"sprog": pure, "dwdnew": dwd_new, "ar1": ar1}
+                de.fc_shadow = {"sprog": pure, "dwdnew": dwd_new, "mix": mix}
         self.done = ref
         log(f"[{datetime.now():%H:%M:%S}] own nowcast: run {datetime.fromtimestamp(ref / 1000, timezone.utc):%H:%M}Z in {time.time() - started:.0f}s")
 
