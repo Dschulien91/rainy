@@ -78,7 +78,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v0.65"
+VERSION = "server-v0.66"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model; no Europe/USA
 # radar, no clouds - their loops are not started); "full" = everything.
 EDITION = os.environ.get("EDITION", "de")
@@ -473,10 +473,10 @@ class OwnNowcast:
     optical flow, so showers in different areas can move in different directions) and each spatial scale decays at
     its own observed rate (small showers and drizzle fade, large rain areas persist) - DWD's RV only shifts the
     image. Inputs: analyses 10/5/0 min old (S-PROG) and 30/15/0 min old (motion).
-    Second hour: the DWD model (ICON-D2, 15 min, local Open-Meteo) is mixed in like DWD's own SINFONY/INTENSE does
-    (Region.blend + blend_new_cells: radar only for the first hour, then fading towards the model; showers the model
-    forms away from radar rain are added). The pure S-PROG forecast is kept as shadow "sprog" for fcverify, so the
-    effect of the model is measured, not assumed."""
+    Pure S-PROG since server-v0.66 (07.11.): mixing in the DWD model (ICON-D2) in the second hour, like DWD's
+    SINFONY/INTENSE, made it worse on the same runs (30 h: CSI >= 1 mm/h +120 .31 vs .40; 6 h drizzle: >= 0.1 mm/h
+    +120 .27 vs .40, amount .77 vs .98). The model variants stay as shadows "model" (smearing + new showers) and
+    "cells" (new showers only) for fcverify, so the model is measured, not assumed."""
     DOWN = 2    # ~2 km (1 km: +0.01..0.03 CSI for twice the CPU - not worth it yet)
     # wet threshold for S-PROG: 0.1 (pySTEPS default) turned light drizzle into "dry" and missed most of it;
     # server/tune_own.py, 8 DWD runs 03./04.11. (drizzle), CSI +15/+30/+60/+90: 0.1 -> 0.38/0.24/0.13/0.01,
@@ -505,7 +505,8 @@ class OwnNowcast:
         pure = {ref + (i + 1) * STEP_MS: g for i, g in enumerate(fc)}
         mixed = [g.astype(np.float32) for g in fc]
         mixed = blend_new_cells(self.model, self.model.blend(mixed, ref), ref, km_per_px=de.KM_PER_PX)
-        grids = {ref + (i + 1) * STEP_MS: g.astype(np.float16) for i, g in enumerate(mixed)}
+        model = {ref + (i + 1) * STEP_MS: g.astype(np.float16) for i, g in enumerate(mixed)}
+        grids = {t: g.astype(np.float16) for t, g in pure.items()}
         # 07.11. (30 h, 361 runs): the model blend lowers CSI >= 1 mm/h at +120 from .40 (pure S-PROG) to .31 but keeps
         # the amount near 1 (pure: 1.26). Which half does it: the smearing towards the model (Region.blend) or the
         # model's new showers (blend_new_cells)? Shadow "cells" = S-PROG + new showers only, no smearing.
@@ -517,7 +518,7 @@ class OwnNowcast:
             if de.ref == ref:
                 de.fc_own, de.own_ref = grids, ref
                 # scored by fcverify only: pure S-PROG; DWD's own forecast plus the model's new showers in the 2nd hour
-                de.fc_shadow = {"sprog": pure, "dwdnew": dwd_new, "cells": cells}
+                de.fc_shadow = {"model": model, "dwdnew": dwd_new, "cells": cells}
         self.done = ref
         log(f"[{datetime.now():%H:%M:%S}] own nowcast: run {datetime.fromtimestamp(ref / 1000, timezone.utc):%H:%M}Z in {time.time() - started:.0f}s")
 
