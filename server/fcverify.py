@@ -24,6 +24,8 @@ DOWN = 3                       # ~3 km pixels
 TOL_PX = 3                     # ~9 km position tolerance
 THRESHOLDS = (0.1, 1.0)        # mm/h: "wet" and "real rain"
 KEEP_MS = 3 * 3600_000
+OBS_DIR = os.path.join(LOG_DIR, "obs3km")
+OBS_KEEP_DAYS = 14
 
 
 def _down(g, shape):
@@ -47,6 +49,7 @@ class GridVerify:
         self.done_ref, self.done_own = None, None
         self.shape = (de.nx // DOWN, de.ny // DOWN)  # cv2 (w, h)
         self.mask = None   # area the map shows, downsampled
+        self.saved = set() # analyses already on disk (_save_obs)
 
     def step(self):
         de = self.de
@@ -92,12 +95,41 @@ class GridVerify:
             del self.pending[(variant, r, lead)]
         for r in [r for r in self.issued if ref - r > KEEP_MS]:
             del self.issued[r]
+        self._save_obs(obs)
         if lines:
             os.makedirs(LOG_DIR, exist_ok=True)
             day = datetime.fromtimestamp(lines[0]["valid"] / 1000, timezone.utc).strftime("%Y%m%d")
             with open(os.path.join(LOG_DIR, f"fcgrid_{day}.jsonl"), "a") as f:
                 for row in lines:
                     f.write(json.dumps(row) + "\n")
+
+    def _save_obs(self, obs):
+        """Every radar analysis at ~3 km on disk (OBS_DIR/<UTC YYYYmmddHHMM>.npz, mm/h, float16), plus the scored area
+        (mask.npy) and the grid (grid.json): the truth for forecasts made elsewhere (tools/wo_verify.py scores
+        WetterOnline's map against it). Kept OBS_KEEP_DAYS."""
+        if self.mask is None:
+            return
+        os.makedirs(OBS_DIR, exist_ok=True)
+        if not os.path.exists(os.path.join(OBS_DIR, "mask.npy")):
+            np.save(os.path.join(OBS_DIR, "mask.npy"), self.mask)
+            with open(os.path.join(OBS_DIR, "grid.json"), "w") as f:  # Web Mercator, one cell = DOWN source cells
+                json.dump({"bbox": list(self.de.BBOX), "cell": self.de.CELL * DOWN, "shape": list(self.mask.shape)}, f)
+        for t, g in obs.items():
+            name = datetime.fromtimestamp(t / 1000, timezone.utc).strftime("%Y%m%d%H%M")
+            if name in self.saved:
+                continue
+            path = os.path.join(OBS_DIR, name + ".npz")
+            if not os.path.exists(path):
+                np.savez_compressed(path, rate=_down(g, self.shape).astype(np.float16))
+            self.saved.add(name)
+        if len(self.saved) > 400:  # once in a while: forget old names, delete old files
+            cutoff = (datetime.now(timezone.utc).timestamp() - OBS_KEEP_DAYS * 86400)
+            for p in os.listdir(OBS_DIR):
+                if p.endswith(".npz") and datetime.strptime(p[:12], "%Y%m%d%H%M").replace(
+                        tzinfo=timezone.utc).timestamp() < cutoff:
+                    os.remove(os.path.join(OBS_DIR, p))
+            self.saved = {n for n in self.saved if datetime.strptime(n, "%Y%m%d%H%M").replace(
+                tzinfo=timezone.utc).timestamp() >= cutoff}
 
     def loop(self):
         while True:
