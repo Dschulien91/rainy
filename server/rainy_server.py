@@ -78,7 +78,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v0.64"
+VERSION = "server-v0.65"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model; no Europe/USA
 # radar, no clouds - their loops are not started); "full" = everything.
 EDITION = os.environ.get("EDITION", "de")
@@ -506,21 +506,18 @@ class OwnNowcast:
         mixed = [g.astype(np.float32) for g in fc]
         mixed = blend_new_cells(self.model, self.model.blend(mixed, ref), ref, km_per_px=de.KM_PER_PX)
         grids = {ref + (i + 1) * STEP_MS: g.astype(np.float16) for i, g in enumerate(mixed)}
+        # 07.11. (30 h, 361 runs): the model blend lowers CSI >= 1 mm/h at +120 from .40 (pure S-PROG) to .31 but keeps
+        # the amount near 1 (pure: 1.26). Which half does it: the smearing towards the model (Region.blend) or the
+        # model's new showers (blend_new_cells)? Shadow "cells" = S-PROG + new showers only, no smearing.
+        # ("mix" = DWD to +30 fading to own was dropped: by construction it equals dwd early and own late.)
+        cells = blend_new_cells(self.model, [g.astype(np.float32) for g in fc], ref, km_per_px=de.KM_PER_PX)
+        cells = {ref + (i + 1) * STEP_MS: g.astype(np.float16) for i, g in enumerate(cells)}
         dwd_new = self._dwd_new_cells(ref)  # takes de.lock itself: not inside the block below
-        # candidate (07.11., moving rain): DWD is clearly better up to +30 min, own equal from +60 with a better rain
-        # amount, so DWD first, fading to own between +30 and +60; AR(1) was dropped (never ahead of DWD, too much rain)
-        with de.lock:
-            dwd = dict(de.fc)
-        mix = {}
-        for t, g in grids.items():
-            w = min(1.0, max(0.0, ((t - ref) / 60_000 - 30.0) / 30.0))
-            d = dwd.get(t)
-            mix[t] = g if d is None else ((1 - w) * np.asarray(d, np.float32) + w * np.asarray(g, np.float32)).astype(np.float16)
         with de.lock:
             if de.ref == ref:
                 de.fc_own, de.own_ref = grids, ref
                 # scored by fcverify only: pure S-PROG; DWD's own forecast plus the model's new showers in the 2nd hour
-                de.fc_shadow = {"sprog": pure, "dwdnew": dwd_new, "mix": mix}
+                de.fc_shadow = {"sprog": pure, "dwdnew": dwd_new, "cells": cells}
         self.done = ref
         log(f"[{datetime.now():%H:%M:%S}] own nowcast: run {datetime.fromtimestamp(ref / 1000, timezone.utc):%H:%M}Z in {time.time() - started:.0f}s")
 
