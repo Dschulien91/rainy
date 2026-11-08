@@ -94,6 +94,33 @@ MAIL_TEXT = {
 }
 
 
+# HTML version of the login mail: a button instead of the long link (the plain-text part keeps the link as fallback).
+# Inline styles only (mail clients ignore <style> and external CSS); the link is the only URL in the mail.
+MAIL_HTML = {
+    "de": ("Hallo,", "tippe auf den Knopf, um dich bei rainy anzumelden.", "Jetzt anmelden",
+           "Der Link gilt 15 Minuten und funktioniert nur einmal. Wenn du das nicht angefordert hast, kannst du diese "
+           "Mail einfach ignorieren."),
+    "en": ("Hi,", "tap the button to sign in to rainy.", "Sign in now",
+           "The link is valid for 15 minutes and works only once. If you did not ask for it, you can simply ignore "
+           "this email."),
+}
+
+
+def mail_html(lang, link):
+    hello, text, button, note = MAIL_HTML[lang]
+    href = html.escape(link, quote=True)
+    return f"""<!doctype html><html lang="{lang}"><body style="margin:0;padding:24px;background:#f4f6f9;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#14181f">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td align="center">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:460px;background:#ffffff;border-radius:16px;padding:28px">
+<tr><td style="font-size:20px;font-weight:700;color:#0B2A5B;padding-bottom:16px">rainy</td></tr>
+<tr><td style="font-size:16px;line-height:1.5;padding-bottom:22px">{html.escape(hello)}<br>{html.escape(text)}</td></tr>
+<tr><td style="padding-bottom:22px"><a href="{href}" style="display:inline-block;background:#2f7bf5;color:#ffffff;text-decoration:none;font-weight:600;font-size:16px;padding:12px 22px;border-radius:10px">{html.escape(button)}</a></td></tr>
+<tr><td style="font-size:13px;line-height:1.5;color:#6b7380">{html.escape(note)}</td></tr>
+</table>
+<p style="font-size:12px;color:#6b7380">rainy – hellorainy.com</p>
+</td></tr></table></body></html>"""
+
+
 # Confirmation page of the mailed link: self-contained (no external resources), colours of the app's dark default.
 PAGE_TEXT = {
     "de": {"title": "Bei rainy anmelden", "text": "Tippe auf den Knopf, um dich auf diesem Gerät anzumelden.",
@@ -532,6 +559,7 @@ class Auth:
         msg["Subject"], msg["From"], msg["To"] = subject, MAIL_FROM, to
         msg["Date"], msg["Message-ID"] = formatdate(localtime=False), make_msgid(domain=_origin(PUBLIC_URL).split("//")[1])
         msg.set_content(text.format(link=link))
+        msg.add_alternative(mail_html(lang, link), subtype="html")
         try:
             if SMTP_PORT == 465:
                 with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, context=ssl.create_default_context(), timeout=30) as s:
