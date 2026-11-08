@@ -12,6 +12,8 @@
   "meta.locale": "de-DE",
 
   // buttons, panels and static labels
+  "about.title": "Über rainy",
+  "about.data": "Datenquellen",
   "common.close": "Schließen",
   "common.done": "Fertig",
   "fab.settings": "Einstellungen",

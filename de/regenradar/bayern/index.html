@@ -85,8 +85,8 @@
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
     font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; overflow: hidden; }
-  :root { --sheet-h: 240px; }
-  body.hours-open { --sheet-h: 334px; }
+  :root { --sheet-h: 218px; }
+  body.hours-open { --sheet-h: 312px; }
   #map { position: absolute; inset: 0 0 var(--sheet-h) 0; }
   .leaflet-container { background: var(--night); }
   .grid-overlay { filter: blur(14px); }
@@ -109,8 +109,16 @@
   .brand { background: var(--bg); padding: 6px 12px; border-radius: 999px; font-weight: 800; font-size: 18px;
     letter-spacing: -0.02em; box-shadow: 0 2px 10px rgba(0,0,0,.15); }
   .brand { display: flex; align-items: center; gap: 6px; border: 0; color: inherit; font-family: inherit; cursor: pointer; }
-  .brand .gear { width: 20px; height: 20px; margin-left: 4px; color: var(--muted); }
-  .brand:hover .gear { color: var(--fg); }
+  /* opens right below the logo it belongs to (two classes: wins over the generic .alert-card placement further down) */
+  .alert-card.about-card { left: 12px; bottom: auto; top: calc(max(12px, env(safe-area-inset-top)) + 50px);
+    width: min(300px, calc(100% - 24px)); transform: translate(0, -6px); }
+  .alert-card.about-card.show { transform: translate(0, 0); }
+  .about-card .about-head { display: flex; align-items: center; gap: 6px; font-size: 17px; }
+  .about-card .about-head .logo { width: 20px; height: 20px; color: var(--logo); }
+  .about-card .about-head .version { margin-left: auto; }
+  .about-card .about-src { margin: 10px 0 4px; font-size: 13px; color: var(--muted); }
+  .about-card .about-links { margin: 0; font-size: 13px; }
+  .about-card .about-links a { color: inherit; }
   #brandName { color: var(--logo); }
   .brand .logo { width: 22px; height: 22px; color: var(--logo); }
   body.sunny .brand .logo, body.sunny #brandName { color: var(--sun); }
@@ -269,11 +277,6 @@
   .hour svg { width: 26px; height: 26px; }
   .hour .bar { width: 14px; height: 16px; display: flex; align-items: flex-end; background: var(--night); border-radius: 3px; overflow: hidden; }
   .hour .bar i { display: block; width: 100%; border-radius: 3px; }
-  .status { font-size: 11px; color: var(--muted); display: flex; justify-content: space-between; gap: 8px; }
-  .status a { color: inherit; }
-  .status #source { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .status .legal { flex: none; white-space: nowrap; }
-  .status .version { margin-left: 4px; }
   /* map data attribution (OpenStreetMap licence): tiny, low contrast, links to the full list in the legal notice */
   .leaflet-control-attribution.attrib { background: transparent !important; box-shadow: none; margin: 0 !important;
     padding: 0 6px 1px !important; font-size: 9px; line-height: 12px; opacity: .65; }
@@ -315,11 +318,18 @@
 <div id="map"></div>
 <div class="toast" id="toast" role="status"></div>
 <div class="alert-card" id="alertCard" role="dialog" aria-label="Regenwarnung" data-i18n-attr="aria-label:alert.title"></div>
+<div class="alert-card about-card" id="aboutCard" role="dialog" aria-label="Über rainy" data-i18n-attr="aria-label:about.title">
+  <div class="about-head"><svg class="logo"><use href="#logo"/></svg><b>rainy</b><span class="version" id="ver"></span></div>
+  <p class="about-src" id="source"></p>
+  <p class="about-links"><a href="/de/impressum.html" id="legalLink" data-i18n="credits.legal">Impressum</a> · <a href="/de/datenschutz.html" id="privacyLink" data-i18n="credits.privacy">Datenschutz</a> · <a href="/de/impressum.html#daten" id="dataLink" data-i18n="about.data">Datenquellen</a></p>
+  <div class="actions"><span></span><button class="done" id="aboutClose" data-i18n="common.close">Schließen</button></div>
+</div>
 <div class="alert-card" id="styleCard" role="dialog" aria-label="Einstellungen" data-i18n-attr="aria-label:settings.title"></div>
 <div class="topbar">
-<!-- logo and gear are one button: a tap anywhere on it opens the settings -->
-<button class="brand" id="styleBtn" title="Einstellungen" aria-label="Einstellungen" data-i18n-attr="title:fab.settings;aria-label:fab.settings"><svg class="logo" id="brandLogo"><use href="#logo"/></svg><span id="brandName">rainy</span><svg class="gear" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.8l1.6 2.4 2.8-.7.7 2.8 2.4 1.6-1.3 2.6 1.3 2.6-2.4 1.6-.7 2.8-2.8-.7L12 21.2l-1.6-2.4-2.8.7-.7-2.8-2.4-1.6L5.8 12 4.5 9.4l2.4-1.6.7-2.8 2.8.7z"/></g></svg></button>
+<!-- the logo opens a small card with the data source, legal links and the version -->
+<button class="brand" id="aboutBtn" title="Über rainy" aria-label="Über rainy" data-i18n-attr="title:about.title;aria-label:about.title"><svg class="logo" id="brandLogo"><use href="#logo"/></svg><span id="brandName">rainy</span></button>
 </div>
+<button class="fab" id="styleBtn" title="Einstellungen" aria-label="Einstellungen" data-i18n-attr="title:fab.settings;aria-label:fab.settings" style="--i:4"><svg viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.8l1.6 2.4 2.8-.7.7 2.8 2.4 1.6-1.3 2.6 1.3 2.6-2.4 1.6-.7 2.8-2.8-.7L12 21.2l-1.6-2.4-2.8.7-.7-2.8-2.4-1.6L5.8 12 4.5 9.4l2.4-1.6.7-2.8 2.8.7z"/></g></svg></button>
 <button class="fab" id="favs" title="Favoriten" aria-label="Favoriten" data-i18n-attr="title:fab.favs;aria-label:fab.favs" style="--i:3"><svg viewBox="0 0 24 24"><path d="M12 3.5l2.6 5.3 5.8.8-4.2 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.2-4.1 5.8-.8z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg></button>
 <button class="fab" id="search" title="Ort suchen" aria-label="Ort suchen" data-i18n-attr="title:fab.search;aria-label:fab.search" style="--i:2"><svg viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="10.5" cy="10.5" r="6"/><line x1="15" y1="15" x2="20" y2="20"/></g></svg></button>
 <button class="fab" id="refresh" title="Aktualisieren" aria-label="Aktualisieren" data-i18n-attr="title:fab.refresh;aria-label:fab.refresh" style="--i:1"><svg viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/><path d="M19.5 4.5v4.5H15"/></g></svg></button>
@@ -388,11 +398,6 @@
     <button data-range="3d" aria-expanded="false"><span data-i18n="range.3d">3 Tage</span> <span class="chev">▾</span></button>
   </div>
   <div class="hours" id="hours" hidden></div>
-  <div class="status">
-    <span id="source"></span>
-    <span class="legal"><a href="/de/impressum.html" id="legalLink" data-i18n="credits.legal">Impressum</a> · <a href="/de/datenschutz.html" id="privacyLink" data-i18n="credits.privacy">Datenschutz</a>
-      <span class="version" id="ver"></span></span>
-  </div>
 </div>
 
 <aside id="side">
@@ -414,11 +419,11 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=0.78"></script>
-<script src="lang/en.js?v=0.78"></script>
+<script src="lang/de.js?v=0.79"></script>
+<script src="lang/en.js?v=0.79"></script>
 <script>
 "use strict";
-const VERSION = "v0.78";
+const VERSION = "v0.79";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -593,6 +598,13 @@ if (DE_ONLY) {
 // Legal links in the status line; the data sources are listed in the legal notice (#daten / #data).
 document.getElementById("legalLink").href = `/${LANG}/impressum.html`;
 document.getElementById("privacyLink").href = `/${LANG}/datenschutz.html`;
+document.getElementById("dataLink").href = `/${LANG}/impressum.html#${LANG === "de" ? "daten" : "data"}`;
+// The logo opens the about card (data source, legal links, version); the close button or another tap hides it.
+document.getElementById("aboutBtn").addEventListener("click", () => {
+  document.getElementById("styleCard").classList.remove("show");
+  document.getElementById("aboutCard").classList.toggle("show");
+});
+document.getElementById("aboutClose").addEventListener("click", () => document.getElementById("aboutCard").classList.remove("show"));
 const RAIN_EU = !DE_ONLY && MAP_STYLE.rain === "eu";
 const FC_OWN = DE_ONLY && MAP_STYLE.fc === "own"; // our own forecast (server variant "own") instead of DWD's
 if (MAP_STYLE.theme !== "auto") document.documentElement.classList.add(`theme-${MAP_STYLE.theme}`);
@@ -2717,6 +2729,7 @@ function showSettings() {
 }
 document.getElementById("styleBtn").addEventListener("click", () => {
   const card = document.getElementById("styleCard");
+  document.getElementById("aboutCard").classList.remove("show");
   confirmDelete = false;
   if (card.classList.contains("show")) card.classList.remove("show"); else showSettings();
 });

@@ -13,6 +13,8 @@
   "meta.locale": "en-GB",
 
   // buttons, panels and static labels
+  "about.title": "About rainy",
+  "about.data": "Data sources",
   "common.close": "Close",
   "common.done": "Done",
   "fab.settings": "Settings",
