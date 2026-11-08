@@ -41,6 +41,7 @@ import sqlite3
 import ssl
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from email.message import EmailMessage
@@ -475,6 +476,13 @@ class Auth:
         try:
             with urllib.request.urlopen(req, timeout=15, context=ssl.create_default_context()) as r:
                 tok = json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            # log Google's error code only (e.g. invalid_client, redirect_uri_mismatch, invalid_grant), never secrets
+            try:
+                code = str(json.loads(e.read()).get("error", ""))[:40]
+            except Exception:
+                code = ""
+            return fail(f"token endpoint HTTP {e.code} {code}")
         except Exception as e:
             return fail(f"token endpoint {type(e).__name__}")
         # The id_token comes straight from Google's token endpoint over TLS, so per Google's OpenID Connect docs its

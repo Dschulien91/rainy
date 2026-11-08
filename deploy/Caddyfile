@@ -58,7 +58,7 @@ www.{$DOMAIN} {
 		@private path /server/* /deploy/* /tools/* /.git/* /.claude/* /*.md /*.py
 		respond @private 404
 		# the page itself must always be fresh (new versions), the libraries rarely change
-		@page path / /index.html /sw.js /de/* /en/* /sitemap.xml /robots.txt /manifest.json
+		@page path / /index.html /sw.js /de/* /en/* /lang/* /sitemap.xml /robots.txt /manifest.json
 		header @page Cache-Control "no-cache"
 		header /vendor/* Cache-Control "public, max-age=604800"
 		file_server

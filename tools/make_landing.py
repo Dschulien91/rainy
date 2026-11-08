@@ -283,6 +283,9 @@ def page(template, site, code, de_name, *, title, desc, preset, seo):
             f'<script>window.LANG = {json.dumps(code)}; window.ALT_URLS = {json.dumps(alts)};'
             + (f' window.PRESET = {json.dumps(preset, ensure_ascii=False)};' if preset else '') + '</script>')
     out = template.replace("<title>rainy</title>", head, 1)
+    # language files carry the app version in their URL, so browsers and Cloudflare fetch the new texts after an update
+    version = re.search(r'const VERSION = "v([^"]+)"', template).group(1)
+    out = re.sub(r'src="lang/(\w+)\.js(\?v=[^"]*)?"', lambda m: f'src="lang/{m.group(1)}.js?v={version}"', out)
     out = re.sub(r'<html lang="[^"]*">', f'<html lang="{code}">', out, count=1)
     if seo:  # else the general (German) text of index.html stays
         out = re.sub(r"<!--SEO-->.*?<!--/SEO-->", lambda _: f"<!--SEO-->\n{seo}\n<!--/SEO-->", out, count=1, flags=re.S)
