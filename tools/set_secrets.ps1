@@ -6,17 +6,24 @@
 $server = "root@2.31.201.83"
 $key = Join-Path $env:USERPROFILE ".ssh\rainy_server"
 
-function Ask($name, $label, [switch]$Secret) {
-  if ($Secret) {
-    $s = Read-Host "$label (verdeckt)" -AsSecureString
-    $v = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($s))
-  } else { $v = Read-Host $label }
-  if ($v) { return "$name=$($v.Trim())" } else { return $null }
+function Ask($name, $label, [switch]$Secret, [string]$Pattern = ".*", [string]$Hint = "") {
+  while ($true) {
+    if ($Secret) {
+      $s = Read-Host "$label (verdeckt)" -AsSecureString
+      $v = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($s))
+    } else { $v = Read-Host $label }
+    if (-not $v) { return $null }  # empty = keep the value on the server
+    $v = $v.Trim()
+    if ($v -match $Pattern -and $v -notmatch '\s') { return "$name=$v" }
+    Write-Host "Das sieht nicht richtig aus ($($v.Length) Zeichen). $Hint Bitte nur den Wert selbst einfuegen." -ForegroundColor Yellow
+  }
 }
 
 $lines = @(
-  (Ask "GOOGLE_CLIENT_ID" "Google OAuth Client-ID (endet auf .apps.googleusercontent.com)"),
-  (Ask "GOOGLE_CLIENT_SECRET" "Google OAuth Client-Secret" -Secret),
+  (Ask "GOOGLE_CLIENT_ID" "Google OAuth Client-ID (endet auf .apps.googleusercontent.com)" `
+    -Pattern '^[0-9]+-[a-z0-9]+\.apps\.googleusercontent\.com$' -Hint "Die Client-ID endet auf .apps.googleusercontent.com."),
+  (Ask "GOOGLE_CLIENT_SECRET" "Google OAuth Client-Secret (beginnt mit GOCSPX-)" -Secret `
+    -Pattern '^GOCSPX-[A-Za-z0-9_-]{20,}$' -Hint "Das Client-Secret beginnt mit GOCSPX- und ist etwa 35 Zeichen lang."),
   (Ask "SMTP_HOST" "SMTP-Server (All-Inkl, z. B. w017ff82.kasserver.com)"),
   (Ask "SMTP_USER" "SMTP-Benutzer (bei All-Inkl der Postfach-Login, z. B. hey@hellorainy.com)"),
   (Ask "SMTP_PASS" "SMTP-Passwort des Postfachs" -Secret)
