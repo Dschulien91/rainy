@@ -365,10 +365,14 @@ class Mosaic:
                 self.cache.popitem(last=False)
         return png
 
-    def rain_tile(self, key, ts, z, x, y, use_de=True, variant="dwd"):
+    def rain_tile(self, key, ts, z, x, y, use_de=True, variant="dwd", prerender=False):
         """Rain tile PNG in the stepped look (palette.paint): the rate is sampled on a coarse grid (~2 samples per
         radar cell, at most one per tile pixel, plus a margin for the blur and the bicubic upsampling) and painted
-        2x supersampled. Dry tiles are one shared transparent PNG."""
+        2x supersampled. Dry tiles are one shared transparent PNG.
+        Requests from users (prerender=False) mark the renderer busy for a moment; the pre-render loop pauses while
+        users are waiting, so on-demand tiles (zoom 9-10 and new runs) are not queued behind ~10,000 pre-renders."""
+        if not prerender:
+            self.user_busy_until = time.monotonic() + USER_PRIORITY_S
         def make():
             started = time.perf_counter()
             span = 2 * WORLD / (1 << z)
@@ -438,6 +442,17 @@ class Mosaic:
         return out
 
 
+USER_PRIORITY_S = 0.4  # after a user's tile request the pre-render loop pauses this long (user tiles first)
+
+
+def _yield_to_users(mosaic):
+    """Pause pre-rendering while users are requesting tiles (the GIL would otherwise share the CPU with them)."""
+    waited = 0.0
+    while time.monotonic() < getattr(mosaic, "user_busy_until", 0.0) and waited < 10.0:
+        time.sleep(0.05)
+        waited += 0.05
+
+
 def prerender_loop(mosaic, log):
     """Render the German rain tiles of every frame (zoom PRERENDER_ZOOMS) as soon as a new radar run is in, so no
     user waits for them (~120 tiles per frame). The app asks for tiles up to zoom 10 (enlarges them above); zoom 9 and
@@ -457,10 +472,11 @@ def prerender_loop(mosaic, log):
                         k = (1 << z) / (2 * WORLD)
                         for x in range(int((x0 + WORLD) * k), int((x1 + WORLD) * k) + 1):
                             for y in range(int((WORLD - y1) * k), int((WORLD - y0) * k) + 1):
-                                mosaic.rain_tile(mosaic.key(), f["ts"], z, x, y)
+                                _yield_to_users(mosaic)
+                                mosaic.rain_tile(mosaic.key(), f["ts"], z, x, y, prerender=True)
                                 n += 1
                                 if f["fc"] and mosaic.de.own_ref == mosaic.de.ref:  # our own forecast, once ready
-                                    mosaic.rain_tile(mosaic.key("own"), f["ts"], z, x, y, variant="own")
+                                    mosaic.rain_tile(mosaic.key("own"), f["ts"], z, x, y, variant="own", prerender=True)
                                     n += 1
                     if mosaic.key() + "|" + mosaic.key("own") != key:  # newer run or own forecast: start over
                         break
