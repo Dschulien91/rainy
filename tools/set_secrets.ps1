@@ -40,7 +40,7 @@ $($lines -join "`n")
 RAINY_SECRETS_END
 grep -q '^AUTH_SECRET=' .env || echo "AUTH_SECRET=`$(openssl rand -hex 32)" >> .env
 grep -q '^MAIL_FROM=' .env || echo 'MAIL_FROM=rainy <hey@hellorainy.com>' >> .env
-grep -q '^SMTP_PORT=' .env || echo 'SMTP_PORT=465' >> .env
+grep -q '^SMTP_PORT=' .env || echo 'SMTP_PORT=587' >> .env  # Hetzner blocks outgoing 465 and 25
 sed -i 's/\r$//' .env
 chmod 600 .env
 docker compose up -d api >/dev/null 2>&1
