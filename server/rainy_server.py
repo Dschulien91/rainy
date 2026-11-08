@@ -98,7 +98,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v0.74"
+VERSION = "server-v0.75"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything.
 EDITION = os.environ.get("EDITION", "de")
@@ -491,7 +491,7 @@ class OwnNowcast:
         dwd_new = self._dwd_new_cells(ref)  # takes de.lock itself: not inside the block below
         with de.lock:
             if de.ref == ref:
-                de.fc_own, de.own_ref = grids, ref
+                de.set_own(ref, grids)
                 # scored by fcverify only: pure S-PROG; DWD's own forecast plus the model's new showers in the 2nd hour
                 de.fc_shadow = {"model": model, "dwdnew": dwd_new, "cells": cells}
         self.done = ref
@@ -942,7 +942,9 @@ class Handler(BaseHTTPRequestHandler):
                        else MOSAIC.rain_tile(key, ts, z, x, y, use_de=kind != "raineu", variant=variant))
                 if png is None:
                     return self.send(404, b"unknown frame", "text/plain", 30)
-                return self.send(200, png, "image/png", 86400)  # the key in the URL makes the content immutable
+                # the key names the run: immutable while that run is kept; an older key (a tab asleep for a while)
+                # gets the current data, cached only briefly
+                return self.send(200, png, "image/png", 86400 if kind == "cloud" or MOSAIC.key_known(key) else 60)
             if DEV and u.path.startswith("/api/dev/"):  # never in production (env RAINY_DEV=1 only)
                 if u.path == "/api/dev/storm":
                     devtools.storm(DE, PTYPE, THUNDER, float(q["lat"]), float(q["lon"]), int(q.get("arrive", 40)))

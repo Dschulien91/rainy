@@ -126,6 +126,11 @@ class GermanyDwd:
         self.lock = threading.Lock()
         self.obs, self.fc, self.ref = {}, {}, None
         self.obs_raw = {}  # measured frames as DWD sent them (self.obs: with the gauge corrections of the newest run)
+        # The last KEEP_RUNS runs: a tile URL names its run in the key and is cached as immutable, so it must show that
+        # run, not whatever is current when it is first requested. Rendering the current data under an older key mixed
+        # two runs (and DWD with our own forecast) in one timeline: areas jumped, vanished and came back (08.11.).
+        self.snaps = OrderedDict()  # ref -> (obs, fc)
+        self.own_snaps = {}         # ref -> our own forecast frames of that run
         self.fc_own, self.own_ref, self.fc_shadow = {}, None, {}  # our own nowcast (rainy_server.OwnNowcast) for the same runs
         self.rgb = np.array([[int(h[i:i + 2], 16) for i in (0, 2, 4)] for h in self.CLASSES], np.int32)
         self.val = np.array(list(self.CLASSES.values()), np.float32)
@@ -172,20 +177,50 @@ class GermanyDwd:
         x0, y0, x1, y1 = self.BBOX
         return (np.asarray(x) - x0) / self.CELL - 0.5, (y1 - np.asarray(y)) / self.CELL - 0.5
 
-    def frames(self):
-        with self.lock:
-            return ([{"ts": t, "fc": False} for t in sorted(self.obs)] +
-                    [{"ts": t, "fc": True} for t in sorted(self.fc)]), self.ref
+    def _snap(self):
+        """Remember the current run (call with self.lock held, after obs/fc/ref changed)."""
+        if self.ref is None:
+            return
+        self.snaps[self.ref] = (self.obs, self.fc)
+        self.snaps.move_to_end(self.ref)
+        while len(self.snaps) > KEEP_RUNS:
+            self.snaps.popitem(last=False)
+        for r in [r for r in self.own_snaps if r not in self.snaps]:
+            del self.own_snaps[r]
 
-    def grid(self, ts, variant="dwd"):
-        """Rate grid of a frame: measured frames are the same for both variants; forecast frames come from the DWD
-        nowcast or from our own (variant "own", when it exists for the current run, else DWD)."""
+    def set_own(self, ref, grids):
+        """Our own forecast for run ref (call with self.lock held)."""
+        self.fc_own, self.own_ref = grids, ref
+        self.own_snaps[ref] = grids
+
+    def has_run(self, ref):
         with self.lock:
-            if ts in self.obs:
-                return self.obs[ts]
-            if variant == "own" and self.own_ref == self.ref and ts in self.fc_own:
-                return self.fc_own[ts]
-            return self.fc.get(ts)
+            return ref in self.snaps
+
+    def frames(self, run=None):
+        """Frames of the current run, or of an earlier one that is still kept (run = its ref)."""
+        with self.lock:
+            obs, fc, ref = (*self.snaps[run], run) if run in self.snaps else (self.obs, self.fc, self.ref)
+            return ([{"ts": t, "fc": False} for t in sorted(obs)] +
+                    [{"ts": t, "fc": True} for t in sorted(fc)]), ref
+
+    def grid(self, ts, variant="dwd", run=None, own=None):
+        """Rate grid of a frame: measured frames are the same for both variants; forecast frames come from the DWD
+        nowcast or from our own (variant "own", when it exists for the run, else DWD).
+        run: the run a tile key names (None or no longer kept: the current one). own: False = the DWD forecast even
+        for variant "own" (key made before our own forecast was ready), True/None = our own when it exists."""
+        with self.lock:
+            if run in self.snaps:
+                obs, fc = self.snaps[run]
+                fo = self.own_snaps.get(run)
+            else:
+                obs, fc = self.obs, self.fc
+                fo = self.fc_own if self.own_ref == self.ref else None
+            if ts in obs:
+                return obs[ts]
+            if variant == "own" and own is not False and fo and ts in fo:
+                return fo[ts]
+            return fc.get(ts)
 
     def _latest_run(self):
         xml = self.fetch(f"{self.WMS.rsplit('/', 1)[0]}/Niederschlagsradar/ows?service=WMS&version=1.3.0&request=GetCapabilities").decode("utf-8", "ignore")
@@ -275,6 +310,7 @@ class GermanyDwd:
             self.obs_raw = raw
             self.obs = {t: grids[t] for t in raw}
             self.fc, self.ref = {t: g for t, g in grids.items() if t > ref}, ref
+            self._snap()
         return n
 
     def _update_wms(self):
@@ -293,6 +329,7 @@ class GermanyDwd:
             self.obs = {t: g for t, g in {**self.obs, **got_obs}.items() if t in obs_t}
             if got_fc:
                 self.fc, self.ref = got_fc, ref
+            self._snap()
         return len(new_obs) + len(new_fc)
 
 
@@ -319,12 +356,29 @@ class Mosaic:
         last_obs = min(t for t in (self.de.ref, self.regions["eu"].ref) if t) if (self.de.ref or self.regions["eu"].ref) else now
         return [{"ts": t, "fc": t > last_obs} for t in range(start, end + 1, STEP_MS)]
 
-    def _nearest_de(self, ts, variant, tol_ms=150_000):
-        frames, _ = self.de.frames()
+    @staticmethod
+    def key_run(key):
+        """(DWD run in ms, own) named by a tile key: "<de ref min>-<eu>-<us>-<sat>[-o0|-o1]"; own None without suffix."""
+        p = key.split("-")
+        try:
+            run = int(p[0]) * 60_000
+        except ValueError:
+            return None, None
+        return run, {"o1": True, "o0": False}.get(p[-1])
+
+    def key_known(self, key):
+        """The key's run is still kept: its tiles can be cached as immutable."""
+        run, _ = self.key_run(key)
+        if self.de_only:
+            return run is not None and self.de.has_run(run)
+        return key in (self.key(), self.key("own"))
+
+    def _nearest_de(self, ts, variant, tol_ms=150_000, run=None, own=None):
+        frames, _ = self.de.frames(run)
         if not frames:
             return None
         best = min(frames, key=lambda f: abs(f["ts"] - ts))
-        return self.de.grid(best["ts"], variant) if abs(best["ts"] - ts) <= tol_ms else None
+        return self.de.grid(best["ts"], variant, run, own) if abs(best["ts"] - ts) <= tol_ms else None
 
     @staticmethod
     def _nearest(src, ts, tol_ms):
@@ -335,7 +389,7 @@ class Mosaic:
         return src.grid(best["ts"]) if abs(best["ts"] - ts) <= tol_ms else None
 
     # ---------- composite ----------
-    def rain(self, ts, X, Y, use_de=True, variant="dwd"):
+    def rain(self, ts, X, Y, use_de=True, variant="dwd", run=None, own=None):
         """Rain rate and a 'faint' flag (satellite estimate) at Web Mercator points X, Y.
         use_de=False: OPERA + our nowcast only (recorded in parallel to decide whether DWD is worth keeping)."""
         rate = np.zeros(X.shape, np.float32)
@@ -346,7 +400,7 @@ class Mosaic:
                 r, cov = self.sample(self.regions[name], g, X, Y)
                 rate[cov] = r[cov]
                 covered |= cov
-        g = self._nearest_de(ts, variant) if use_de else None
+        g = self._nearest_de(ts, variant, run=run, own=own) if use_de else None
         if g is not None:
             col, row = (v.astype(np.float32) for v in self.de.to_pixels(X, Y))
             d = cv2.remap(g.astype(np.float32), col, row, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
@@ -381,6 +435,8 @@ class Mosaic:
         users are waiting, so on-demand tiles (zoom 9-10 and new runs) are not queued behind ~10,000 pre-renders."""
         if not prerender:
             self.user_busy_until = time.monotonic() + USER_PRIORITY_S
+        run, own = self.key_run(key)
+
         def make():
             started = time.perf_counter()
             span = 2 * WORLD / (1 << z)
@@ -388,7 +444,7 @@ class Mosaic:
             step = span / n
             idx = np.arange(-COARSE_MARGIN, n + COARSE_MARGIN) + 0.5
             X, Y = np.meshgrid(-WORLD + x * span + idx * step, WORLD - y * span - idx * step)
-            rate, faint = self.rain(ts, X, Y, use_de, variant)
+            rate, faint = self.rain(ts, X, Y, use_de, variant, run, own)
             rgba = self.paint(rate, self.kind(ts, X, Y), faint, n, COARSE_MARGIN, TILE)
             if rgba is None:
                 png = EMPTY_PNG
@@ -450,6 +506,7 @@ class Mosaic:
         return out
 
 
+KEEP_RUNS = 3  # runs kept for tile keys of the last ~15 min (the app reloads every 5 min)
 USER_PRIORITY_S = 0.4  # after a user's tile request the pre-render loop pauses this long (user tiles first)
 
 
