@@ -98,7 +98,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v0.73"
+VERSION = "server-v0.74"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything.
 EDITION = os.environ.get("EDITION", "de")
@@ -1109,7 +1109,7 @@ class Handler(BaseHTTPRequestHandler):
 CLOUDS = clouds.CloudNowcast(fetch, log, OPENMETEO_URL, openmeteo_available, ll_to_3857)
 DE = mosaic.GermanyDwd(fetch, log)
 PTYPE = ptype.PrecipType(fetch, log, DE)
-DE.drizzle = gauges.GaugeDrizzle(fetch, log, DE, mosaic.merc)
+DE.drizzle = gauges.GaugeDrizzle(fetch, log, DE, mosaic.merc, state_dir=os.path.join(DATA_DIR, "gauges"))
 GRID_VERIFY = fcverify.GridVerify(DE, log)
 OWN = OwnNowcast(DE)
 # Germany edition: sunshine from DWD satellite data (sunny_de.py) behind the same cloud API and tiles as the full

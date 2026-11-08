@@ -22,6 +22,8 @@ the echo during the time those values cover. The gauges report 20-110 min late, 
 arrived was erased (06.11.: Black Forest edge, gauge 00757 wet, map dry): they cannot know about rain after their last value.
 """
 import io
+import json
+import os
 import re
 import threading
 import time
@@ -60,13 +62,53 @@ VETO_MAX_AGE_MIN = 150  # the "now" files are 20-110 min behind (04.11. morning:
 
 
 class GaugeDrizzle:
-    def __init__(self, fetch, log, de, merc):
+    def __init__(self, fetch, log, de, merc, state_dir=None):
         self.fetch, self.log, self.de, self.merc = fetch, log, de, merc
         self.lock = threading.Lock()
         self.stations = []   # (id, lat, lon)
         self.errors = 0
         self.radar_wet = {}  # ts -> packed mask where the radar showed rain (slightly widened)
         self.latest = {}     # id -> (end time of the newest value in ms, [previous, newest] mm)
+        # state_dir: the gauge values and the radar wet masks survive a restart there. Without them the first
+        # ~10 min (gauges re-read) up to ~2 h (radar history for the veto) after a restart had no corrections.
+        self.state_dir = state_dir
+        self._load_state()
+
+    def _load_state(self):
+        if not self.state_dir:
+            return
+        try:
+            with open(os.path.join(self.state_dir, "gauges_latest.json")) as f:
+                self.latest = {sid: (int(ts), list(v)) for sid, (ts, v) in json.load(f).items()}
+            with open(os.path.join(self.state_dir, "gauges_stations.json")) as f:
+                self.stations = [tuple(st) for st in json.load(f)]
+        except (OSError, ValueError):
+            pass
+        wet_dir = os.path.join(self.state_dir, "radar_wet")
+        cutoff = time.time() * 1000 - VETO_HISTORY_MS
+        for name in os.listdir(wet_dir) if os.path.isdir(wet_dir) else []:
+            try:
+                ts = int(name.split(".")[0])
+                if ts >= cutoff:
+                    self.radar_wet[ts] = np.load(os.path.join(wet_dir, name))
+            except (OSError, ValueError):
+                pass
+
+    def _save_latest(self):
+        if not self.state_dir:
+            return
+        try:
+            os.makedirs(self.state_dir, exist_ok=True)
+            with self.lock:
+                data = dict(self.latest)
+            tmp = os.path.join(self.state_dir, "gauges_latest.json.tmp")
+            with open(tmp, "w") as f:
+                json.dump(data, f)
+            os.replace(tmp, os.path.join(self.state_dir, "gauges_latest.json"))
+            with open(os.path.join(self.state_dir, "gauges_stations.json"), "w") as f:
+                json.dump(self.stations, f)
+        except OSError as e:
+            self.log(f"gauges: state not saved ({e})")
 
     def _station_list(self):
         text = self.fetch(f"{CDC}zehn_now_rr_Beschreibung_Stationen.txt", timeout=60).decode("latin-1")
@@ -158,18 +200,30 @@ class GaugeDrizzle:
     def _remember(self, ts, grid):
         wet = cv2.dilate((np.asarray(grid, np.float32) >= 0.05).astype(np.uint8), np.ones((7, 7), np.uint8))
         self.radar_wet[ts] = np.packbits(wet)
+        wet_dir = os.path.join(self.state_dir, "radar_wet") if self.state_dir else None
+        if wet_dir:
+            try:
+                os.makedirs(wet_dir, exist_ok=True)
+                np.save(os.path.join(wet_dir, f"{ts}.npy"), self.radar_wet[ts])
+            except OSError:
+                pass
         for t in [t for t in self.radar_wet if t < ts - VETO_HISTORY_MS]:
             del self.radar_wet[t]
+            if wet_dir:
+                try:
+                    os.remove(os.path.join(wet_dir, f"{t}.npy"))
+                except OSError:
+                    pass
 
-    def veto(self, grids, ref, obs):
-        """Remove weak echoes over dry gauges from the analysis (ref) and the forecast frames, in place.
-        obs: earlier analyses, to seed the radar history after a start. Returns the number of pixels removed."""
+    def veto(self, grids, ref, raw):
+        """Remove weak echoes over dry gauges from every frame (past, analysis, forecast), in place.
+        raw: the measured frames as the radar sent them (the radar history the gauges are compared with).
+        Returns the number of pixels removed from the analysis (ref)."""
         if ref not in grids:
             return 0
-        for t, g in obs.items():
-            if t not in self.radar_wet:
+        for t, g in raw.items():
+            if t not in self.radar_wet or t == ref:
                 self._remember(t, g)
-        self._remember(ref, grids[ref])
         now = time.time() * 1000
         where = {sid: (lat, lon) for sid, lat, lon in self.stations}
         with self.lock:
@@ -200,8 +254,6 @@ class GaugeDrizzle:
         area = (n_dry >= VETO_MIN_DRY - 0.5) & ~any_damp & was_wet
         removed = 0
         for ts, g in grids.items():
-            if ts < ref:
-                continue
             weak = area & (np.asarray(g, np.float32) < VETO_MAX)
             if ts == ref:
                 removed = int((weak & (np.asarray(g, np.float32) > 0)).sum())
@@ -209,7 +261,8 @@ class GaugeDrizzle:
         return removed
 
     def apply(self, grids, ref):
-        """Add the gauge drizzle to the radar analysis (ref) and the forecast frames (faded), in place."""
+        """Add the gauge drizzle to the measured frames and the analysis (ref) at full strength and to the forecast
+        frames (faded), in place. Whether the radar already sees it is decided on the analysis, for all frames alike."""
         wet = self.wet()
         if not wet or ref not in grids:
             return []
@@ -229,9 +282,7 @@ class GaugeDrizzle:
             # flat top, soft edge: reads as a small drizzle area, not a dot
             disc = (mmh * np.clip((1.0 - d) / 0.4, 0.0, 1.0)).astype(np.float32)
             for ts, g in grids.items():
-                if ts < ref:
-                    continue
-                f = 1.0 if ts == ref else max(0.0, 1.0 - (ts - ref) / (FADE_MIN * 60_000))
+                f = 1.0 if ts <= ref else max(0.0, 1.0 - (ts - ref) / (FADE_MIN * 60_000))
                 if f > 0:
                     g[r0:r1, c0:c1] = np.maximum(g[r0:r1, c0:c1], (disc * f).astype(g.dtype))
             used.append(sid)
@@ -254,6 +305,7 @@ class GaugeDrizzle:
                 if todo:
                     done = self._read(todo)
                     seen.update({sid: stamps[sid] for sid in done})
+                    self._save_latest()
                     self._say(f"{len(done)} of {len(todo)} new files", started)
             except Exception as e:
                 self.log(f"gauges: {e}")

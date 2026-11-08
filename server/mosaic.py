@@ -125,6 +125,7 @@ class GermanyDwd:
         self.nx, self.ny = int(round((x1 - x0) / self.CELL)), int(round((y1 - y0) / self.CELL))
         self.lock = threading.Lock()
         self.obs, self.fc, self.ref = {}, {}, None
+        self.obs_raw = {}  # measured frames as DWD sent them (self.obs: with the gauge corrections of the newest run)
         self.fc_own, self.own_ref, self.fc_shadow = {}, None, {}  # our own nowcast (rainy_server.OwnNowcast) for the same runs
         self.rgb = np.array([[int(h[i:i + 2], 16) for i in (0, 2, 4)] for h in self.CLASSES], np.int32)
         self.val = np.array(list(self.CLASSES.values()), np.float32)
@@ -254,19 +255,26 @@ class GermanyDwd:
             return 0
         obs_t = [ref - k * STEP_MS for k in range(12, -1, -1)]
         got = self._load_rv(ref)
-        if getattr(self, "drizzle", None) is not None:  # gauges.py: drizzle the gauges measure below the radar beam,
-            self.drizzle.apply(got, ref)                # and weak echoes aloft that never reach the dry gauges
-            self.vetoed = self.drizzle.veto(got, ref, self.obs)
-        obs = {t: g for t, g in self.obs.items() if t in obs_t}
-        obs[ref] = got[ref]
+        raw = {t: g for t, g in self.obs_raw.items() if t in obs_t}
+        raw[ref] = got[ref]
         n = 25
         for t in obs_t:  # history (first start): the analysis of each earlier run
-            if t not in obs and t in runs:
-                obs[t] = self._load_rv(t)[t]
+            if t not in raw and t in runs:
+                raw[t] = self._load_rv(t)[t]
                 n += 1
+        # gauges.py: drizzle the gauges measure below the radar beam, and weak echoes aloft that never reach the dry
+        # gauges. Applied with the same gauge state to every frame of the timeline, past ones included: corrected
+        # only in the frame that was newest at the time, weak areas came and went from one 5-min step to the next
+        # (08.11. Leipzig; after a restart the reloaded history had no corrections at all)
+        grids = {t: g.copy() for t, g in raw.items()}
+        grids.update({t: g for t, g in got.items() if t > ref})
+        if getattr(self, "drizzle", None) is not None:
+            self.drizzle.apply(grids, ref)
+            self.vetoed = self.drizzle.veto(grids, ref, raw)
         with self.lock:
-            self.obs = obs
-            self.fc, self.ref = {t: g for t, g in got.items() if t > ref}, ref
+            self.obs_raw = raw
+            self.obs = {t: grids[t] for t in raw}
+            self.fc, self.ref = {t: g for t, g in grids.items() if t > ref}, ref
         return n
 
     def _update_wms(self):
