@@ -225,6 +225,23 @@
   .hour .bar i { display: block; width: 100%; border-radius: 3px; }
   .status { font-size: 11px; color: var(--muted); display: flex; justify-content: space-between; gap: 8px; }
   .status a { color: inherit; }
+  /* Desktop: the app on the left two thirds, the right third is a column with the ad slot and, below it, the text
+     (search engines read the text; users scroll the column independently of the map). Phones: unchanged. */
+  #side { display: none; }
+  @media (min-width: 1024px) {
+    body { position: relative; width: 66.667vw; overflow: hidden; }
+    .panel { right: 33.333vw; }
+    #side { display: block; position: fixed; top: 0; right: 0; bottom: 0; width: 33.333vw; overflow-y: auto;
+      background: var(--bg); border-left: 1px solid var(--line); padding: 20px 24px 40px; box-sizing: border-box; }
+  }
+  .ad-slot { width: 100%; max-width: 336px; min-height: 600px; margin: 0 auto 28px; border: 1px dashed var(--line);
+    border-radius: 12px; display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 12px; }
+  .seo { max-width: 560px; margin: 0 auto; font-size: 15px; line-height: 1.6; }
+  .seo h1 { font-size: 24px; line-height: 1.25; margin: 0 0 12px; }
+  .seo h2 { font-size: 18px; margin: 26px 0 8px; }
+  .seo p, .seo li { color: var(--fg); }
+  .seo a { color: var(--rain); }
+  .seo .links { columns: 2; padding-left: 18px; }
 </style>
 </head>
 <body>
@@ -310,12 +327,38 @@
   </div>
 </div>
 
+<aside id="side">
+  <div class="ad-slot" id="adSlot">Anzeige</div>
+  <!--SEO-->
+  <article class="seo">
+    <h1>Regenradar Deutschland – Regen in den nächsten 2 Stunden</h1>
+    <p>rainy zeigt dir auf einen Blick, wo es in Deutschland gerade regnet und wohin die Regenwolken in den nächsten
+      zwei Stunden ziehen. Grundlage sind die Radarbilder des Deutschen Wetterdienstes (DWD), die alle fünf Minuten
+      neu erscheinen. Für deinen Standort siehst du minutengenau, wann der Regen beginnt und wann er wieder aufhört.</p>
+    <h2>So funktioniert das Regenradar</h2>
+    <p>Das Wetterradar des DWD tastet die Atmosphäre in ganz Deutschland ab und misst, wo Niederschlag fällt und wie
+      stark er ist. Aus der Bewegung der letzten Radarbilder wird berechnet, wohin der Regen zieht. So entsteht eine
+      Vorhersage für die nächsten zwei Stunden in 5-Minuten-Schritten. Schwacher Niesel, den das Radar nicht erfasst,
+      wird zusätzlich aus Messstationen ergänzt.</p>
+    <h2>Wie genau ist die Vorhersage?</h2>
+    <p>Für die nächsten 15 bis 30 Minuten ist eine Radarvorhersage sehr zuverlässig. Je weiter sie in die Zukunft
+      reicht, desto unsicherer wird sie, weil sich Schauer neu bilden oder auflösen können. Wir prüfen unsere
+      Vorhersage laufend gegen den Regen, der später tatsächlich gefallen ist.</p>
+    <h2>24 Stunden und 3 Tage</h2>
+    <p>Über die zwei Stunden hinaus zeigt rainy die Vorhersage der Wettermodelle des DWD: Regen, Temperatur und
+      Bewölkung für die nächsten 24 Stunden und drei Tage.</p>
+    <h2>Ohne Anmeldung, ohne Tracking</h2>
+    <p>rainy funktioniert ohne Konto. Dein Standort wird nur grob gerundet abgefragt und nicht gespeichert.</p>
+  </article>
+  <!--/SEO-->
+</aside>
+
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
 <script>
 "use strict";
-const VERSION = "v0.67";
+const VERSION = "v0.68";
 const FALLBACK = { lat: 53.5511, lon: 9.9937, name: "Hamburg" };
 const DWD_WMS = "https://maps.dwd.de/geoserver/dwd/wms";
 const EUM_WMS = "https://view.eumetsat.int/geoserver/ows";
@@ -2164,7 +2207,9 @@ async function setLocation(loc, picked, knownName) {
   if (req !== locRequest) return;
   state.placeName = name;
   renderPlace();
-  if (!picked) {
+  // a landing page's place (window.PRESET) is not the user's home: do not remember it for the next visit
+  const preset = window.PRESET && Math.abs(loc.lat - window.PRESET.lat) < 1e-6 && Math.abs(loc.lon - window.PRESET.lon) < 1e-6;
+  if (!picked && !preset) {
     try { localStorage.setItem("rainy.last", JSON.stringify({ lat: loc.lat, lon: loc.lon, name, zoom: map.getZoom() })); } catch {}
   }
   if (needsGrid()) loadGrid();
@@ -2558,6 +2603,13 @@ try {
 
 (async function init() {
   const params = new URLSearchParams(location.search);
+  // Landing pages (/regenradar/<place>/, tools/make_landing.py) set window.PRESET = {lat, lon, zoom, name}: open that
+  // place at that zoom instead of the user's position, unless the URL itself names a place.
+  const PRESET = window.PRESET;
+  if (PRESET && !params.has("lat")) {
+    params.set("lat", PRESET.lat); params.set("lon", PRESET.lon);
+    if (PRESET.zoom && !params.has("zoom")) params.set("zoom", PRESET.zoom);
+  }
   let cached = null;
   try { cached = JSON.parse(localStorage.getItem("rainy.last")); } catch {}
   if (params.has("lat")) cached = null;
@@ -2570,6 +2622,15 @@ try {
     map.setView([cached.lat, cached.lon], cached.zoom, { animate: false });
     await setLocation(cached, false, cached.name);
   }
+  // Germany edition: a place outside the radar area (e.g. on holiday in Italy) has no radar frames, so the map would
+  // stay empty. Then show the Germany overview with its radar instead; the user can still pick any place.
+  const GERMANY_VIEW = { lat: 51.16, lon: 10.45, zoom: 6, name: "Deutschland" };
+  const outsideRadar = () => DE_ONLY && API_BASE && !state.radarPoint.length && !params.has("lat");
+  async function showGermany() {
+    map.setView([GERMANY_VIEW.lat, GERMANY_VIEW.lon], GERMANY_VIEW.zoom, { animate: false });
+    await setLocation({ lat: GERMANY_VIEW.lat, lon: GERMANY_VIEW.lon }, false, GERMANY_VIEW.name);
+  }
+  if (cached && outsideRadar()) await showGermany();
   let loc = await posP;
   if (!loc && !cached) loc = { lat: FALLBACK.lat, lon: FALLBACK.lon };
   if (loc && (!cached || map.distance([loc.lat, loc.lon], [cached.lat, cached.lon]) > 1000)) {
@@ -2580,7 +2641,8 @@ try {
     // ?zoom= (shared links) or the city's size; ?view=lat,lon centres the map elsewhere than the place
     const view = (params.get("view") || "").split(",").map(Number);
     map.setView(view.length === 2 && view.every(isFinite) ? view : [loc.lat, loc.lon], +params.get("zoom") || zoom, { animate: false });
-    await setLocation(loc, false, place ? place.name : undefined);
+    await setLocation(loc, false, PRESET && PRESET.name ? PRESET.name : place ? place.name : undefined);
+    if (outsideRadar()) await showGermany();
     if (params.has("t")) { // ?t=30: open the timeline 30 min ahead (shared links, screenshots)
       const s = cur();
       s.idx = clamp(s.frames.findIndex((f) => f.ts >= Date.now() + +params.get("t") * 60e3), 0, s.frames.length - 1);
