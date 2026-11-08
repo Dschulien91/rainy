@@ -15,10 +15,19 @@ www.{$DOMAIN} {
 		X-Robots-Tag "noindex, nofollow"
 	}
 
-	# Languages: everything German lives under /de/. The bare domain goes to /de/ (only German exists so far; with an
-	# English version this becomes a choice by the browser's Accept-Language, for the bare domain only).
-	@root path /
-	redir @root /de/ 302
+	# Languages: one folder per language (/de/, /en/). Only the bare domain picks one: the language the user chose
+	# (cookie rainy_lang, set by the switcher), else German for browsers that prefer German, else English. Deep links
+	# are never redirected (search engines crawl without Accept-Language). New language: add it here and in the switcher.
+	route / {
+		header Vary "Accept-Language, Cookie"
+		@chosenDe header Cookie *rainy_lang=de*
+		redir @chosenDe /de/ 302
+		@chosenEn header Cookie *rainy_lang=en*
+		redir @chosenEn /en/ 302
+		@browserDe header_regexp Accept-Language ^\s*de
+		redir @browserDe /de/ 302
+		redir * /en/ 302
+	}
 	# old addresses before the /de/ folder (08.11.)
 	redir /regenradar/* /de{uri} 301
 	redir /impressum.html /de/impressum.html 301
@@ -45,7 +54,7 @@ www.{$DOMAIN} {
 		@private path /server/* /deploy/* /tools/* /.git/* /.claude/* /*.md /*.py
 		respond @private 404
 		# the page itself must always be fresh (new versions), the libraries rarely change
-		@page path / /index.html /sw.js /de/* /sitemap.xml /robots.txt /manifest.json
+		@page path / /index.html /sw.js /de/* /en/* /sitemap.xml /robots.txt /manifest.json
 		header @page Cache-Control "no-cache"
 		header /vendor/* Cache-Control "public, max-age=604800"
 		file_server
