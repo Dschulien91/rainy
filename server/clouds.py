@@ -321,8 +321,9 @@ class CloudNowcast:
         x0, y0, x1, y1 = BBOX
         return ((X - x0) / (x1 - x0) * N - 0.5).astype(np.float32), ((y1 - Y) / (y1 - y0) * N - 0.5).astype(np.float32)
 
-    def image(self, ts, bbox, w, h):
-        """Cloudiness as a grey + alpha PNG (alpha 0 outside the covered area); None for an unknown frame."""
+    def image(self, ts, bbox, w, h, run=None):
+        """Cloudiness as a grey + alpha PNG (alpha 0 outside the covered area); None for an unknown frame.
+        run: ignored (full edition: the current run; its tiles are keyed by run all the same)."""
         g = self.grid(ts)
         if g is None:
             return None

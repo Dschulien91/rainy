@@ -98,7 +98,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v0.75"
+VERSION = "server-v0.76"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything.
 EDITION = os.environ.get("EDITION", "de")
@@ -944,7 +944,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send(404, b"unknown frame", "text/plain", 30)
                 # the key names the run: immutable while that run is kept; an older key (a tab asleep for a while)
                 # gets the current data, cached only briefly
-                return self.send(200, png, "image/png", 86400 if kind == "cloud" or MOSAIC.key_known(key) else 60)
+                return self.send(200, png, "image/png", 86400 if (MOSAIC.cloud_key_known(key) if kind == "cloud" else MOSAIC.key_known(key)) else 60)
             if DEV and u.path.startswith("/api/dev/"):  # never in production (env RAINY_DEV=1 only)
                 if u.path == "/api/dev/storm":
                     devtools.storm(DE, PTYPE, THUNDER, float(q["lat"]), float(q["lon"]), int(q.get("arrive", 40)))

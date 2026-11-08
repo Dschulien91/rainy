@@ -473,7 +473,14 @@ class Mosaic:
     def cloud_tile(self, key, ts, z, x, y):
         span = 2 * WORLD / (1 << z)
         bbox = (-WORLD + x * span, WORLD - (y + 1) * span, -WORLD + (x + 1) * span, WORLD - y * span)
-        return self._cached(f"c/{key}/{ts}/{z}/{x}/{y}", lambda: self.clouds.image(ts, bbox, TILE, TILE))
+        run = int(key) if key.isdigit() else None  # the cloud key is the run's ref (ms)
+        return self._cached(f"c/{key}/{ts}/{z}/{x}/{y}", lambda: self.clouds.image(ts, bbox, TILE, TILE, run=run))
+
+    def cloud_key_known(self, key):
+        """The cloud key's run is still kept (or the source keeps no runs): its tiles can be cached as immutable."""
+        if not hasattr(self.clouds, "has_run"):
+            return True
+        return key.isdigit() and self.clouds.has_run(int(key))
 
     def kind(self, ts, X, Y):
         """Precipitation type per point (ptype kinds) or None outside the data / without the classification."""

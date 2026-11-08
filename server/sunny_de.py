@@ -59,6 +59,7 @@ import time
 import urllib.parse
 import urllib.request
 import zipfile
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
 from datetime import datetime, timezone
 
@@ -162,6 +163,9 @@ def stamp_ts(stamp):
 
 def ts_stamp(ts):
     return datetime.fromtimestamp(ts / 1000, timezone.utc).strftime("%Y%m%d%H%M")
+
+
+KEEP_RUNS = 3  # runs (10 min apart) whose map frames stay available for tile keys (the app reloads every 5 min)
 
 
 class SunGrid:
@@ -492,6 +496,9 @@ class SunnyDE:
         self.lock = threading.Lock()
         self.obs, self.fc, self.ref = {}, {}, None  # ts -> share grid (float16, NaN = unknown); ref = newest image
         self.disp = {}                              # ts -> cloud value for the map (uint8, 255 = unknown)
+        # the map frames of the last KEEP_RUNS runs: a tile URL names its run (key = ref) and is cached as immutable, so
+        # it must show that run's frames - drawing the current ones under an older key mixed runs in one timeline
+        self.disp_snaps = OrderedDict()             # ref -> {ts: cloud value}
         self.k = {}                                 # ts -> clear-sky index (float16), last K_KEEP_MS only
         self.shift_ms = 0                           # DEV replay: frames relabelled by this, the sun stays at the real time
         self.frozen = False
@@ -684,6 +691,9 @@ class SunnyDE:
             for t in [t for t in self.disp if t not in self.obs and t not in self.fc]:
                 del self.disp[t]
             self.ref = ts
+            self.disp_snaps[ts] = dict(self.disp)
+            while len(self.disp_snaps) > KEEP_RUNS:
+                self.disp_snaps.popitem(last=False)
         self.verify.take(ts, {n: v for n, v in variants.items() if v})
         return True
 
@@ -784,10 +794,17 @@ class SunnyDE:
                 "model": bool(self.model and self.model.share is not None), "replay": bool(self.shift_ms),
                 "skipped": len(self.skipped)}
 
-    def image(self, ts, bbox, w, h):
-        """Cloud value as a grey + alpha PNG (alpha 0 outside the shown area or where unknown); None: unknown frame."""
+    def has_run(self, run):
         with self.lock:
-            g = self.disp.get(ts)
+            return run in self.disp_snaps
+
+    def image(self, ts, bbox, w, h, run=None):
+        """Cloud value as a grey + alpha PNG (alpha 0 outside the shown area or where unknown); None: unknown frame.
+        run: the run a tile key names; its frames while it is kept, else (or for a frame it lacks) the current ones."""
+        with self.lock:
+            g = self.disp_snaps.get(run, {}).get(ts)
+            if g is None:
+                g = self.disp.get(ts)
         if g is None:
             return None
         minx, miny, maxx, maxy = bbox
