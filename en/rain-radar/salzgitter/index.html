@@ -402,11 +402,11 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=0.73"></script>
-<script src="lang/en.js?v=0.73"></script>
+<script src="lang/de.js?v=0.74"></script>
+<script src="lang/en.js?v=0.74"></script>
 <script>
 "use strict";
-const VERSION = "v0.73";
+const VERSION = "v0.74";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -1598,6 +1598,16 @@ function buildViews() {
       }
       return { ts, value: sun, model: sun, isDay, temp: temp(ts), map };
     }));
+  }
+  // Keep the time the user picked on the timeline (e.g. +40 min) when the place changes (pin, search, favourite):
+  // the new timeline starts at the same moment instead of jumping back to "now". refreshAll() resets to "now" first.
+  for (const [key, v] of Object.entries(state.views)) {
+    const o = old[key];
+    if (!o || o.idx === o.nowIdx || !o.frames[o.idx]) continue;
+    const ts = o.frames[o.idx].ts;
+    const first = v.frames[0], last = v.frames[v.frames.length - 1];
+    if (!first || ts < first.ts || ts > last.ts) continue;
+    v.idx = v.frames.reduce((best, f, i) => (Math.abs(f.ts - ts) < Math.abs(v.frames[best].ts - ts) ? i : best), 0);
   }
   applySatSamples();
 }
