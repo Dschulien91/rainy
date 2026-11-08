@@ -55,7 +55,7 @@ curl https://$DOMAIN/api/ready      # 200 = radar data fresh, 503 = stale (use t
 Updates: `git pull && docker compose up -d --build`. After a Caddyfile change also `docker compose restart caddy` (the
 file is bind-mounted; git replaces it, so a reload alone still sees the old file).
 
-Landing pages (`/regenradar/<place>/`, `sitemap.xml`, `robots.txt`) are generated from `index.html` by
+German pages (`/de/` and `/de/regenradar/<place>/`, `sitemap.xml`, `robots.txt`) are generated from `index.html` by
 `python tools/make_landing.py` - re-run and commit it after every change to `index.html`.
 
 ## Cloudflare

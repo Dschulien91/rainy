@@ -1,7 +1,7 @@
 {
   "name": "rainy",
   "short_name": "rainy",
-  "start_url": "./",
+  "start_url": "/de/",
   "display": "standalone",
   "background_color": "#ffffff",
   "theme_color": "#0B2A5B",

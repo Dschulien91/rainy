@@ -1,5 +1,6 @@
-"""Landing pages for search engines: one page per city, state (Bundesland) and country, e.g.
-/regenradar/koeln/, /regenradar/bayern/, /regenradar/deutschland/.
+"""Language home page and landing pages for search engines. Everything German lives under /de/: the app home page
+/de/ and one page per city, state (Bundesland) and country, e.g. /de/regenradar/koeln/, /de/regenradar/bayern/,
+/de/regenradar/deutschland/. While the site is not public, every page carries noindex (from index.html).
 
 Each page is a copy of index.html (the full app) with its own <title>, description, canonical URL, the map preset
 window.PRESET = {lat, lon, zoom, name} (the app opens that place at that zoom, see init() in index.html) and its own
@@ -23,7 +24,8 @@ import urllib.request
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 SITE = "https://hellorainy.com"
-OUT = os.path.join(ROOT, "regenradar")
+LANG = "de"
+OUT = os.path.join(ROOT, LANG, "regenradar")
 PLACES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "landing_places.json")
 
 CITIES = """Berlin;Hamburg;München;Köln;Frankfurt am Main;Stuttgart;Düsseldorf;Leipzig;Dortmund;Essen;Bremen;Dresden;
@@ -87,19 +89,21 @@ def fetch():
 
 
 def link(name, sl):
-    return f'<a href="/regenradar/{sl}/">Regenradar {html.escape(name)}</a>'
+    return f'<a href="/{LANG}/regenradar/{sl}/">Regenradar {html.escape(name)}</a>'
 
 
 def page(template, *, url, title, desc, preset, seo):
     head = (f'<base href="/">\n<title>{html.escape(title)}</title>\n'
             f'<meta name="description" content="{html.escape(desc)}">\n'
             f'<link rel="canonical" href="{url}">\n'
+            f'<link rel="alternate" hreflang="{LANG}" href="{url}">\n'
             f'<meta property="og:title" content="{html.escape(title)}">\n'
             f'<meta property="og:description" content="{html.escape(desc)}">\n'
-            f'<meta property="og:url" content="{url}">\n'
-            f'<script>window.PRESET = {json.dumps(preset, ensure_ascii=False)};</script>')
+            f'<meta property="og:url" content="{url}">'
+            + (f'\n<script>window.PRESET = {json.dumps(preset, ensure_ascii=False)};</script>' if preset else ''))
     out = template.replace("<title>rainy</title>", head, 1)
-    out = re.sub(r"<!--SEO-->.*?<!--/SEO-->", lambda _: f"<!--SEO-->\n{seo}\n<!--/SEO-->", out, count=1, flags=re.S)
+    if seo:  # else the general text of index.html stays
+        out = re.sub(r"<!--SEO-->.*?<!--/SEO-->", lambda _: f"<!--SEO-->\n{seo}\n<!--/SEO-->", out, count=1, flags=re.S)
     return out
 
 
@@ -163,20 +167,25 @@ def main():
         template = f.read()
     with open(PLACES, encoding="utf-8") as f:
         cities = json.load(f)
-    urls = [SITE + "/"]
+    urls = [f"{SITE}/{LANG}/"]
+    # the language home page: the plain app with its general text, at /de/
+    with open(os.path.join(ROOT, LANG, "index.html"), "w", encoding="utf-8", newline="\n") as f:
+        f.write(page(template, url=f"{SITE}/{LANG}/", title="Regenradar Deutschland live – rainy",
+                     desc="Regenradar für Deutschland: Wo regnet es gerade? Live-Radar des DWD und minutengenaue "
+                          "Regenvorhersage für die nächsten 2 Stunden.", preset=None, seo=None))
 
     def write(sl, content):
         d = os.path.join(OUT, sl)
         os.makedirs(d, exist_ok=True)
         with open(os.path.join(d, "index.html"), "w", encoding="utf-8", newline="\n") as f:
             f.write(content)
-        urls.append(f"{SITE}/regenradar/{sl}/")
+        urls.append(f"{SITE}/{LANG}/regenradar/{sl}/")
 
     state_slugs = {s[0]: slug(s[0]) for s in STATES}
     for c in cities:
         near = sorted((o for o in cities if o is not c), key=lambda o: km(c, o))[:8]
         sl = slug(c["name"])
-        write(sl, page(template, url=f"{SITE}/regenradar/{sl}/",
+        write(sl, page(template, url=f"{SITE}/{LANG}/regenradar/{sl}/",
                        title=f"Regenradar {c['name']} – Regen live & 2-Stunden-Vorhersage | rainy",
                        desc=f"Regenradar {c['name']}: Wo regnet es gerade? Live-Radar des DWD und minutengenaue "
                             f"Regenvorhersage für die nächsten 2 Stunden in {c['name']}.",
@@ -184,13 +193,13 @@ def main():
                        seo=city_text(c, None if c["name"] in CITY_STATES else state_slugs.get(c["state"]), near)))
     for name, lat, lon, z in STATES:
         members = sorted((c for c in cities if c["state"] == name), key=lambda c: -c["population"])
-        write(slug(name), page(template, url=f"{SITE}/regenradar/{slug(name)}/",
+        write(slug(name), page(template, url=f"{SITE}/{LANG}/regenradar/{slug(name)}/",
                                title=f"Regenradar {name} – Regen live & 2-Stunden-Vorhersage | rainy",
                                desc=f"Regenradar {name}: Live-Radar des DWD und Regenvorhersage für die nächsten "
                                     f"2 Stunden in ganz {name}.",
                                preset={"lat": lat, "lon": lon, "zoom": z, "name": name}, seo=state_text(name, members)))
     name, lat, lon, z = COUNTRY
-    write(slug(name), page(template, url=f"{SITE}/regenradar/{slug(name)}/",
+    write(slug(name), page(template, url=f"{SITE}/{LANG}/regenradar/{slug(name)}/",
                            title="Regenradar Deutschland – Regen live & 2-Stunden-Vorhersage | rainy",
                            desc="Regenradar Deutschland: Wo regnet es gerade? Live-Radar des DWD und Regenvorhersage "
                                 "für die nächsten 2 Stunden, für jeden Ort.",
@@ -202,7 +211,7 @@ def main():
         f.write("</urlset>\n")
     with open(os.path.join(ROOT, "robots.txt"), "w", encoding="utf-8", newline="\n") as f:
         f.write(f"User-agent: *\nAllow: /\nDisallow: /api/\nDisallow: /tiles/\nDisallow: /om/\nSitemap: {SITE}/sitemap.xml\n")
-    print(len(urls) - 1, "pages, sitemap.xml, robots.txt")
+    print(len(urls), "pages, sitemap.xml, robots.txt")
 
 
 if __name__ == "__main__":

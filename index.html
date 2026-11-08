@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="referrer" content="no-referrer">
+<!-- not public yet: no search engine indexing until launch (remove noindex then; Caddy also sends X-Robots-Tag) -->
+<meta name="robots" content="noindex, nofollow">
 <title>rainy</title>
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -364,7 +366,7 @@
 <script src="vendor/leaflet-maplibre-gl.js"></script>
 <script>
 "use strict";
-const VERSION = "v0.69";
+const VERSION = "v0.70";
 const FALLBACK = { lat: 53.5511, lon: 9.9937, name: "Hamburg" };
 const DWD_WMS = "https://maps.dwd.de/geoserver/dwd/wms";
 const EUM_WMS = "https://view.eumetsat.int/geoserver/ows";
@@ -493,7 +495,7 @@ if (DE_ONLY) {
   document.documentElement.classList.add("edition-de");
   document.getElementById("credits").innerHTML = 'Daten: <a href="https://www.dwd.de" target="_blank" rel="noreferrer">DWD</a>, ' +
     "Open-Meteo, EUMETSAT, © OpenMapTiles, © OpenStreetMap, OpenFreeMap" + (MAP_STYLE.design === "earth" ? ", NASA Blue Marble" : "") +
-    ' · <a href="impressum.html">Impressum</a> · <a href="datenschutz.html">Datenschutz</a>';
+    ' · <a href="/de/impressum.html">Impressum</a> · <a href="/de/datenschutz.html">Datenschutz</a>';
 }
 const RAIN_EU = !DE_ONLY && MAP_STYLE.rain === "eu";
 const FC_OWN = DE_ONLY && MAP_STYLE.fc === "own"; // our own forecast (server variant "own") instead of DWD's
