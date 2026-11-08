@@ -149,7 +149,6 @@
   .alert-card p { margin: 0 0 12px; font-size: 13px; color: var(--muted); line-height: 1.35; }
   .alert-card .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 0; border-top: 1px solid var(--line); font-size: 14px; }
   .alert-card .seg { display: flex; gap: 4px; }
-  .edition-de #modeSun, .edition-de #favSun { display: none; }
   .alert-card input[type=range] { width: 150px; accent-color: var(--rain); }
   .alert-card .row[hidden], .alert-card .hint[hidden] { display: none; }
   .bolt { filter: drop-shadow(0 0 2px rgba(0,0,0,.6)); }
@@ -401,7 +400,7 @@
 <script src="lang/en.js"></script>
 <script>
 "use strict";
-const VERSION = "v0.74";
+const VERSION = "v0.75";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -565,8 +564,9 @@ const MAP_STYLE = (() => {
   return { sat: st.sat === "photo" ? "photo" : "clouds", theme: ["light", "dark", "auto"].includes(st.theme) ? st.theme : "dark", // dark by default (07.11.)
     rain: st.rain === "eu" ? "eu" : "mix", fc: (new URLSearchParams(location.search).get("fc") || st.fc) === "own" ? "own" : "dwd", design: ["liberty", "bright", "fiord", "earth"].includes(st.design) ? st.design : "plain" };
 })();
-// Edition: "de" = first public version (Germany: rain radar 2 h + 24 h / 3 days; sunny and the Europe/USA radar are
-// hidden and everything outside Germany is hatched); "full" = everything (test with ?edition=full).
+// Edition: "de" = first public version (Germany: rain radar 2 h + 24 h / 3 days; sunny 2 h from the server's DWD satellite
+// sunshine (server/sunny_de.py) + 24 h / 3 days from the weather model; the Europe/USA radar is hidden and everything
+// outside Germany is hatched); "full" = everything (test with ?edition=full).
 const EDITION = new URLSearchParams(location.search).get("edition") === "full" ? "full" : "de";
 const DE_ONLY = EDITION === "de";
 if (DE_ONLY) {
@@ -795,7 +795,8 @@ const SUN_VARIANTS = { 1: [[255, 150, 20], 0.34], 2: [[255, 95, 35], 0.34], 3: [
 const [SUN_RGB, SUN_ALPHA] = SUN_VARIANTS[new URLSearchParams(location.search).get("sun")] || SUN_VARIANTS[1];
 // Satellite look (test with ?sat=photo): "clouds" = clouds from the satellite photo drawn as our cloud layer with
 // the sun tint on clear sky; "photo" = the EUMETSAT GeoColour photo itself, like classic satellite maps.
-const SAT_STYLE = (new URLSearchParams(location.search).get("sat") || MAP_STYLE.sat) === "photo" ? "photo" : "clouds";
+// Germany edition: always "clouds" (the photo comes from EUMETSAT for Europe; the server's DWD data is a cloud field).
+const SAT_STYLE = !DE_ONLY && (new URLSearchParams(location.search).get("sat") || MAP_STYLE.sat) === "photo" ? "photo" : "clouds";
 const PHOTO_ALPHA = 0.92;
 // Cloud opacity from a GeoColour pixel: clouds are bright and grey/white (by night: grey high cloud, light-blue fog
 // and low cloud), land, sea and city lights have at least one dark channel. By day the photo's brightness depends
@@ -1396,10 +1397,11 @@ async function loadPoint(loc) {
     cover: m.cloud_cover, isDay: m.is_day,
   };
 }
-// Clouds at the place from our server (Europe only; empty elsewhere or without the server).
+// Clouds at the place from our server (full edition: Europe, EUMETSAT; Germany edition: Germany + border zone, DWD
+// satellite sunshine with a 2 h forecast; empty elsewhere or without the server).
 async function loadCloudPoint(loc) {
   state.cloudPoint = [];
-  if (!API_BASE || SAT_STYLE !== "clouds" || DE_ONLY) return;
+  if (!API_BASE || SAT_STYLE !== "clouds") return;
   await serverReady;
   try {
     const d = await getJSON(`${API_BASE}/api/cloud/point?lat=${loc.lat}&lon=${loc.lon}`);
@@ -1578,7 +1580,8 @@ function buildViews() {
       const isDay = isDayAt(ts) ? 1 : 0;
       const e = C.length ? C.reduce((a, b) => (Math.abs(b.ts - ts) < Math.abs(a.ts - ts) ? b : a)) : null;
       if (e && Math.abs(e.ts - ts) <= 7.5 * 60e3) {
-        const sun = isDay ? sunShare(e.cloud) : 0;
+        // the Germany server sends the sun share itself ("sun", from DWD's direct radiation); else from the cloudiness
+        const sun = isDay ? (e.sun != null ? e.sun : sunShare(e.cloud)) : 0;
         return { ts, value: sun, model: sun, isDay, temp: temp(ts), map: { kind: "ctile", ts: e.ts, fc: e.fc } };
       }
       // Sun share = clear-sky share from the same cloud cover the map shows (the model's separate
@@ -1663,11 +1666,12 @@ async function updateNodata() {
   ctx.fillStyle = "#000"; // fully opaque, so covered areas are cut out completely
   const px = (lat, lon) => { const p = L.CRS.EPSG3857.project(L.latLng(lat, lon)); return [(p.x - nw.x) / (se.x - nw.x) * w, (nw.y - p.y) / (nw.y - se.y) * h]; };
   const box = (bx) => { const [x0, y0] = px(bx[1][0], bx[0][1]), [x1, y1] = px(bx[0][0], bx[1][1]); ctx.fillRect(x0, y0, x1 - x0, y1 - y0); };
-  if (state.mode === "sun") {
+  if (state.mode === "sun" && !DE_ONLY) {
     // Meteosat (Europe/Africa) and GOES (Americas) cover roughly 75 deg around their positions
     box([[-75, -75], [75, 75]]); box([[-75, -170], [75, -30]]);
   } else if (DE_ONLY) {
-    // Germany edition: hatch everything outside Germany (the server's mask is the German border)
+    // Germany edition: hatch everything outside Germany (the server's mask is the German border; the same area for
+    // the rain radar and the DWD satellite sunshine)
     const mask = API_BASE ? await loadImage(`${API_BASE}/api/radar/mask?bbox=${nw.x},${se.y},${se.x},${nw.y}&width=${w}&height=${h}`).catch(() => null) : null;
     if (token !== nodataToken) return;
     if (mask) ctx.drawImage(mask, 0, 0, w, h); else box(DE_BOX);
@@ -1847,7 +1851,8 @@ function updateSource() {
     : k === "rtile" ? (RAIN_EU ? (shown.ref ? t("source.operaForecast") : t("source.operaNoaaMeasured"))
       : DE_ONLY ? (shown.ref ? (FC_OWN ? t("source.ownForecast") : t("source.dwdForecast")) : t("source.dwdMeasured"))
       : shown.ref ? t("source.mixForecast") : t("source.mixMeasured"))
-    : k === "ctile" ? (shown.fc ? t("source.cloudNowcast", { time: fmtTime(state.cloudRef) }) : t("source.cloudSat", { time: fmtTime(f.map.ts) }))
+    : k === "ctile" ? (DE_ONLY ? (shown.fc ? t("source.sunDwdNowcast", { time: fmtTime(state.cloudRef) }) : t("source.sunDwd", { time: fmtTime(f.map.ts) }))
+      : shown.fc ? t("source.cloudNowcast", { time: fmtTime(state.cloudRef) }) : t("source.cloudSat", { time: fmtTime(f.map.ts) }))
     : f.map.kind === "sat" ? t("source.sat", { provider: state.satRegion === "meteosat" ? "EUMETSAT" : "NOAA GOES / NASA", time: fmtTime(f.map.ts) })
     : f.map.kind === "nowcast" ? (nowcast.motion ? t("source.nowcastMotion", { source: nowcast.motion.source }) : t("source.nowcast")) +
       (f.map.w < 0.5 ? " " + t("source.plusModel") : "")

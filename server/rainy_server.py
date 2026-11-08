@@ -28,10 +28,13 @@ Endpoints (all CORS-enabled, cache headers suitable for a CDN):
   GET /api/thunder/areas, /api/thunder/point?lat=&lon=, /api/lightning -> DWD thunderstorm warnings, MTG lightning
   GET /api/rain/frames, /api/rain/point?lat=&lon=[&src=eu] (+ "covered": inside the shown radar area), /tiles/rain/<key>/<ts>/<z>/<x>/<y>.png, /tiles/cloud/...
       (/tiles/raineu/... and src=eu: Europe composite only, without the DWD source in Germany - user-selectable)
-  Clouds for the "sunny" map (server/clouds.py, Europe, EUMETSAT GeoColour + nowcast):
+  Clouds for the "sunny" map - full edition: server/clouds.py (Europe, EUMETSAT GeoColour + nowcast); Germany edition:
+  server/sunny_de.py (Germany + border zone, DWD satellite direct radiation SID/DNI + 2 h nowcast, verified against the
+  later analysis and DWD's sunshine stations; outside the area the point series is empty):
   GET /api/cloud/frames                        -> {"frames": [{"ts", "fc"}], "ref": ms}
   GET /api/cloud/image?ts=&bbox=&width=&height= -> grey + alpha PNG, grey = cloudiness 0..255
-  GET /api/cloud/point?lat=&lon=               -> {"series": [{"ts", "fc", "cloud": 0..1}], "ref": ms}
+  GET /api/cloud/point?lat=&lon=               -> {"series": [{"ts", "fc", "cloud": 0..1[, "sun": 0..1]}], "ref": ms}
+  (/api/health: "regions"."sunny" = frames, ref, age_min, stations of the Germany sunny source)
   Rain alerts (server/alerts.py, Web Push):
   GET  /api/push/key                           -> {"key": VAPID public key}
   POST /api/push/subscribe   {id?, subscription, places, lead, early, quiet, tz} -> {"id"}
@@ -49,7 +52,8 @@ Endpoints (all CORS-enabled, cache headers suitable for a CDN):
   GET  /api/user/data                          -> {"data": {...}, "updated": ms};  PUT/POST {data} (object, max 64 KB)
   DELETE /api/user (or POST /api/user/delete)  -> deletes the account with its sessions, data and open login links
 
-Run:  python server/rainy_server.py   (port from env PORT, default 8771)
+Run:  python server/rainy_server.py   (port from env PORT, default 8771; env EDITION=de|full, SUNNY_DE=0 switches the
+      Germany sunny source off)
 Requests to data sources carry a neutral User-Agent and no identifying information.
 """
 import contextlib
@@ -81,6 +85,7 @@ import gauges
 import mosaic
 import ptype
 import recorder
+import sunny_de
 import thunder
 
 try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is used
@@ -90,9 +95,9 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v0.69"
-# Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model; no Europe/USA
-# radar, no clouds - their loops are not started); "full" = everything.
+VERSION = "server-v0.70"
+# Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
+# satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything.
 EDITION = os.environ.get("EDITION", "de")
 DEV = os.environ.get("RAINY_DEV") == "1"  # local development only: fake scenarios + dry-run alert outbox (devtools.py)
 PORT = int(os.environ.get("PORT", "8771"))
@@ -960,6 +965,7 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/health":
                 info = {name: {"frames": len(r.frames()[0]), "ref": r.ref} for name, r in REGIONS.items()}
                 info["clouds"] = {"frames": len(CLOUDS.frames()[0]), "ref": CLOUDS.ref}
+                info["sunny"] = SUNNY.health()  # Germany edition's sunny source (DWD satellite)
                 info["de"] = {"frames": len(DE.frames()[0]), "ref": DE.ref, "vetoed_px": getattr(DE, "vetoed", 0)}
                 info["ptype"] = {"frames": len(PTYPE.grids), "ref": max(PTYPE.grids) if PTYPE.grids else None}
                 body = {"version": VERSION, "edition": EDITION, "regions": info, "openmeteo": openmeteo_available(), "rss_mb": rss_mb(),
@@ -983,6 +989,11 @@ class Handler(BaseHTTPRequestHandler):
                     devtools.storm(DE, PTYPE, THUNDER, float(q["lat"]), float(q["lon"]), int(q.get("arrive", 40)))
                 elif u.path == "/api/dev/reset":
                     devtools.reset(DE, PTYPE, THUNDER)
+                    SUNNY.dev_reset()
+                elif u.path == "/api/dev/sunreplay":  # archived DWD satellite files (folder in the container) as "now"
+                    n = SUNNY.dev_replay(q["at"], q.get("dir", "/tmp/satcache"))
+                    MOSAIC.cache.clear()
+                    return self.send(200, json.dumps({"slots": n, "ref": SUNNY.ref}).encode(), "application/json", 0)
                 elif u.path == "/api/dev/run":  # one alert round now
                     ALERTS.run_once(ll_to_3857)
                 elif u.path == "/api/dev/due":  # all reminders due now
@@ -1023,15 +1034,15 @@ class Handler(BaseHTTPRequestHandler):
                         POINT_CACHE.pop(next(iter(POINT_CACHE)))
                 return self.send(200, json.dumps(body).encode(), "application/json", 60)
             if u.path == "/api/cloud/frames":
-                frames, ref = CLOUDS.frames()
+                frames, ref = SKY.frames()
                 return self.send(200, json.dumps({"frames": frames, "ref": ref}).encode(), "application/json", 30)
             if u.path == "/api/cloud/image":
                 bbox = [float(v) for v in q["bbox"].split(",")]
                 w, h = min(int(q["width"]), 2048), min(int(q["height"]), 2048)
-                png = CLOUDS.image(int(q["ts"]), bbox, w, h)
+                png = SKY.image(int(q["ts"]), bbox, w, h)
                 return self.send(200, png, "image/png", 3600) if png else self.send(404, b"unknown frame", "text/plain", 30)
             if u.path == "/api/cloud/point":
-                body = {"series": CLOUDS.point(float(q["lat"]), float(q["lon"])), "ref": CLOUDS.ref}
+                body = {"series": SKY.point(float(q["lat"]), float(q["lon"])), "ref": SKY.ref}
                 return self.send(200, json.dumps(body).encode(), "application/json", 60)
             region = REGIONS.get(q.get("region", "eu"))
             if u.path == "/api/radar/frames":
@@ -1121,7 +1132,12 @@ PTYPE = ptype.PrecipType(fetch, log, DE)
 DE.drizzle = gauges.GaugeDrizzle(fetch, log, DE, mosaic.merc)
 GRID_VERIFY = fcverify.GridVerify(DE, log)
 OWN = OwnNowcast(DE)
-MOSAIC = mosaic.Mosaic(REGIONS, DE, CLOUDS, sample, colorize, log, de_only=EDITION == "de", ptype=PTYPE)
+# Germany edition: sunshine from DWD satellite data (sunny_de.py) behind the same cloud API and tiles as the full
+# edition's EUMETSAT clouds, so the app's sunny mode is the same code for both
+SUNNY = sunny_de.SunnyDE(fetch, log, DE, OPENMETEO_URL, openmeteo_available)
+SUNNY_ON = EDITION == "de" and os.environ.get("SUNNY_DE", "1") != "0"
+SKY = SUNNY if SUNNY_ON else CLOUDS
+MOSAIC = mosaic.Mosaic(REGIONS, DE, SKY, sample, colorize, log, de_only=EDITION == "de", ptype=PTYPE)
 THUNDER = thunder.Thunder(fetch, log)
 ALERTS = alerts.AlertEngine(DATA_DIR, {**REGIONS, "de": DE}, log, UA, VAPID_SUBJECT,
                             order=("de",) if EDITION == "de" else ("eu", "us"), thunder=THUNDER,
@@ -1142,6 +1158,8 @@ if __name__ == "__main__":
     if EDITION == "de":
         threading.Thread(target=OWN.loop, daemon=True).start()
         threading.Thread(target=model_loop, args=(OWN.model,), daemon=True).start()
+    if SUNNY_ON:
+        threading.Thread(target=SUNNY.loop, daemon=True).start()
     threading.Thread(target=mosaic.prerender_loop, args=(MOSAIC, log), daemon=True).start()
     threading.Thread(target=RECORDER.loop, daemon=True).start()
     threading.Thread(target=THUNDER.loop, daemon=True).start()

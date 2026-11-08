@@ -109,6 +109,8 @@
   "source.mixMeasured": "Radar gemessen (DWD, EUMETNET OPERA, NOAA)",
   "source.cloudNowcast": "Satellit hochgerechnet + Wettermodell (Bild von {time})",
   "source.cloudSat": "Satellit (EUMETSAT) · Stand {time}",
+  "source.sunDwd": "Sonnenschein aus Satellit (DWD) · Stand {time}",
+  "source.sunDwdNowcast": "Sonnenschein-Vorhersage (rainy, aus DWD-Satellit, Bild von {time})",
   "source.sat": "Satellit ({provider}) · Stand {time}",
   "source.nowcast": "Satellit hochgerechnet",
   "source.nowcastMotion": "Satellit hochgerechnet (Zug: {source})",

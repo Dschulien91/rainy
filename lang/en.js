@@ -110,6 +110,8 @@
   "source.mixMeasured": "Radar measured (DWD, EUMETNET OPERA, NOAA)",
   "source.cloudNowcast": "Satellite extrapolated + weather model (image from {time})",
   "source.cloudSat": "Satellite (EUMETSAT) · as of {time}",
+  "source.sunDwd": "Sunshine from satellite (DWD) · as of {time}",
+  "source.sunDwdNowcast": "Sunshine forecast (rainy, from DWD satellite, image from {time})",
   "source.sat": "Satellite ({provider}) · as of {time}",
   "source.nowcast": "Satellite extrapolated",
   "source.nowcastMotion": "Satellite extrapolated (motion: {source})",

@@ -12,7 +12,8 @@ Rain mosaic (5 min steps, last hour + 2 h):
   Europe   - EUMETNET OPERA + our nowcast (rainy_server Region "eu")
   USA      - NOAA + our nowcast (Region "us")
   elsewhere on the Meteosat disc - EUMETSAT H SAF satellite estimate (Region "sat"), drawn fainter
-Clouds: the cloudiness field of clouds.py, coloured in the app (sharp edges at every zoom level).
+Clouds: the cloudiness field of clouds.py (Germany edition: the DWD satellite sunshine of sunny_de.py, as a cloud value),
+coloured in the app (sharp edges at every zoom level).
 
 Endpoints (added to rainy_server.Handler):
   GET /api/rain/frames               -> {"key", "frames": [{"ts", "fc"}]}
