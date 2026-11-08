@@ -19,7 +19,7 @@ radar and model scored worse for heavy rain (server/verify_blend.py). Every mode
 weights can be verified fairly later (only model runs that were available at the forecast time).
 
 Endpoints (all CORS-enabled, cache headers suitable for a CDN):
-  GET /api/health
+  GET /api/health                              (+ "auth": {"google", "email"} = sign-in methods on offer)
   GET /api/radar/frames?region=eu|us          -> {"frames": [{"ts": ms, "fc": bool}], "ref": ms}
   GET /api/radar/image?region=&ts=&bbox=&width=&height=   (bbox in EPSG:3857) -> PNG in the rainy palette
   GET /api/radar/point?lat=&lon=               -> {"region": "eu"|"us"|"sat"|null, "series": [{"ts", "mmh"}], "ref": ms}
@@ -37,6 +37,17 @@ Endpoints (all CORS-enabled, cache headers suitable for a CDN):
   POST /api/push/subscribe   {id?, subscription, places, lead, early, quiet, tz} -> {"id"}
   POST /api/push/unsubscribe {id};  POST /api/push/test {id};  POST /api/push/remind {id, lat, lon, name, minutes}
   GET  /api/push/preview?lat=&lon=&lead=&tz=   -> what the alert logic sees at a place (sends nothing)
+  Optional login to sync favourites and settings (server/auth.py; Cache-Control no-store, credentialed CORS only for
+  our own site, writes need a same-site Origin):
+  GET  /api/me                                 -> {"email", "providers": {"google", "email"}} (401, email null: logged out)
+  GET  /api/auth/google?return=/path           -> 302 to Google (OpenID Connect + PKCE); 503 when not configured
+  GET  /api/auth/google/callback               -> session cookie rainy_session, 302 to the return path
+  POST /api/auth/email {email, lang, return}   -> {"ok": true} and a sign-in link by mail (valid 15 min, single use)
+  GET  /api/auth/email/verify?token=&return=&lang= -> page with a "Sign in" button (mail scanners must not use up links)
+  POST /api/auth/email/verify (form token, return) -> session cookie, 302 to the return path (?login=expired if invalid)
+  POST /api/auth/logout                        -> {"ok": true}
+  GET  /api/user/data                          -> {"data": {...}, "updated": ms};  PUT/POST {data} (object, max 64 KB)
+  DELETE /api/user (or POST /api/user/delete)  -> deletes the account with its sessions, data and open login links
 
 Run:  python server/rainy_server.py   (port from env PORT, default 8771)
 Requests to data sources carry a neutral User-Agent and no identifying information.
@@ -63,6 +74,7 @@ from PIL import Image
 from pyproj import Transformer
 
 import alerts
+import auth
 import clouds
 import fcverify
 import gauges
@@ -78,7 +90,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v0.66"
+VERSION = "server-v0.67"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model; no Europe/USA
 # radar, no clouds - their loops are not started); "full" = everything.
 EDITION = os.environ.get("EDITION", "de")
@@ -934,6 +946,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         u = urlparse(self.path)
+        if auth.is_auth_path(u.path):  # login, session, synced user data (server/auth.py)
+            return AUTH.handle(self, "GET", u)
         q = {k: v[0] for k, v in parse_qs(u.query).items()}
         try:
             if u.path.startswith("/om/"):  # local stand-in for the production /om route
@@ -948,7 +962,8 @@ class Handler(BaseHTTPRequestHandler):
                 info["clouds"] = {"frames": len(CLOUDS.frames()[0]), "ref": CLOUDS.ref}
                 info["de"] = {"frames": len(DE.frames()[0]), "ref": DE.ref, "vetoed_px": getattr(DE, "vetoed", 0)}
                 info["ptype"] = {"frames": len(PTYPE.grids), "ref": max(PTYPE.grids) if PTYPE.grids else None}
-                body = {"version": VERSION, "edition": EDITION, "regions": info, "openmeteo": openmeteo_available(), "rss_mb": rss_mb()}
+                body = {"version": VERSION, "edition": EDITION, "regions": info, "openmeteo": openmeteo_available(), "rss_mb": rss_mb(),
+                        "auth": AUTH.providers()}  # sign-in methods the app may offer
                 return self.send(200, json.dumps(body).encode(), "application/json", 10)
             if u.path.startswith("/tiles/"):
                 m = re.fullmatch(r"/tiles/(rain|rainown|raineu|cloud)/([\w-]+)/(\d+)/(\d+)/(\d+)/(\d+)\.png", u.path)
@@ -1051,6 +1066,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(400, str(e).encode(), "text/plain", 0)
 
     def do_OPTIONS(self):  # CORS preflight for the JSON POSTs below
+        if auth.is_auth_path(urlparse(self.path).path):
+            return AUTH.preflight(self)
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
@@ -1058,8 +1075,22 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Max-Age", "86400")
         self.end_headers()
 
+    def do_PUT(self):
+        u = urlparse(self.path)
+        if auth.is_auth_path(u.path):
+            return AUTH.handle(self, "PUT", u)
+        return self.send(404, b"not found", "text/plain", 0)
+
+    def do_DELETE(self):  # DELETE /api/user (account deletion)
+        u = urlparse(self.path)
+        if auth.is_auth_path(u.path):
+            return AUTH.handle(self, "DELETE", u)
+        return self.send(404, b"not found", "text/plain", 0)
+
     def do_POST(self):
         u = urlparse(self.path)
+        if auth.is_auth_path(u.path):  # own size limits (user data up to 64 KB)
+            return AUTH.handle(self, "POST", u)
         try:
             n = int(self.headers.get("Content-Length", "0"))
             if n > 20_000:
@@ -1096,6 +1127,7 @@ ALERTS = alerts.AlertEngine(DATA_DIR, {**REGIONS, "de": DE}, log, UA, VAPID_SUBJ
                             order=("de",) if EDITION == "de" else ("eu", "us"), thunder=THUNDER,
                             kind_at=lambda lat, lon, ts: ptype.NAMES[int(MOSAIC.kind(ts, *(np.array([[v]]) for v in mosaic.merc(lon, lat)))[0, 0])]
                             if PTYPE.grids else "rain")
+AUTH = auth.Auth(DATA_DIR, log)
 RECORDER = recorder.Recorder(fetch, log, MOSAIC, CLOUDS, mosaic.merc)
 if DEV:
     import devtools

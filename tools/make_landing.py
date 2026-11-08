@@ -170,8 +170,9 @@ EN_HOME_SEO = """  <article class="seo">
     <h2>24 hours and 3 days</h2>
     <p>Beyond two hours rainy shows the forecast of the DWD weather models: rain, temperature and cloud cover for the
       next 24 hours and three days.</p>
-    <h2>No sign-up, no tracking</h2>
-    <p>rainy works without an account. Your location is only requested roughly rounded and is not stored.</p>
+    <h2>Free, account optional</h2>
+    <p>rainy works without an account. If you sign in (with Google or an email link), your favourites and settings
+      follow you to all your devices.</p>
   </article>"""
 
 LANGS = {

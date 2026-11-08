@@ -20,11 +20,21 @@ services:
       VERIFY_LOG_DIR: /app/verify_log
       DATA_DIR: /app/data
       VAPID_SUBJECT: https://${DOMAIN}       # Web Push contact claim: the app's domain, no personal address
+      # optional login (server/auth.py): Google sign-in and/or email link; unset values switch that method off
+      PUBLIC_URL: https://${DOMAIN}
+      AUTH_SECRET: ${AUTH_SECRET:-}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-465}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      MAIL_FROM: ${MAIL_FROM:-rainy <hey@hellorainy.com>}
       # never set RAINY_DEV here: it enables fake test scenarios (server/devtools.py)
     volumes:
       - model-log:/app/model_log           # model snapshots for verify_blend.py
       - verify-log:/app/verify_log         # forecasts + DWD station truth for score.py / verify_alerts.py
-      - push-data:/app/data                # push subscriptions and the VAPID key (must survive updates; back up)
+      - push-data:/app/data                # push subscriptions, the VAPID key, users.db (must survive updates; back up)
     healthcheck:                           # unhealthy when the DWD data is older than 20 min (/api/ready)
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8771/api/ready', timeout=10)"]
       interval: 2m
