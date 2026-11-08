@@ -56,4 +56,11 @@ for i in range(4):
 results.append(run("limit: 5th alert today -> nothing", series(20, 60), st={**st, "event_ts": 0}, expect=None)[1])
 # quiet hours (NOW is 08:00 UTC = midnight in Los Angeles)
 results.append(run("quiet hours at night -> nothing", series(20, 60), cfg={**CFG, "quiet": True, "tz": "America/Los_Angeles"}, expect=None)[1])
+# own quiet hours (NOW = 08:00 UTC)
+Q = {**CFG, "quiet": True, "tz": "UTC"}
+results.append(run("quiet 07:30-09:00 at 08:00 -> nothing", series(20, 60), cfg={**Q, "quietFrom": 450, "quietTo": 540}, expect=None)[1])
+results.append(run("quiet 22:00-07:00 at 08:00 -> alert", series(20, 60), cfg={**Q, "quietFrom": 1320, "quietTo": 420}, expect="main")[1])
+results.append(run("quiet 23:00-08:30 (over midnight) at 08:00 -> nothing", series(20, 60), cfg={**Q, "quietFrom": 1380, "quietTo": 510}, expect=None)[1])
+results.append(run("quiet 08:00-08:00 (empty window) -> alert", series(20, 60), cfg={**Q, "quietFrom": 480, "quietTo": 480}, expect="main")[1])
+results.append(run("quiet hours off -> alert", series(20, 60), cfg={**Q, "quiet": False, "quietFrom": 450, "quietTo": 540}, expect="main")[1])
 print(f"\n{sum(results)}/{len(results)} passed")

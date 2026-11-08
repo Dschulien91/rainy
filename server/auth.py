@@ -208,6 +208,11 @@ class Auth:
         self.db = sqlite3.connect(os.path.join(data_dir, "users.db"), check_same_thread=False, isolation_level=None)
         self.lock = threading.Lock()
         self.rate = RateLimit()
+        # hooks for the rain alerts (rainy_server.py wires them to alerts.AlertEngine): a device's push subscription
+        # ends with its session, all of them with the account; saved user data carries the alert settings
+        self.on_logout = None   # (session token hash) -> None
+        self.on_delete = None   # (user id) -> None
+        self.on_data = None     # (user id, data dict) -> None
         with self.lock:
             self.db.execute("PRAGMA journal_mode=WAL")
             self.db.executescript("""
@@ -341,6 +346,24 @@ class Auth:
             return self.db.execute("SELECT u.id, u.email FROM sessions s JOIN users u ON u.id = s.user_id "
                                    "WHERE s.token_hash = ? AND s.expires > ?", (_hash(token), int(time.time()))).fetchone()
 
+    def session_info(self, h):
+        """(user_id, email, session token hash) of a valid session cookie, else None."""
+        token = self.read_cookie(h, SESSION_COOKIE)
+        user = self.session_user(h)
+        return (user[0], user[1], _hash(token)) if user else None
+
+    def session_alive(self, token_hash):
+        with self.lock:
+            return self.db.execute("SELECT 1 FROM sessions WHERE token_hash = ? AND expires > ?",
+                                   (token_hash, int(time.time()))).fetchone() is not None
+
+    def _hook(self, fn, *args):
+        if fn:
+            try:
+                fn(*args)
+            except Exception as e:  # never let the alerts break sign-in, logout or deletion
+                self.log(f"auth: hook failed ({type(e).__name__})")
+
     def user_by_email(self, email):
         """Existing user with this (verified) address, or a new one."""
         with self.lock:
@@ -390,6 +413,7 @@ class Auth:
                 if token:
                     with self.lock:
                         self.db.execute("DELETE FROM sessions WHERE token_hash = ?", (_hash(token),))
+                    self._hook(self.on_logout, _hash(token))  # this device's rain alerts end with its session
                 return self.reply(h, 200, {"ok": True}, self.end_session_cookies())
             if (path == "/api/user" and method == "DELETE") or (path == "/api/user/delete" and method == "POST"):
                 return self.delete_user(h)
@@ -434,6 +458,7 @@ class Auth:
             except Exception:
                 self.db.execute("ROLLBACK")
                 raise
+        self._hook(self.on_delete, user[0])  # all rain alert subscriptions of the account
         self.log("auth: account deleted")
         return self.reply(h, 200, {"ok": True}, self.end_session_cookies())
 
@@ -452,6 +477,7 @@ class Auth:
         with self.lock:
             self.db.execute("INSERT INTO user_data VALUES (?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET json = excluded.json, "
                             "updated = excluded.updated", (user_id, text, now))
+        self._hook(self.on_data, user_id, data)
         return self.reply(h, 200, {"ok": True, "updated": now})
 
     # ---------- Google (OpenID Connect, authorization code + PKCE) ----------

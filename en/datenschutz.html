@@ -15,7 +15,8 @@
 <h1>Privacy policy</h1>
 
 <h2>In short</h2>
-<p>rainy works without an account. Signing in is optional and only syncs your favourites and settings across devices. We
+<p>rainy works without an account. Signing in is optional; it syncs your favourites and settings across devices and is
+needed for rain and thunderstorm alerts. We
 only set cookies that are technically necessary (chosen language, sign-in). Your location is only used to show the weather for that place and is sent to our server rounded to
 about 1 km. We do not pass on any data to third parties.</p>
 
@@ -34,11 +35,16 @@ delivery network Cloudflare, Inc. (101 Townsend St, San Francisco, CA 94107, USA
 Cloudflare is certified under the EU-US Data Privacy Framework; data may also be transferred to the USA.</p>
 <p><b>Language cookie.</b> If you switch the language, a cookie "rainy_lang" stores your choice for one year so the start page
 opens in that language (technically necessary, § 25 (2) TDDDG).</p>
-<p><b>Settings and favourites</b> stay on your device only (browser storage) and are not transmitted.</p>
-<p><b>Rain and thunderstorm alerts (optional).</b> If you turn on alerts, our server stores: the push address your browser
-creates for this, the places to watch (rounded to about 1 km; for "My location" the last location seen), your settings (lead
-time, quiet hours etc.) and your time zone – no name, no account, no device ID. The message is delivered via your browser's
-push service (e.g. Google, Apple, Mozilla). If you turn off all alerts, the entry is deleted (Art. 6 (1) (a) GDPR, consent).</p>
+<p><b>Settings and favourites</b> stay on your device only (browser storage) and are not transmitted unless you sign in.</p>
+<p><b>Rain and thunderstorm alerts (optional, account required).</b> Alerts require signing in (see "Account and
+sign-in"). If you turn them on, our server stores, linked to your account: the places to watch (rounded to about 1 km), your
+alert settings (lead time, heavy-rain heads-up, thunderstorm alerts, quiet hours with start and end time) and, for each device
+on which you allow notifications, the push address the browser creates for this, your time zone and – for "My location" – the
+location last seen on that device (rounded to about 1 km). The alert settings are synced between your devices like your
+favourites. The message is delivered via your browser's push service (e.g. Google, Apple, Mozilla). A device's push address
+is deleted when you sign out on that device; all alert entries are deleted when you turn off all alerts or delete your account
+(Art. 6 (1) (a) GDPR, consent). Alerts set up without an account before sign-in was introduced keep running without a link to
+an account until you turn them off or the push service invalidates the address.</p>
 <p><b>Map.</b> The map images come from OpenFreeMap (tiles.openfreemap.org); this service sees your IP address as with any
 image request. With the map design "Satellite", images are loaded from NASA (gibs.earthdata.nasa.gov).</p>
 
@@ -48,7 +54,8 @@ provider ALL-INKL.COM (Neue Medien Münnich, Hauptstraße 68, 02742 Friedersdorf
 
 <h2>Account and sign-in (optional)</h2>
 <p>If you sign in, we store your email address, for Google sign-in also the account ID Google sends for rainy (no name, no
-profile picture), your synced favourites and settings, and your active sessions (only as a non-reversible hash). The legal
+profile picture), your synced favourites and settings (including the alert settings), your alert entries if any (see
+above), and your active sessions (only as a non-reversible hash). The legal
 basis is providing the account (Art. 6 (1) (b) GDPR). For sign-in we set the technically necessary cookies "rainy_session"
 (sign-in, 180 days) and "rainy_in" (only a hint that you are signed in, without content) (§ 25 (2) TDDDG).</p>
 <p><b>Sign in with Google.</b> You are redirected to Google Ireland Limited (Gordon House, Barrow Street, Dublin 4, Ireland);
@@ -56,13 +63,14 @@ Google learns that you sign in to rainy and sends us your email address and an a
 applies.</p>
 <p><b>Sign in with an email link.</b> We send you a sign-in link via our email provider ALL-INKL.COM. The link is valid for
 15 minutes and can be used once.</p>
-<p><b>Deletion.</b> You can delete your account at any time in the app (Settings → Account); your email address, synced data
-and sessions are deleted immediately. The data on your device stays.</p>
+<p><b>Deletion.</b> You can delete your account at any time in the app (Settings → Account); your email address, synced data,
+sessions and all alert entries with their push addresses are deleted immediately. Favourites and settings on your device
+stay.</p>
 
 <h2>Your rights</h2>
 <p>You have the right to access, rectification, erasure, restriction of processing, data portability and objection, and the
-right to lodge a complaint with a data protection supervisory authority. Write to hey@hellorainy.com. Alert entries are not
-linked to an account; they can only be identified and deleted via the app (turn off alerts).</p>
+right to lodge a complaint with a data protection supervisory authority. Write to hey@hellorainy.com. Alert entries are linked
+to your account; older alert entries without an account can only be identified and deleted via the app (turn off alerts).</p>
 <p>The German version (<a href="/de/datenschutz.html">Datenschutz</a>) is legally binding.</p>
 <p><a href="/en/">Back to the app</a> · <a href="/en/impressum.html">Legal notice</a></p>
 </body>

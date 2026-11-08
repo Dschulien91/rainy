@@ -85,8 +85,8 @@
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
     font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; overflow: hidden; }
-  :root { --sheet-h: 268px; }
-  body.hours-open { --sheet-h: 362px; }
+  :root { --sheet-h: 240px; }
+  body.hours-open { --sheet-h: 334px; }
   #map { position: absolute; inset: 0 0 var(--sheet-h) 0; }
   .leaflet-container { background: var(--night); }
   .grid-overlay { filter: blur(14px); }
@@ -96,14 +96,17 @@
   body.sunny .basemap { filter: sepia(0.55) saturate(1.6) hue-rotate(-12deg) brightness(1.08); } /* light orange cast */
   .eu-frame, .srvus-frame, .srvsat-frame { transition: opacity 0.45s linear; filter: blur(1px); } /* already interpolated by the server */
   .sat-frame { transition: opacity 0.4s ease; filter: blur(3px); }
-  .rain-tiles { transition: opacity 0.35s linear; filter: blur(1px); }
+  .rain-tiles { transition: opacity 0.35s linear; } /* outlines are smoothed and anti-aliased by the server */
   .cloud-tiles { transition: opacity 0.4s ease; } /* sharp cloud edges, drawn at screen resolution */
   /* dark map: lighten instead of covering, so sun tint reads as warm light and not olive */
   .place button { border: 0; background: var(--night); color: var(--fg); border-radius: 999px;
     font-size: 11px; padding: 1px 7px; margin-left: 6px; cursor: pointer; }
 
-  .brand { position: absolute; top: max(12px, env(safe-area-inset-top)); left: 12px; z-index: 1000;
-    background: var(--bg); padding: 6px 12px; border-radius: 999px; font-weight: 800; font-size: 18px;
+  /* top left: logo and the settings button next to it */
+  .topbar { position: absolute; top: max(12px, env(safe-area-inset-top)); left: 12px; z-index: 1000;
+    display: flex; align-items: center; gap: 8px; }
+  .topbar .fab { position: static; }
+  .brand { background: var(--bg); padding: 6px 12px; border-radius: 999px; font-weight: 800; font-size: 18px;
     letter-spacing: -0.02em; box-shadow: 0 2px 10px rgba(0,0,0,.15); }
   .brand { display: flex; align-items: center; gap: 6px; }
   #brandName { color: var(--logo); }
@@ -112,7 +115,7 @@
   .ico { width: 21px; height: 21px; vertical-align: middle; margin: -4px 5px -3px -2px; color: var(--logo); }
   .ico.sun { color: var(--sun); }
   body.sunny .brand span { color: var(--sun); }
-  .version { font-weight: 500; font-size: 11px; color: var(--muted); margin-left: 4px; }
+  .version { font-weight: 500; font-size: 10px; color: var(--muted); opacity: .8; white-space: nowrap; }
 
   .fab { position: absolute; right: 12px; bottom: calc(var(--sheet-h) + 12px + var(--i, 0) * 54px); z-index: 1000;
     display: flex; align-items: center; justify-content: center; padding: 0;
@@ -165,12 +168,16 @@
   .alert-card .seg { flex-wrap: wrap; justify-content: flex-end; }
   .alert-card .sec { margin: 12px 0 2px; font-size: 12px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
   .alert-card .hint { margin: -4px 0 4px; font-size: 12px; color: var(--muted); }
+  .alert-card .device-hint { margin-top: 8px; color: var(--fg); }
   .alert-card .places button { border: 1px solid var(--line); background: none; color: var(--fg); font: inherit; font-size: 13px; padding: 4px 9px; border-radius: 999px; cursor: pointer; margin: 2px 0 2px 4px; }
   #styleCard { max-height: calc(100vh - var(--sheet-h) - 40px); overflow-y: auto; }
   .alert-card .lead-val { min-width: 54px; text-align: right; font-variant-numeric: tabular-nums; }
   .alert-card .seg button { border: 1px solid var(--line); background: none; color: var(--fg); font: inherit; font-size: 13px; padding: 5px 10px; border-radius: 999px; cursor: pointer; }
   .alert-card .seg button.on { background: var(--rain); border-color: var(--rain); color: #fff; }
   .alert-card input[type=checkbox] { width: 20px; height: 20px; accent-color: var(--rain); }
+  .alert-card .quiet-times { display: flex; align-items: center; gap: 6px; color: var(--muted); }
+  .alert-card select { font: inherit; font-size: 13px; padding: 4px 6px; border-radius: 8px; border: 1px solid var(--line);
+    background: var(--bg); color: var(--fg); font-variant-numeric: tabular-nums; }
   .alert-card .actions { display: flex; justify-content: space-between; margin-top: 12px; }
   .alert-card .actions button { border: 0; background: none; font: inherit; font-weight: 600; cursor: pointer; padding: 6px 2px; }
   .alert-card .off { color: var(--temp); }
@@ -212,19 +219,24 @@
   .sheet { position: absolute; left: 0; right: 0; bottom: 0; height: var(--sheet-h); z-index: 1000;
     background: var(--bg); border-radius: 18px 18px 0 0; box-shadow: var(--shadow);
     padding: 12px 16px max(10px, env(safe-area-inset-bottom)); display: flex; flex-direction: column; gap: 8px; }
-  .head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  /* first row: place (left), rainy/sunny (right); second row: summary, temperature */
+  .head { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; column-gap: 12px; row-gap: 2px; }
+  .head .toggle, .head .now-temp { justify-self: end; }
   .place { font-size: 13px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   /* DWD thunderstorm warning: a pill on the map just above the sheet, so the timeline keeps its height */
-  .warnline { position: absolute; left: 12px; right: 72px; bottom: calc(var(--sheet-h) + 10px); z-index: 900; width: fit-content; max-width: calc(100% - 84px);
+  .warnline { position: absolute; left: 12px; right: 72px; bottom: calc(var(--sheet-h) + 18px); z-index: 900; width: fit-content; max-width: calc(100% - 84px);
     padding: 6px 12px; border-radius: 999px; background: rgba(40, 22, 8, 0.9); color: #ffb066; font-size: 13px; font-weight: 700;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis; box-shadow: 0 2px 8px rgba(0,0,0,.35); pointer-events: none; }
   .summary { font-size: 17px; font-weight: 700; line-height: 1.2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } /* never wraps: long texts end in … */
-  .now-temp { font-size: 28px; font-weight: 300; margin-left: auto; white-space: nowrap; }
+  .now-temp { font-size: 28px; font-weight: 300; line-height: 1; white-space: nowrap; }
 
   .toggle { display: inline-flex; background: var(--night); border-radius: 999px; padding: 3px; flex: none; }
   .toggle button { border: 0; background: transparent; color: var(--muted); font: inherit; font-weight: 700;
     font-size: 13px; padding: 6px 12px; border-radius: 999px; cursor: pointer; }
   .toggle button.on { background: var(--bg); color: var(--fg); box-shadow: 0 1px 4px rgba(0,0,0,.15); }
+  .toggle.small { padding: 2px; }
+  .toggle.small button { font-size: 12px; padding: 3px 9px; }
+  .toggle.small .ico { width: 15px; height: 15px; margin: -3px 4px -2px -2px; }
 
   .chart-row { display: flex; align-items: stretch; gap: 8px; flex: 1; min-height: 0; }
   .play { flex: none; width: 40px; border: 0; border-radius: 12px; background: var(--night); color: var(--fg);
@@ -257,6 +269,13 @@
   .hour .bar i { display: block; width: 100%; border-radius: 3px; }
   .status { font-size: 11px; color: var(--muted); display: flex; justify-content: space-between; gap: 8px; }
   .status a { color: inherit; }
+  .status #source { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .status .legal { flex: none; white-space: nowrap; }
+  .status .version { margin-left: 4px; }
+  /* map data attribution (OpenStreetMap licence): tiny, low contrast, links to the full list in the legal notice */
+  .leaflet-control-attribution.attrib { background: transparent !important; box-shadow: none; margin: 0 !important;
+    padding: 0 6px 1px !important; font-size: 9px; line-height: 12px; opacity: .65; }
+  .leaflet-control-attribution.attrib a { color: var(--muted) !important; text-decoration: none; }
   /* Desktop: the app on the left two thirds, the right third is a column with the ad slot and, below it, the text
      (search engines read the text; users scroll the column independently of the map). Phones: unchanged. */
   #side { display: none; }
@@ -295,8 +314,10 @@
 <div class="toast" id="toast" role="status"></div>
 <div class="alert-card" id="alertCard" role="dialog" aria-label="Regenwarnung" data-i18n-attr="aria-label:alert.title"></div>
 <div class="alert-card" id="styleCard" role="dialog" aria-label="Einstellungen" data-i18n-attr="aria-label:settings.title"></div>
-<div class="brand"><svg class="logo" id="brandLogo"><use href="#logo"/></svg><span id="brandName">rainy</span><span class="version" id="ver"></span></div>
-<button class="fab" id="styleBtn" title="Einstellungen" aria-label="Einstellungen" data-i18n-attr="title:fab.settings;aria-label:fab.settings" style="--i:4"><svg viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.8l1.6 2.4 2.8-.7.7 2.8 2.4 1.6-1.3 2.6 1.3 2.6-2.4 1.6-.7 2.8-2.8-.7L12 21.2l-1.6-2.4-2.8.7-.7-2.8-2.4-1.6L5.8 12 4.5 9.4l2.4-1.6.7-2.8 2.8.7z"/></g></svg></button>
+<div class="topbar">
+<div class="brand"><svg class="logo" id="brandLogo"><use href="#logo"/></svg><span id="brandName">rainy</span></div>
+<button class="fab" id="styleBtn" title="Einstellungen" aria-label="Einstellungen" data-i18n-attr="title:fab.settings;aria-label:fab.settings"><svg viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.8l1.6 2.4 2.8-.7.7 2.8 2.4 1.6-1.3 2.6 1.3 2.6-2.4 1.6-.7 2.8-2.8-.7L12 21.2l-1.6-2.4-2.8.7-.7-2.8-2.4-1.6L5.8 12 4.5 9.4l2.4-1.6.7-2.8 2.8.7z"/></g></svg></button>
+</div>
 <button class="fab" id="favs" title="Favoriten" aria-label="Favoriten" data-i18n-attr="title:fab.favs;aria-label:fab.favs" style="--i:3"><svg viewBox="0 0 24 24"><path d="M12 3.5l2.6 5.3 5.8.8-4.2 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.2-4.1 5.8-.8z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg></button>
 <button class="fab" id="search" title="Ort suchen" aria-label="Ort suchen" data-i18n-attr="title:fab.search;aria-label:fab.search" style="--i:2"><svg viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="10.5" cy="10.5" r="6"/><line x1="15" y1="15" x2="20" y2="20"/></g></svg></button>
 <button class="fab" id="refresh" title="Aktualisieren" aria-label="Aktualisieren" data-i18n-attr="title:fab.refresh;aria-label:fab.refresh" style="--i:1"><svg viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/><path d="M19.5 4.5v4.5H15"/></g></svg></button>
@@ -348,18 +369,13 @@
 <div class="warnline" id="warnline" hidden></div>
 <div class="sheet">
   <div class="head">
-    <div style="min-width:0">
-      <div class="place" id="place" data-i18n="place.locating">Standort wird ermittelt …</div>
-      <div class="summary" id="summary" data-i18n="summary.loading">Lade Daten …</div>
-    </div>
-    <div class="now-temp" id="nowTemp">–°</div>
-  </div>
-  <div class="head">
-    <div class="toggle" role="tablist">
+    <div class="place" id="place" data-i18n="place.locating">Standort wird ermittelt …</div>
+    <div class="toggle small" role="tablist">
       <button id="modeRain" class="on" role="tab"><svg class="ico"><use href="#logo"/></svg>rainy</button>
       <button id="modeSun" role="tab"><svg class="ico sun"><use href="#sunIcon"/></svg>sunny</button>
     </div>
-    <div class="toggle" aria-label="Zeitraum der Karte" data-i18n-attr="aria-label:range.mapLabel"><button class="on" tabindex="-1" style="cursor:default" data-i18n="range.2h">2 h</button></div>
+    <div class="summary" id="summary" data-i18n="summary.loading">Lade Daten …</div>
+    <div class="now-temp" id="nowTemp">–°</div>
   </div>
   <div class="chart-row">
     <button class="play" id="play" aria-label="Abspielen" data-i18n-attr="aria-label:chart.play">▶</button>
@@ -372,7 +388,8 @@
   <div class="hours" id="hours" hidden></div>
   <div class="status">
     <span id="source"></span>
-    <span id="credits"><span data-i18n="credits.data">Daten:</span> <a href="https://www.dwd.de" target="_blank" rel="noreferrer">DWD</a>, EUMETNET, EUMETSAT, ECCC, NOAA, NASA, Bright Sky, Open-Meteo, © OpenMapTiles, © OpenStreetMap, OpenFreeMap</span>
+    <span class="legal"><a href="/de/impressum.html" id="legalLink" data-i18n="credits.legal">Impressum</a> · <a href="/de/datenschutz.html" id="privacyLink" data-i18n="credits.privacy">Datenschutz</a>
+      <span class="version" id="ver"></span></span>
   </div>
 </div>
 
@@ -395,11 +412,11 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=0.75"></script>
-<script src="lang/en.js?v=0.75"></script>
+<script src="lang/de.js?v=0.77"></script>
+<script src="lang/en.js?v=0.77"></script>
 <script>
 "use strict";
-const VERSION = "v0.75";
+const VERSION = "v0.77";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -570,10 +587,10 @@ const EDITION = new URLSearchParams(location.search).get("edition") === "full" ?
 const DE_ONLY = EDITION === "de";
 if (DE_ONLY) {
   document.documentElement.classList.add("edition-de");
-  document.getElementById("credits").innerHTML = `${t("credits.data")} <a href="https://www.dwd.de" target="_blank" rel="noreferrer">DWD</a>, ` +
-    "Open-Meteo, EUMETSAT, © OpenMapTiles, © OpenStreetMap, OpenFreeMap" + (MAP_STYLE.design === "earth" ? ", NASA Blue Marble" : "") +
-    ` · <a href="/${LANG}/impressum.html">${t("credits.legal")}</a> · <a href="/${LANG}/datenschutz.html">${t("credits.privacy")}</a>`;
 }
+// Legal links in the status line; the data sources are listed in the legal notice (#daten / #data).
+document.getElementById("legalLink").href = `/${LANG}/impressum.html`;
+document.getElementById("privacyLink").href = `/${LANG}/datenschutz.html`;
 const RAIN_EU = !DE_ONLY && MAP_STYLE.rain === "eu";
 const FC_OWN = DE_ONLY && MAP_STYLE.fc === "own"; // our own forecast (server variant "own") instead of DWD's
 if (MAP_STYLE.theme !== "auto") document.documentElement.classList.add(`theme-${MAP_STYLE.theme}`);
@@ -602,6 +619,11 @@ const map = L.map("map", {
 const fitMinZoom = () => { if (DE_ONLY && map.getSize().x) map.setMinZoom(Math.max(3, map.getBoundsZoom(EUROPE, false)) + 1); };
 fitMinZoom();
 map.on("resize", fitMinZoom);
+// Map data attribution (OpenStreetMap / OpenMapTiles licences): a tiny link in the corner of the map; the full list of
+// data sources is in the legal notice.
+L.control.attribution({ position: "bottomleft", prefix: false })
+  .addAttribution(`<a href="/${LANG}/impressum.html#${LANG === "de" ? "daten" : "data"}">© OpenStreetMap · OpenMapTiles</a>`)
+  .addTo(map).getContainer().classList.add("attrib");
 map.createPane("weather").style.zIndex = 350;
 map.createPane("labels").style.zIndex = 450;
 map.getPane("labels").style.pointerEvents = "none";
@@ -759,32 +781,26 @@ function loadImage(url) {
 }
 
 // ---------- Palettes ----------
-// Rain intensity (mm/h) -> color stops, interpolated in log space. Used for maps and timeline bars.
-const RAIN_STOPS = [
-  [0.05, [170, 214, 255, 0.45]], [0.1, [154, 208, 255, 0.55]], [0.5, [75, 163, 255, 0.75]], [2, [47, 107, 245, 0.85]],
-  [5, [107, 61, 240, 0.9]], [10, [192, 38, 211, 0.95]], [30, [255, 61, 110, 1]], [75, [255, 212, 0, 1]],
-];
+// Rain intensity (mm/h) -> stepped colour classes (hard steps, same table as the server's map tiles in
+// server/palette.py: STEPS). Used for the timeline bars and the legend, so map and timeline match.
+const RAIN_BANDS = [0.05, 0.1, 0.5, 2, 5, 10, 30, 75]; // lower bound (mm/h) of each class
+const RAIN_STEPS = [[150, 200, 255, 150], [110, 175, 255, 190], [40, 130, 255, 215], [20, 70, 235, 235],
+  [120, 50, 235, 245], [205, 30, 205, 250], [255, 50, 90, 255], [255, 215, 0, 255]];
 // Other precipitation types from the DWD radar classification (same colours as the server's map tiles).
-const KIND_STOPS = {
-  sleet: [[0.1, [196, 236, 240, 0.6]], [0.5, [150, 214, 232, 0.75]], [2, [112, 182, 222, 0.85]], [5, [100, 140, 225, 0.9]], [30, [90, 100, 220, 1]]],
-  snow: [[0.1, [238, 242, 255, 0.65]], [0.5, [212, 220, 255, 0.78]], [2, [178, 184, 255, 0.88]], [5, [146, 132, 245, 0.93]], [30, [118, 92, 228, 1]]],
-  freezing: [[0.1, [255, 196, 224, 0.7]], [0.5, [255, 150, 204, 0.82]], [2, [242, 92, 172, 0.92]], [5, [214, 40, 142, 0.97]], [30, [170, 0, 110, 1]]],
-  graupel: [[0.1, [204, 244, 206, 0.75]], [2, [124, 214, 146, 0.88]], [10, [60, 172, 96, 0.95]], [30, [30, 130, 70, 1]]],
-  hail: [[0.1, [255, 120, 70, 0.92]], [2, [240, 40, 30, 0.97]], [10, [205, 0, 0, 1]], [30, [150, 0, 0, 1]]],
+const KIND_STEPS = {
+  sleet: [[190, 232, 240, 130], [170, 225, 236, 185], [115, 200, 226, 210], [60, 160, 212, 228], [60, 115, 220, 240], [70, 90, 215, 246], [60, 70, 200, 255], [40, 50, 160, 255]],
+  snow: [[236, 240, 255, 140], [225, 232, 255, 195], [195, 205, 255, 215], [155, 160, 255, 232], [125, 110, 240, 242], [110, 85, 230, 248], [95, 60, 215, 255], [70, 40, 175, 255]],
+  freezing: [[255, 190, 220, 140], [255, 170, 212, 200], [250, 120, 190, 222], [235, 70, 160, 238], [205, 25, 130, 248], [180, 0, 115, 252], [150, 0, 95, 255], [115, 0, 70, 255]],
+  graupel: [[200, 242, 204, 140], [185, 238, 190, 205], [150, 225, 165, 220], [105, 200, 130, 232], [75, 180, 105, 240], [50, 155, 85, 246], [25, 120, 60, 255], [15, 90, 45, 255]],
+  hail: [[255, 130, 85, 160], [255, 105, 55, 238], [250, 75, 40, 244], [235, 35, 25, 248], [220, 15, 10, 252], [195, 0, 0, 255], [150, 0, 0, 255], [110, 0, 0, 255]],
 };
 const KIND_WORD = { rain: "kind.rain", sleet: "kind.sleet", snow: "kind.snow", freezing: "kind.freezing", graupel: "kind.graupel", hail: "kind.hail" }; // text keys
 function rainColor(mmh, kind) {
-  const stops = KIND_STOPS[kind] || RAIN_STOPS;
-  if (!(mmh >= stops[0][0])) return null;
-  const l = Math.log(mmh);
-  for (let i = 1; i < stops.length; i++) {
-    const [v0, c0] = stops[i - 1], [v1, c1] = stops[i];
-    if (mmh <= v1) {
-      const t = (l - Math.log(v0)) / (Math.log(v1) - Math.log(v0));
-      return c0.map((c, k) => c + (c1[k] - c) * t);
-    }
-  }
-  return stops[stops.length - 1][1];
+  if (!(mmh >= RAIN_BANDS[0])) return null;
+  let i = 0;
+  while (i + 1 < RAIN_BANDS.length && mmh >= RAIN_BANDS[i + 1]) i++;
+  const c = (KIND_STEPS[kind] || RAIN_STEPS)[i];
+  return [c[0], c[1], c[2], c[3] / 255];
 }
 const rgba = (c, alphaScale = 1) => `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${c[3] * alphaScale})`;
 // Clouds: light on the dark map, slate on the light map. Clear sky by day gets a warm sun tint.
@@ -1538,6 +1554,19 @@ function isDayAt(ts) {
   if (p && p.t.length) return interp(p.t, p.isDay, ts) >= 0.5;
   return state.loc ? sunElevation(ts, state.loc.lat, state.loc.lon) > -0.83 : true;
 }
+// Sunrise / sunset between t0 and t1 from the sun's elevation (when the weather model gave no times), ~1 min exact.
+function sunEventsBetween(t0, t1) {
+  if (!state.loc) return [];
+  const out = [], up = (ts) => sunElevation(ts, state.loc.lat, state.loc.lon) > -0.83;
+  for (let a = t0; a < t1; a += 5 * 60e3) {
+    const b = Math.min(a + 5 * 60e3, t1);
+    if (up(a) === up(b)) continue;
+    let lo = a, hi = b;
+    while (hi - lo > 30e3) { const m = (lo + hi) / 2; if (up(m) === up(lo)) lo = m; else hi = m; }
+    out.push({ ts: Math.round((lo + hi) / 2), type: up(b) ? "rise" : "set" });
+  }
+  return out;
+}
 // Solar elevation in degrees (NOAA approximation, good to a fraction of a degree).
 function sunElevation(ts, lat, lon) {
   const rad = Math.PI / 180, d = ts / 86400e3 - 10957.5; // days since J2000.0
@@ -1767,9 +1796,9 @@ function tileLayer(kind, ts) {
   if (!layer) {
     const url = `${API_BASE}/tiles/${kind === "rain" && RAIN_EU ? "raineu" : kind === "rain" && FC_OWN ? "rainown" : kind}/${state.tileKey[kind]}/${ts}/{z}/{x}/{y}.png`;
     layer = kind === "rain"
-      // zoom 8 tiles (~400 m pixels) are finer than the 1 km radar: closer in they are only enlarged, which needs
-      // 16x fewer tiles per frame at city zoom than zoom-10 tiles (the server pre-renders zoom 4-8)
-      ? L.tileLayer(url, { pane: "weather", opacity: 0, maxNativeZoom: 8, className: "rain-tiles", crossOrigin: "anonymous" })
+      // the server paints smooth, rounded class outlines up to zoom 10 (~100 m pixels, pre-rendered 4-8, 9-10 on
+      // demand); closer in the zoom-10 tiles are only enlarged
+      ? L.tileLayer(url, { pane: "weather", opacity: 0, maxNativeZoom: 10, className: "rain-tiles", crossOrigin: "anonymous" })
       : new CloudTiles({ pane: "weather", opacity: 0, className: "cloud-tiles", url, ts });
     layer.id = id;
     tileLayers.set(id, layer);
@@ -1940,19 +1969,19 @@ function drawChart() {
   ctx.fillRect(0, top + plotH, W, 1);
 
   // Sunrise / sunset markers (sunny mode)
-  if (!rain && state.sunEvents && n > 1) {
+  const sunLabels = [];
+  if (!rain && n > 1) {
     const t0 = frames[0].ts, t1 = frames[n - 1].ts;
     ctx.font = "600 10px system-ui, sans-serif";
-    for (const e of state.sunEvents) {
+    for (const e of state.sunEvents && state.sunEvents.length ? state.sunEvents : sunEventsBetween(t0, t1)) {
       if (e.ts < t0 || e.ts > t1) continue;
       const ex = bw / 2 + ((e.ts - t0) / (t1 - t0)) * (W - bw);
       ctx.strokeStyle = col("--sun"); ctx.lineWidth = 1; ctx.setLineDash([2, 2]);
       ctx.beginPath(); ctx.moveTo(ex, top + plotH * 0.35); ctx.lineTo(ex, top + plotH); ctx.stroke();
       ctx.setLineDash([]);
       const label = (e.type === "rise" ? "↑ " : "↓ ") + fmtTime(e.ts);
-      const tw = ctx.measureText(label).width;
-      ctx.fillStyle = col("--sun"); ctx.textAlign = "left";
-      ctx.fillText(label, clamp(e.type === "rise" ? ex + 3 : ex - tw - 3, 0, W - tw), top + plotH * 0.35 + 2);
+      const tw = ctx.measureText(label).width, lx = clamp(e.type === "rise" ? ex + 3 : ex - tw - 3, 0, W - tw);
+      sunLabels.push([label, lx, top + plotH * 0.35 + 2, tw]); // drawn after the temperature line (further down)
     }
   }
   // Where the data source changes (radar -> model, satellite -> forecast)
@@ -1984,6 +2013,15 @@ function drawChart() {
     }
   }
 
+  // Sunrise / sunset times, with a backdrop like the guide labels (legible over the temperature line)
+  ctx.font = "600 10px system-ui, sans-serif"; ctx.textAlign = "left";
+  for (const [label, lx, ly, tw] of sunLabels) {
+    ctx.fillStyle = col("--bg");
+    ctx.fillRect(lx - 2, ly - 9, tw + 4, 12);
+    ctx.fillStyle = col("--sun");
+    ctx.fillText(label, lx, ly);
+  }
+
   // Guide labels on top, with a backdrop for legibility
   ctx.font = "10px system-ui, sans-serif"; ctx.textAlign = "left";
   for (const [label, gy] of guideLabels) {
@@ -2005,6 +2043,12 @@ function drawChart() {
     ctx.fillText(`${pad2(Math.floor(mins / 60))}:${pad2(mins % 60)}`, clamp(x(i), 16, W - 16), H - 3);
     ctx.fillRect(x(i), top + plotH, 1, 3);
   });
+
+  // Time range of the timeline, small and low-contrast in the top-right corner (the user chose right, 08.11.)
+  if (state.range === "short") {
+    ctx.fillStyle = col("--muted"); ctx.font = "600 10px system-ui, sans-serif"; ctx.textAlign = "right";
+    ctx.fillText(t("range.2h"), W - 2, 12);
+  }
 
   // "now" marker
   ctx.strokeStyle = col("--muted"); ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
@@ -2367,17 +2411,47 @@ function renderPlace() {
   if (back) back.addEventListener("click", () => document.getElementById("locate").click());
 }
 // ---------- Rain alerts (Web Push from our server) ----------
-// Places with alerts and the settings live on the device; the server only gets the push address, the places
-// (rounded to ~1 km) and the settings - no account. Alerts need our own server and https (or localhost).
+// Alerts need an account (v0.76): the settings (places, own location on/off, lead time, heads-up, thunder, quiet
+// hours) belong to the account and are synced across the user's devices like the favourites (rainy.alertset). Each
+// device still needs its own notification permission and push subscription (rainy.alerts: {id, ownLoc} - the
+// subscription id and the last position the app saw, ~1 km). The server sends to all of the user's devices; a
+// device's subscription ends with its login. Alerts need our own server and https (or localhost).
 const ALERTS_POSSIBLE = !!API_BASE && "serviceWorker" in navigator;
 const BELL = '<svg viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0-6 6v3.5L4.5 16h15L18 12.5V9a6 6 0 0 0-6-6zM10 19a2 2 0 0 0 4 0" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>';
-// own: warn for "Mein Standort" (the last position the app saw, ~1 km); places: further places with a bell
-const ALERT_DEFAULTS = { places: [], own: false, ownLoc: null, lead: 45, early: true, quiet: true, thunder: true };
+// own: warn for "Mein Standort" (the last position the app saw on each device); places: further places with a bell
+const ALERT_DEFAULTS = { places: [], own: false, lead: 45, early: true, quiet: true, quietFrom: "22:00", quietTo: "07:00", thunder: true };
+const ALERT_SHARED = Object.keys(ALERT_DEFAULTS);
 const LEAD_MIN = 5, LEAD_MAX = 90; // selectable warning time (minutes before the rain)
-function loadAlerts() { try { return { ...ALERT_DEFAULTS, ...JSON.parse(localStorage.getItem("rainy.alerts")) }; } catch { return { ...ALERT_DEFAULTS }; } }
-function saveAlerts(a) { try { localStorage.setItem("rainy.alerts", JSON.stringify(a)); } catch {} }
+// Before v0.76 the settings lived in rainy.alerts (one device): copy them once into the account settings key.
+(() => {
+  try {
+    const old = JSON.parse(localStorage.getItem("rainy.alerts"));
+    if (old && localStorage.getItem("rainy.alertset") == null && ALERT_SHARED.some((k) => old[k] != null)) {
+      localStorage.setItem("rainy.alertset", JSON.stringify(Object.fromEntries(ALERT_SHARED.map((k) => [k, old[k] ?? ALERT_DEFAULTS[k]]))));
+    }
+  } catch {}
+})();
+function loadAlerts() {
+  let dev = {}, set = {};
+  try { dev = JSON.parse(localStorage.getItem("rainy.alerts")) || {}; } catch {}
+  try { set = JSON.parse(localStorage.getItem("rainy.alertset")) || {}; } catch {}
+  const a = { ...ALERT_DEFAULTS };
+  for (const k of ALERT_SHARED) if (set[k] != null) a[k] = set[k];
+  if (!Array.isArray(a.places)) a.places = [];
+  return { ...a, id: dev.id, ownLoc: dev.ownLoc || null };
+}
+const sharedAlerts = (a) => Object.fromEntries(ALERT_SHARED.map((k) => [k, a[k]]));
+function saveAlerts(a) {
+  try {
+    localStorage.setItem("rainy.alertset", JSON.stringify(sharedAlerts(a)));
+    localStorage.setItem("rainy.alerts", JSON.stringify({ id: a.id, ownLoc: a.ownLoc }));
+  } catch {}
+  scheduleSync();
+}
+const alertsOn = (a) => a.own || a.places.length > 0;
 const hasAlert = (loc) => loadAlerts().places.some((p) => sameLoc(p, loc));
-const alertPlaces = (a) => [...(a.own && a.ownLoc ? [{ name: t("alert.ownPlace"), ...a.ownLoc }] : []), ...a.places];
+// This device receives the alerts (own push subscription and permission).
+const deviceSubscribed = (a) => !!a.id && "Notification" in window && Notification.permission === "granted";
 // A web app cannot follow the user in the background: the "Mein Standort" alert uses the position the app saw last
 // and is updated on the server whenever the app gets a new fix more than ~1 km away.
 function ownLocationSeen(loc) {
@@ -2385,44 +2459,86 @@ function ownLocationSeen(loc) {
   if (a.ownLoc && map.distance([r.lat, r.lon], [a.ownLoc.lat, a.ownLoc.lon]) < 1000) return;
   a.ownLoc = r;
   saveAlerts(a);
-  if (a.own && ALERTS_POSSIBLE && "Notification" in window && Notification.permission === "granted") syncAlerts(a).catch((e) => console.warn("alerts", e));
+  if (a.own && account && ALERTS_POSSIBLE && deviceSubscribed(a)) syncAlerts(a).catch((e) => console.warn("alerts", e));
 }
 const b64ToBytes = (b64) => Uint8Array.from(atob((b64 + "===".slice((b64.length + 3) % 4)).replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0));
 const postJSON = (path, body) => fetch(`${API_BASE}${path}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
 
-// Send the current places and settings to the server (or unsubscribe when no place is left).
-async function syncAlerts(a) {
+// Send the account's alert settings with this device's push address to the server (needs the login). With no place
+// left: this device unsubscribes (all = true: the user switched alerts off, so every device of the account does).
+async function syncAlerts(a, all = false) {
   const reg = await navigator.serviceWorker.register("sw.js");
   let sub = await reg.pushManager.getSubscription();
-  if (!alertPlaces(a).length) {
-    if (a.id) await postJSON("/api/push/unsubscribe", { id: a.id }).catch(() => {});
+  if (!alertsOn(a)) {
+    if (a.id || all) await apiFetch("/api/push/unsubscribe", { method: "POST", body: JSON.stringify({ id: a.id, all }) }).catch(() => {});
     if (sub) await sub.unsubscribe().catch(() => {});
     delete a.id;
     saveAlerts(a);
     return false;
   }
+  if (!account) throw new Error("login");
   if (!sub) {
     const { key } = await getJSON(`${API_BASE}/api/push/key`);
     if (!key) throw new Error("server has no push key");
     sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64ToBytes(key) });
   }
-  const r = await postJSON("/api/push/subscribe", { id: a.id, subscription: sub.toJSON(), places: alertPlaces(a),
-    lead: a.lead, early: a.early, quiet: a.quiet, thunder: a.thunder, tz: DEVICE_TZ, api: API_BASE });
+  const r = await apiFetch("/api/push/subscribe", { method: "POST", body: JSON.stringify({ id: a.id, subscription: sub.toJSON(),
+    settings: sharedAlerts(a), ownLoc: a.ownLoc, ownName: t("alert.ownPlace"), tz: DEVICE_TZ, lang: LANG, api: API_BASE }) });
+  if (r.status === 401) { signedOut(); throw new Error("login"); }
   if (!r.ok) throw new Error(`subscribe ${r.status}`);
   const first = !a.id;
   a.id = (await r.json()).id;
   saveAlerts(a);
   return first;
 }
+// The account's settings changed on another device: a subscribed device sends them again (or unsubscribes).
+function alertsFollowAccount() {
+  const a = loadAlerts();
+  renderPlace();
+  if (account && ALERTS_POSSIBLE && a.id) syncAlerts(a).catch((e) => console.warn("alerts", e));
+}
+// Logged out (or account deleted / session ended): this device's alerts are switched off. The server removes the
+// subscriptions itself (with the session or the account).
+async function alertsSignedOut() {
+  try { localStorage.removeItem("rainy.alerts"); localStorage.removeItem("rainy.alertset"); } catch {}
+  document.getElementById("alertCard").classList.remove("show");
+  renderPlace();
+  if (!ALERTS_POSSIBLE) return;
+  try {
+    const reg = await navigator.serviceWorker.getRegistration();
+    const sub = reg && (await reg.pushManager.getSubscription());
+    if (sub) await sub.unsubscribe();
+  } catch {}
+}
+// Notifications on this device (permission + push subscription) for the account's alert settings.
+async function enableDevice() {
+  let msg = null;
+  if (!window.isSecureContext) msg = t("alert.needHttps");
+  else if (!("PushManager" in window) || !("Notification" in window)) msg = /iPhone|iPad/.test(navigator.userAgent) ? t("alert.iphone") : t("alert.unsupported");
+  else if ((await Notification.requestPermission()) !== "granted") msg = t("alert.blocked");
+  if (msg) toast(msg);
+  return !msg;
+}
+
+// Logged out: the alert controls show why and offer the sign-in.
+// In the settings card the account row at the top already has the sign-in button: only the hint here (no second button)
+const alertLoginRow = () => `<p class="hint">${t("alert.loginHint")}</p>`;
+function showAlertLogin(name) {
+  const card = document.getElementById("alertCard");
+  card.innerHTML = `<h3>${esc(name ? t("alert.cardTitle", { name }) : t("alert.title"))}</h3>
+    <p>${t("alert.loginHint")}</p>
+    <div class="actions"><button class="done" data-close>${t("common.close")}</button><button class="done" data-alert-login>${t("account.login")}</button></div>`;
+  card.querySelector("[data-close]").addEventListener("click", () => card.classList.remove("show"));
+  card.querySelector("[data-alert-login]").addEventListener("click", () => { card.classList.remove("show"); openLogin(); });
+  document.getElementById("styleCard").classList.remove("show");
+  card.classList.add("show");
+}
 
 async function bellClicked(loc, name) {
-  if (!window.isSecureContext) return toast(t("alert.needHttps"));
-  if (!("PushManager" in window) || !("Notification" in window)) {
-    return toast(/iPhone|iPad/.test(navigator.userAgent) ? t("alert.iphone") : t("alert.unsupported"));
-  }
+  if (!account) return showAlertLogin(state.picked ? name : t("alert.ownPlace"));
   if (!state.picked) return loadAlerts().own ? showSettings() : enableOwnAlert(loc);
   if (hasAlert(loc)) return showAlertCard(loc, name);
-  if ((await Notification.requestPermission()) !== "granted") return toast(t("alert.blocked"));
+  if (!(await enableDevice())) return;
   const a = loadAlerts();
   a.places.push({ name: name || "", lat: +loc.lat.toFixed(4), lon: +loc.lon.toFixed(4) });
   if (!isFav(loc)) toggleFav(loc, name); // alerts are for home and favorites
@@ -2434,19 +2550,28 @@ async function bellClicked(loc, name) {
     a.places = a.places.filter((p) => !sameLoc(p, loc));
     saveAlerts(a);
     renderPlace();
-    return toast(t("alert.failed"));
+    return toast(t(account ? "alert.failed" : "alert.loginHint"));
   }
   renderPlace();
   showAlertCard(loc, name);
 }
 
-// Lead time slider, heavy-rain heads-up and quiet hours: shared by the place card and the settings.
-const alertControls = (a) => `<div class="row"><span>${t("alert.lead")}</span><span><input type="range" min="${LEAD_MIN}" max="${LEAD_MAX}" step="5" value="${a.lead}" data-lead>
+// Quiet hours: start and end in 30 min steps (the stored value is kept even if it is not on the grid).
+const QUIET_STEPS = Array.from({ length: 48 }, (_, i) => `${String(i >> 1).padStart(2, "0")}:${i & 1 ? "30" : "00"}`);
+const quietSelect = (k, v) => `<select data-q="${k}" aria-label="${esc(t(k === "quietFrom" ? "alert.quietFrom" : "alert.quietTo"))}">${
+  (QUIET_STEPS.includes(v) ? QUIET_STEPS : [...QUIET_STEPS, v].sort()).map((s) => `<option${s === v ? " selected" : ""}>${s}</option>`).join("")}</select>`;
+// Lead time slider, heavy-rain heads-up, thunder and quiet hours: shared by the place card and the settings. A
+// device without its own subscription is asked to allow notifications here.
+const alertControls = (a) => `${alertsOn(a) && !deviceSubscribed(a) ? `<p class="hint device-hint">${t("alert.deviceHint")}</p>
+    <div class="row"><span></span><span class="seg"><button data-device>${t("alert.deviceAllow")}</button></span></div>` : ""}
+    <div class="row"><span>${t("alert.lead")}</span><span><input type="range" min="${LEAD_MIN}" max="${LEAD_MAX}" step="5" value="${a.lead}" data-lead>
       <span class="lead-val">${t("alert.minutes", { n: a.lead })}</span></span></div>
     <p class="hint lead-hint"${a.lead > 45 ? "" : " hidden"}>${t("alert.leadHint")}</p>
     <label class="row early-row"${a.lead >= 45 ? " hidden" : ""}><span>${t("alert.early")}</span><input type="checkbox" data-k="early"${a.early ? " checked" : ""}></label>
     <label class="row"><span>${t("alert.thunder")}</span><input type="checkbox" data-k="thunder"${a.thunder ? " checked" : ""}></label>
-    <label class="row"><span>${t("alert.quiet")}</span><input type="checkbox" data-k="quiet"${a.quiet ? " checked" : ""}></label>`;
+    <label class="row"><span>${t("alert.quiet")}</span><input type="checkbox" data-k="quiet"${a.quiet ? " checked" : ""}></label>
+    <div class="row quiet-row"${a.quiet ? "" : " hidden"}><span>${t("alert.quietTimes")}</span><span class="quiet-times">${quietSelect("quietFrom", a.quietFrom)}<span>–</span>${quietSelect("quietTo", a.quietTo)}</span></div>
+    <p class="hint quiet-hint"${a.quiet ? "" : " hidden"}>${t("alert.quietHint")}</p>`;
 function bindAlertControls(card, a, update) {
   const lead = card.querySelector("[data-lead]");
   if (!lead) return;
@@ -2456,13 +2581,33 @@ function bindAlertControls(card, a, update) {
     card.querySelector(".lead-hint").hidden = +lead.value <= 45; // backtest: hit rate drops clearly beyond ~45 min
   });
   lead.addEventListener("change", () => { a.lead = +lead.value; update(); });
-  card.querySelectorAll("input[data-k]").forEach((c) => c.addEventListener("change", () => { a[c.dataset.k] = c.checked; update(); }));
+  card.querySelectorAll("input[data-k]").forEach((c) => c.addEventListener("change", () => {
+    a[c.dataset.k] = c.checked;
+    if (c.dataset.k === "quiet") card.querySelectorAll(".quiet-row, .quiet-hint").forEach((el) => { el.hidden = !c.checked; });
+    update();
+  }));
+  card.querySelectorAll("select[data-q]").forEach((s) => s.addEventListener("change", () => { a[s.dataset.q] = s.value; update(); }));
+  const dev = card.querySelector("[data-device]");
+  if (dev) dev.addEventListener("click", async () => {
+    if (!(await enableDevice())) return;
+    try {
+      const first = await syncAlerts(a);
+      if (first) postJSON("/api/push/test", { id: a.id }).catch(() => {});
+    } catch (e) { console.warn("alerts", e); toast(t("alert.failed")); }
+    if (card.id === "styleCard") showSettings();
+    else card.querySelectorAll(".device-hint, .device-hint + .row").forEach((el) => el.remove());
+  });
+}
+// Settings changed: saved in the account (synced); a subscribed device updates the server at once, and switching
+// the last alert off unsubscribes every device of the account.
+function alertsUpdated(a) {
+  saveAlerts(a);
+  if (a.id || !alertsOn(a)) syncAlerts(a, !alertsOn(a)).catch((e) => console.warn("alerts", e));
 }
 // Switch on the alert for "Mein Standort".
 async function enableOwnAlert(loc) {
-  if (!window.isSecureContext) return toast(t("alert.needHttps"));
-  if (!("PushManager" in window) || !("Notification" in window)) return toast(t("alert.unsupported"));
-  if ((await Notification.requestPermission()) !== "granted") return toast(t("alert.blocked"));
+  if (!account) return showAlertLogin(t("alert.ownPlace"));
+  if (!(await enableDevice())) return;
   const a = loadAlerts();
   a.own = true;
   if (loc) a.ownLoc = { lat: +loc.lat.toFixed(2), lon: +loc.lon.toFixed(2) };
@@ -2486,7 +2631,7 @@ function showAlertCard(loc, name) {
     <p>${t("alert.cardText")}</p>
     ${alertControls(a)}
     <div class="actions"><button class="off">${t("alert.offHere")}</button><button class="done">${t("common.done")}</button></div>`;
-  const update = () => { saveAlerts(a); syncAlerts(a).catch((e) => console.warn("alerts", e)); };
+  const update = () => alertsUpdated(a);
   bindAlertControls(card, a, update);
   card.querySelector(".off").addEventListener("click", () => {
     a.places = a.places.filter((p) => !sameLoc(p, loc));
@@ -2514,11 +2659,11 @@ function showSettings() {
     ${accountRow()}
     <div class="row"><span>${t("settings.language")}</span>${langSeg}</div>
     ${ALERTS_POSSIBLE ? `<div class="sec">${t("alert.title")}</div>
-    <label class="row"><span>${t("settings.ownLoc")}</span><input type="checkbox" data-own${a.own ? " checked" : ""}></label>
+    ${!account ? alertLoginRow() : `<label class="row"><span>${t("settings.ownLoc")}</span><input type="checkbox" data-own${a.own ? " checked" : ""}></label>
     <p class="hint">${t("settings.ownHint")}</p>
     ${alertControls(a)}
     ${a.places.length ? `<div class="row places"><span>${t("settings.morePlaces")}</span><span>${a.places.map((p, i) =>
-      `<button data-rm="${i}" title="${esc(t("settings.removeAlert"))}">${esc(p.name || t("settings.place"))} ×</button>`).join("")}</span></div>` : ""}` : ""}
+      `<button data-rm="${i}" title="${esc(t("settings.removeAlert"))}">${esc(p.name || t("settings.place"))} ×</button>`).join("")}</span></div>` : ""}`}` : ""}
     <div class="sec">${t("settings.map")}</div>
     <div class="row"><span>${t("settings.design")}</span>${seg("design", Object.entries(MAP_DESIGNS).map(([k, d]) => [k, d.label]))}</div>
     <div class="row"><span>${t("settings.colors")}</span>${seg("theme", [["auto", t("settings.themeAuto")], ["light", t("settings.themeLight")], ["dark", t("settings.themeDark")]])}</div>
@@ -2526,7 +2671,7 @@ function showSettings() {
     <div class="row"><span>${t("settings.rain")}</span>${seg("rain", [["mix", t("settings.rainMix")], ["eu", t("settings.rainEu")]])}</div>`}
     ${DE_ONLY && API_BASE ? `<div class="row"><span>${t("settings.forecast")}</span>${seg("fc", [["dwd", t("settings.fcDwd")], ["own", t("settings.fcOwn")]])}</div>` : ""}
     <div class="actions"><span></span><button class="done">${t("common.done")}</button></div>`;
-  const update = () => { saveAlerts(a); syncAlerts(a).catch((e) => console.warn("alerts", e)); };
+  const update = () => alertsUpdated(a);
   bindAlertControls(card, a, update);
   const own = card.querySelector("[data-own]");
   if (own) own.addEventListener("change", async () => {
@@ -2547,6 +2692,7 @@ function showSettings() {
   card.querySelectorAll("[data-lang]").forEach((b) => b.addEventListener("click", () => setLang(b.dataset.lang)));
   const loginBtn = card.querySelector("[data-login]"), logoutBtn = card.querySelector("[data-logout]");
   if (loginBtn) loginBtn.addEventListener("click", openLogin);
+  card.querySelectorAll("[data-alert-login]").forEach((b) => b.addEventListener("click", openLogin));
   if (logoutBtn) logoutBtn.addEventListener("click", logout);
   card.querySelectorAll("[data-del], [data-del-cancel]").forEach((b) => b.addEventListener("click", () => {
     confirmDelete = b.dataset.del != null;
@@ -2718,11 +2864,11 @@ document.getElementById("searchClose").addEventListener("click", closeSearch);
 
 // ---------- Account (optional) ----------
 // Signing in only syncs favourites and settings across devices; everything works without it. The session is an
-// HttpOnly cookie of our server (server/auth.py). Synced: rainy.favs, .favRange, .style, .hours - never rainy.last or
-// rainy.alerts (push subscriptions belong to one device). rainy.sync = {email, data}: the state last agreed with the
+// HttpOnly cookie of our server (server/auth.py). Synced: rainy.favs, .favRange, .style, .hours and the alert settings
+// rainy.alertset - never rainy.last or rainy.alerts (the push subscription belongs to one device). rainy.sync = {email, data}: the state last agreed with the
 // server, so that the changes of each side can be told apart (local change -> push, server change -> apply).
-const SYNC_KEYS = { favs: "rainy.favs", favRange: "rainy.favRange", style: "rainy.style", hours: "rainy.hours" };
-const SYNC_JSON = new Set(["favs", "style"]);
+const SYNC_KEYS = { favs: "rainy.favs", favRange: "rainy.favRange", style: "rainy.style", hours: "rainy.hours", alerts: "rainy.alertset" };
+const SYNC_JSON = new Set(["favs", "style", "alerts"]);
 let account = null, authProviders = null, syncTimer = null;
 // referrerPolicy "same-origin": with the site-wide no-referrer policy browsers would send "Origin: null" on our own
 // POST/PUT/DELETE, and the server only accepts writes from our own pages.
@@ -2768,6 +2914,7 @@ function applySynced(d) {
     if (!document.getElementById("favPanel").hidden) renderFavs();
   }
   if (d.hours != null && d.hours !== before.hours) setHours(d.hours || null);
+  if (d.alerts != null && stableJSON(before.alerts) !== stableJSON(d.alerts)) alertsFollowAccount();
   // The map look is set up once at start (as with a change in the settings card): reload when it really differs.
   // Loop-safe: after the reload the stored style equals d.style.
   if (d.style && stableJSON(before.style) !== stableJSON(d.style)
@@ -2819,7 +2966,8 @@ async function flushSync(keepalive = false) {
   try { if (await pushSynced(d, keepalive)) saveSyncState({ email: account, data: s }); } catch (e) { console.warn("sync", e); }
 }
 document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden" && syncTimer) flushSync(true); });
-function signedOut() { account = null; saveSyncState(null); refreshSettings(); } // the local copy stays
+// The local copy of favourites and settings stays; the alerts of this device end with the login.
+function signedOut() { account = null; saveSyncState(null); alertsSignedOut(); refreshSettings(); }
 function refreshSettings() { if (document.getElementById("styleCard").classList.contains("show")) showSettings(); }
 // Account row at the top of the settings card (only when our server offers a sign-in method).
 // Deleting the account takes a second tap (like the other settings, no browser dialog).
@@ -2858,6 +3006,8 @@ async function deleteAccount() {
 }
 async function logout() {
   await flushSync();
+  const a = loadAlerts(); // this device's subscription (the server also removes it with the session)
+  if (a.id) await apiFetch("/api/push/unsubscribe", { method: "POST", body: JSON.stringify({ id: a.id }) }).catch(() => {});
   try { await apiFetch("/api/auth/logout", { method: "POST", body: "{}" }); } catch {}
   signedOut();
 }

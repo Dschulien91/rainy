@@ -59,6 +59,67 @@ def storm(de, pt, th, lat, lon, arrive_min=40, speed_kmh=30):
     de.ref = (de.ref or now) + 60_000  # new tile key: browsers must not reuse the tiles from before the scenario
 
 
+def field(de, pt, seed=1, speed_kmh=40):
+    """Widespread rain with showers and a few heavy cells over all of Germany, moving east (look of the rain tiles:
+    every colour class, ragged outlines, snow in the north-east). Freezes the DWD grids until reset."""
+    import cv2
+    de.frozen = True
+    rng = np.random.default_rng(seed)
+    ny, nx = de.ny, de.nx
+    pad = int(2 * 60 * speed_kmh / 60 / de.KM_PER_PX) + 8  # room for 2 h of motion
+    f = np.zeros((ny, nx + pad), np.float32)
+    for cell_km, amp in ((180, 1.0), (60, 0.7), (20, 0.45), (6, 0.25)):
+        n = max(2, int((nx + pad) * de.KM_PER_PX / cell_km))
+        g = rng.normal(size=(max(2, int(ny * de.KM_PER_PX / cell_km)) + 1, n + 1)).astype(np.float32)
+        f += amp * cv2.resize(g, (nx + pad, ny), interpolation=cv2.INTER_CUBIC)
+    base = np.where(f > 0.3, np.minimum(0.05 * np.exp(2.6 * (f - 0.3)), 120.0), 0.0).astype(np.float32)
+    now = max(de.obs) if de.obs else int(time.time() * 1000)
+    for grids in (de.obs, de.fc):
+        for ts in list(grids):
+            shift = int(round((ts - now) / 3_600_000 * speed_kmh / de.KM_PER_PX)) + pad // 2
+            grids[ts] = base[:, pad - shift:pad - shift + nx].astype(np.float16) if 0 <= shift <= pad else grids[ts]
+    with pt.lock:
+        for ts in list(pt.grids):
+            g = np.full((ny, nx), ptype.RAIN, np.uint8)
+            g[: ny // 4, nx // 2:] = ptype.SNOW
+            pt.grids[ts] = g
+    de.ref = (de.ref or now) + 60_000  # new tile key
+
+
+def bench(mosaic, z, n=40):
+    """Render time per rain tile (ms, this thread only, no cache): the v0.76 look against the plain look before
+    (rate per tile pixel + colour table + PNG). Tiles of the latest frame around Germany's centre."""
+    import io
+    from PIL import Image
+    import mosaic as mm
+    import palette
+    ts = max(f["ts"] for f in mosaic.frames() if not f["fc"])
+    key = mosaic.key()
+    k = (1 << z) / (2 * mm.WORLD)
+    cx, cy = mm.merc(10.4, 51.0)
+    x0, y0 = int((cx + mm.WORLD) * k), int((mm.WORLD - cy) * k)
+    side = max(1, int(n ** 0.5))
+    tiles = [(x0 - side // 2 + i, y0 - side // 2 + j) for i in range(side) for j in range(side)]
+    out = {}
+    t = time.perf_counter()
+    for x, y in tiles:
+        mosaic.cache.pop(f"rdwd/{key}/{ts}/{z}/{x}/{y}", None)
+        mosaic.rain_tile(key + "-bench", ts, z, x, y)
+    out["new_ms"] = round((time.perf_counter() - t) / len(tiles) * 1000, 1)
+    t = time.perf_counter()
+    for x, y in tiles:
+        X, Y = mm.tile_xy(z, x, y)
+        rate, faint = mosaic.rain(ts, X, Y)
+        rgba = palette.colorize(rate, mosaic.kind(ts, X, Y))
+        buf = io.BytesIO()
+        Image.fromarray(rgba, "RGBA").save(buf, "PNG", compress_level=6)
+    out["old_ms"] = round((time.perf_counter() - t) / len(tiles) * 1000, 1)
+    with mosaic.cache_lock:
+        for kk in [kk for kk in mosaic.cache if "-bench/" in kk]:
+            del mosaic.cache[kk]
+    return {"z": z, "tiles": len(tiles), **out}
+
+
 def reset(de, pt, th):
     de.frozen = False
     de.obs.clear(); de.fc.clear(); de.ref = None  # reloaded from the DWD within a minute

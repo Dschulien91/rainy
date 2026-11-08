@@ -37,8 +37,10 @@ Endpoints (all CORS-enabled, cache headers suitable for a CDN):
   (/api/health: "regions"."sunny" = frames, ref, age_min, stations of the Germany sunny source)
   Rain alerts (server/alerts.py, Web Push):
   GET  /api/push/key                           -> {"key": VAPID public key}
-  POST /api/push/subscribe   {id?, subscription, places, lead, early, quiet, tz} -> {"id"}
-  POST /api/push/unsubscribe {id};  POST /api/push/test {id};  POST /api/push/remind {id, lat, lon, name, minutes}
+  POST /api/push/subscribe   {id?, subscription, settings: {places, own, lead, early, quiet, quietFrom, quietTo, thunder},
+                              ownLoc, ownName, tz, api} -> {"id"}   (needs the login session: 401 without)
+  POST /api/push/unsubscribe {id?, all?} (all: every device of the logged-in user)
+  POST /api/push/test {id};  POST /api/push/remind {id, lat, lon, name, minutes}
   GET  /api/push/preview?lat=&lon=&lead=&tz=   -> what the alert logic sees at a place (sends nothing)
   Optional login to sync favourites and settings (server/auth.py; Cache-Control no-store, credentialed CORS only for
   our own site, writes need a same-site Origin):
@@ -83,6 +85,7 @@ import clouds
 import fcverify
 import gauges
 import mosaic
+import palette  # stepped rain colours and the rain tile look (same table as the app)
 import ptype
 import recorder
 import sunny_de
@@ -95,7 +98,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v0.70"
+VERSION = "server-v0.72"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything.
 EDITION = os.environ.get("EDITION", "de")
@@ -153,51 +156,6 @@ def log(msg):
     """Server messages go to stderr: pySTEPS' progress output on stdout is silenced while it runs."""
     sys.stderr.write(msg + "\n")
     sys.stderr.flush()
-
-
-# ---------- palette (same stops as the app, log interpolation) ----------
-# 0.05-0.1 mm/h: faint "a few drops" (gauges: showing it finds 75 % instead of 67 % of light rain at equal CSI)
-STOPS = [(0.05, (170, 214, 255, 0.45)), (0.1, (154, 208, 255, 0.55)), (0.5, (75, 163, 255, 0.75)), (2, (47, 107, 245, 0.85)),
-         (5, (107, 61, 240, 0.9)), (10, (192, 38, 211, 0.95)), (30, (255, 61, 110, 1)), (75, (255, 212, 0, 1))]
-LUT_N = 256
-DRAW_MIN = 0.05  # mm/h drawn on the map (timeline and alerts keep their own thresholds)
-LUT_MIN, LUT_MAX = math.log(DRAW_MIN), math.log(100.0)
-
-
-# colours for the other precipitation types (ptype.py kinds 1-5): sleet, snow, freezing rain, graupel, hail
-KIND_STOPS = [
-    [(0.05, (205, 238, 242, 0.3)), (0.1, (196, 236, 240, 0.6)), (0.5, (150, 214, 232, 0.75)), (2, (112, 182, 222, 0.85)), (5, (100, 140, 225, 0.9)), (30, (90, 100, 220, 1))],
-    [(0.05, (240, 243, 255, 0.32)), (0.1, (238, 242, 255, 0.65)), (0.5, (212, 220, 255, 0.78)), (2, (178, 184, 255, 0.88)), (5, (146, 132, 245, 0.93)), (30, (118, 92, 228, 1))],
-    [(0.05, (255, 205, 228, 0.35)), (0.1, (255, 196, 224, 0.7)), (0.5, (255, 150, 204, 0.82)), (2, (242, 92, 172, 0.92)), (5, (214, 40, 142, 0.97)), (30, (170, 0, 110, 1))],
-    [(0.05, (212, 245, 214, 0.35)), (0.1, (204, 244, 206, 0.75)), (2, (124, 214, 146, 0.88)), (10, (60, 172, 96, 0.95)), (30, (30, 130, 70, 1))],
-    [(0.05, (255, 140, 100, 0.45)), (0.1, (255, 120, 70, 0.92)), (2, (240, 40, 30, 0.97)), (10, (205, 0, 0, 1)), (30, (150, 0, 0, 1))],  # hail: red, unlike heavy rain
-]
-
-
-def _build_lut(stops=STOPS):
-    lut = np.zeros((LUT_N + 1, 4), np.uint8)  # index 0 = transparent
-    for i in range(1, LUT_N + 1):
-        mmh = math.exp(LUT_MIN + (LUT_MAX - LUT_MIN) * (i - 1) / (LUT_N - 1))
-        c = stops[-1][1]
-        for (v0, c0), (v1, c1) in zip(stops, stops[1:]):
-            if mmh <= v1:
-                t = (math.log(mmh) - math.log(v0)) / (math.log(v1) - math.log(v0))
-                c = tuple(a + (b - a) * t for a, b in zip(c0, c1))
-                break
-        lut[i] = (int(c[0]), int(c[1]), int(c[2]), int(c[3] * 255))
-    return lut
-
-
-LUT = _build_lut()
-LUTS = np.stack([LUT] + [_build_lut(s) for s in KIND_STOPS])  # [kind, index] -> RGBA
-
-
-def colorize(rate, kind=None):
-    idx = np.zeros(rate.shape, np.int32)
-    wet = rate >= DRAW_MIN
-    lr = np.log(np.clip(rate[wet], DRAW_MIN, 100.0))
-    idx[wet] = 1 + np.round((lr - LUT_MIN) / (LUT_MAX - LUT_MIN) * (LUT_N - 1)).astype(np.int32)
-    return LUT[idx] if kind is None else LUTS[kind, idx]
 
 
 def dbz_to_rate(dbz):
@@ -844,13 +802,13 @@ def nearest_grid(region, ts, tol_ms=16 * 60_000):
 def render(region, grid, bbox, w, h, ts):
     X, Y = view_coords(bbox, w, h)
     rate, cov = sample(region, grid, X, Y)
-    rgba = colorize(rate)
+    rgba = palette.colorize(rate)
     sat = REGIONS["sat"]
     if region is not sat and not cov.all():
         sgrid = nearest_grid(sat, ts)
         if sgrid is not None:  # satellite estimate where the radar sees nothing, drawn fainter
             srate, _ = sample(sat, sgrid, X, Y)
-            srgba = colorize(srate)
+            srgba = palette.colorize(srate)
             srgba[..., 3] = (srgba[..., 3] * 0.65).astype(np.uint8)
             rgba[~cov] = srgba[~cov]
     elif region is sat:
@@ -969,7 +927,8 @@ class Handler(BaseHTTPRequestHandler):
                 info["de"] = {"frames": len(DE.frames()[0]), "ref": DE.ref, "vetoed_px": getattr(DE, "vetoed", 0)}
                 info["ptype"] = {"frames": len(PTYPE.grids), "ref": max(PTYPE.grids) if PTYPE.grids else None}
                 body = {"version": VERSION, "edition": EDITION, "regions": info, "openmeteo": openmeteo_available(), "rss_mb": rss_mb(),
-                        "auth": AUTH.providers()}  # sign-in methods the app may offer
+                        "auth": AUTH.providers(),  # sign-in methods the app may offer
+                        "tiles": MOSAIC.render_summary()}  # rain tile render time per zoom (server CPU)
                 return self.send(200, json.dumps(body).encode(), "application/json", 10)
             if u.path.startswith("/tiles/"):
                 m = re.fullmatch(r"/tiles/(rain|rainown|raineu|cloud)/([\w-]+)/(\d+)/(\d+)/(\d+)/(\d+)\.png", u.path)
@@ -987,6 +946,11 @@ class Handler(BaseHTTPRequestHandler):
             if DEV and u.path.startswith("/api/dev/"):  # never in production (env RAINY_DEV=1 only)
                 if u.path == "/api/dev/storm":
                     devtools.storm(DE, PTYPE, THUNDER, float(q["lat"]), float(q["lon"]), int(q.get("arrive", 40)))
+                elif u.path == "/api/dev/field":  # widespread rain with all colour classes (look of the rain tiles)
+                    devtools.field(DE, PTYPE, int(q.get("seed", 1)))
+                elif u.path == "/api/dev/bench":  # render time per rain tile, new look vs. plain (no cache)
+                    body = devtools.bench(MOSAIC, int(q.get("z", 8)), int(q.get("n", 36)))
+                    return self.send(200, json.dumps(body).encode(), "application/json", 0)
                 elif u.path == "/api/dev/reset":
                     devtools.reset(DE, PTYPE, THUNDER)
                     SUNNY.dev_reset()
@@ -1077,7 +1041,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(400, str(e).encode(), "text/plain", 0)
 
     def do_OPTIONS(self):  # CORS preflight for the JSON POSTs below
-        if auth.is_auth_path(urlparse(self.path).path):
+        if auth.is_auth_path(urlparse(self.path).path) or urlparse(self.path).path in PUSH_ACCOUNT:
             return AUTH.preflight(self)
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -1098,21 +1062,37 @@ class Handler(BaseHTTPRequestHandler):
             return AUTH.handle(self, "DELETE", u)
         return self.send(404, b"not found", "text/plain", 0)
 
+    def push_account(self, path):
+        """Subscribe / unsubscribe rain alerts: tied to the login session (credentialed CORS like the account API).
+        Anonymous subscriptions are no longer created (alerts.py); old ones can still be removed by their id."""
+        try:
+            if not AUTH.same_site(self):
+                return AUTH.reply(self, 403, {"error": "origin"})
+            body = AUTH.read_json(self, 20_000)
+            user = AUTH.session_info(self)
+            if path == "/api/push/subscribe":
+                if not user:
+                    return AUTH.reply(self, 401, {"error": "login"})
+                return AUTH.reply(self, 200, {"id": ALERTS.subscribe(body, user[0], user[2])})
+            n = ALERTS.remove_user(user[0]) if body.get("all") and user else 0
+            if body.get("id"):
+                ALERTS.unsubscribe(str(body["id"]))
+            return AUTH.reply(self, 200, {"ok": True, "removed": n})
+        except Exception as e:
+            log(f"push: {path} failed ({type(e).__name__})")
+            return AUTH.reply(self, 400, {"error": "bad request"})
+
     def do_POST(self):
         u = urlparse(self.path)
         if auth.is_auth_path(u.path):  # own size limits (user data up to 64 KB)
             return AUTH.handle(self, "POST", u)
+        if u.path in PUSH_ACCOUNT:
+            return self.push_account(u.path)
         try:
             n = int(self.headers.get("Content-Length", "0"))
             if n > 20_000:
                 return self.send(413, b"too large", "text/plain", 0)
             body = json.loads(self.rfile.read(n) or b"{}")
-            if u.path == "/api/push/subscribe":
-                sid = ALERTS.subscribe(body)
-                return self.send(200, json.dumps({"id": sid}).encode(), "application/json", 0)
-            if u.path == "/api/push/unsubscribe":
-                ALERTS.unsubscribe(str(body.get("id")))
-                return self.send(200, b"{}", "application/json", 0)
             if u.path == "/api/push/remind":  # 'remind me again' button of a notification
                 ok = ALERTS.remind(str(body.get("id")), body)
                 return self.send(200 if ok else 404, json.dumps({"ok": ok}).encode(), "application/json", 0)
@@ -1137,13 +1117,18 @@ OWN = OwnNowcast(DE)
 SUNNY = sunny_de.SunnyDE(fetch, log, DE, OPENMETEO_URL, openmeteo_available)
 SUNNY_ON = EDITION == "de" and os.environ.get("SUNNY_DE", "1") != "0"
 SKY = SUNNY if SUNNY_ON else CLOUDS
-MOSAIC = mosaic.Mosaic(REGIONS, DE, SKY, sample, colorize, log, de_only=EDITION == "de", ptype=PTYPE)
+MOSAIC = mosaic.Mosaic(REGIONS, DE, SKY, sample, palette.paint, log, de_only=EDITION == "de", ptype=PTYPE)
 THUNDER = thunder.Thunder(fetch, log)
 ALERTS = alerts.AlertEngine(DATA_DIR, {**REGIONS, "de": DE}, log, UA, VAPID_SUBJECT,
                             order=("de",) if EDITION == "de" else ("eu", "us"), thunder=THUNDER,
                             kind_at=lambda lat, lon, ts: ptype.NAMES[int(MOSAIC.kind(ts, *(np.array([[v]]) for v in mosaic.merc(lon, lat)))[0, 0])]
                             if PTYPE.grids else "rain")
 AUTH = auth.Auth(DATA_DIR, log)
+PUSH_ACCOUNT = ("/api/push/subscribe", "/api/push/unsubscribe")  # need the session cookie (Handler.push_account)
+AUTH.on_logout = ALERTS.remove_session
+AUTH.on_delete = ALERTS.remove_user
+AUTH.on_data = lambda user, data: ALERTS.apply_user(user, data.get("alerts"))
+ALERTS.session_alive = AUTH.session_alive
 RECORDER = recorder.Recorder(fetch, log, MOSAIC, CLOUDS, mosaic.merc)
 if DEV:
     import devtools

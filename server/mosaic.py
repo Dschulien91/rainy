@@ -41,9 +41,20 @@ from ptype import NAMES as ptype_names, dwd_grid_maps
 
 WORLD = 20037508.342789244
 STEP_MS = 5 * 60_000
-PRERENDER_ZOOMS = range(4, 9)  # Germany at zoom 4-8: ~120 tiles per frame
+PRERENDER_ZOOMS = range(4, 9)  # Germany at zoom 4-8: ~120 tiles per frame; zoom 9-10 (app maximum) on demand
+COARSE_M = 750.0       # rain tiles: coarse sampling step in Web Mercator m (~2 samples per 1 km radar cell)
+COARSE_MARGIN = 3      # coarse cells around the tile (blur and bicubic upsampling need the neighbours)
 CACHE_TILES = 12000            # in-process tile cache (~1-3 KB each); holds all pre-rendered tiles of a run
 TILE = 256
+
+
+def _empty_png():
+    buf = io.BytesIO()
+    Image.new("RGBA", (TILE, TILE), (0, 0, 0, 0)).save(buf, "PNG")
+    return buf.getvalue()
+
+
+EMPTY_PNG = _empty_png()  # dry rain tile
 FADE_KM = 30.0
 # The DWD composite reaches 50-190 km beyond the border (Denmark ~55 km, Netherlands ~130 km, Prague ~190 km, measured
 # 03.11.). BORDER_KM of it is shown like Germany (no hatching); 0 = Germany only.
@@ -278,11 +289,12 @@ class GermanyDwd:
 
 
 class Mosaic:
-    def __init__(self, regions, de, clouds, sample, colorize, log, de_only=False, ptype=None):
-        self.regions, self.de, self.clouds, self.sample, self.colorize, self.log = regions, de, clouds, sample, colorize, log
+    def __init__(self, regions, de, clouds, sample, paint, log, de_only=False, ptype=None):
+        self.regions, self.de, self.clouds, self.sample, self.paint, self.log = regions, de, clouds, sample, paint, log
         self.ptype = ptype  # precipitation type from the DWD radar (Germany), or None
         self.de_only = de_only  # Germany edition: DWD only, fading out 30 km beyond the border, no satellite estimate
         self.cache, self.cache_lock = OrderedDict(), threading.Lock()  # small in-process cache; the CDN does the rest
+        self.render_stats = {}  # zoom -> [tiles, dry tiles, seconds, max seconds] (rain tiles)
 
     # ---------- timeline ----------
     def key(self, variant="dwd"):
@@ -354,15 +366,41 @@ class Mosaic:
         return png
 
     def rain_tile(self, key, ts, z, x, y, use_de=True, variant="dwd"):
+        """Rain tile PNG in the stepped look (palette.paint): the rate is sampled on a coarse grid (~2 samples per
+        radar cell, at most one per tile pixel, plus a margin for the blur and the bicubic upsampling) and painted
+        2x supersampled. Dry tiles are one shared transparent PNG."""
         def make():
-            X, Y = tile_xy(z, x, y)
+            started = time.perf_counter()
+            span = 2 * WORLD / (1 << z)
+            n = max(8, int(np.ceil(span / max(span / TILE, COARSE_M))))
+            step = span / n
+            idx = np.arange(-COARSE_MARGIN, n + COARSE_MARGIN) + 0.5
+            X, Y = np.meshgrid(-WORLD + x * span + idx * step, WORLD - y * span - idx * step)
             rate, faint = self.rain(ts, X, Y, use_de, variant)
-            rgba = self.colorize(rate, self.kind(ts, X, Y))
-            rgba[..., 3] = np.where(faint, (rgba[..., 3] * 0.65).astype(np.uint8), rgba[..., 3])
-            buf = io.BytesIO()
-            Image.fromarray(rgba, "RGBA").save(buf, "PNG", compress_level=6)
-            return buf.getvalue()
+            rgba = self.paint(rate, self.kind(ts, X, Y), faint, n, COARSE_MARGIN, TILE)
+            if rgba is None:
+                png = EMPTY_PNG
+            else:
+                buf = io.BytesIO()
+                Image.fromarray(rgba, "RGBA").save(buf, "PNG", compress_level=6)
+                png = buf.getvalue()
+            self.stats(z, time.perf_counter() - started, rgba is None)
+            return png
         return self._cached(f"{'r' if use_de else 're'}{variant}/{key}/{ts}/{z}/{x}/{y}", make)
+
+    def stats(self, z, seconds, dry):
+        """Render time per tile and zoom (GET /api/health -> tiles): keeps an eye on the server CPU."""
+        with self.cache_lock:
+            s = self.render_stats.setdefault(z, [0, 0, 0.0, 0.0])  # tiles, dry tiles, total s, max s
+            s[0] += 1
+            s[1] += dry
+            s[2] += seconds
+            s[3] = max(s[3], seconds)
+
+    def render_summary(self):
+        with self.cache_lock:
+            return {z: {"tiles": n, "dry": d, "avg_ms": round(t / n * 1000, 1), "max_ms": round(m * 1000, 1)}
+                    for z, (n, d, t, m) in sorted(self.render_stats.items()) if n}
 
     def cloud_tile(self, key, ts, z, x, y):
         span = 2 * WORLD / (1 << z)
@@ -402,7 +440,8 @@ class Mosaic:
 
 def prerender_loop(mosaic, log):
     """Render the German rain tiles of every frame (zoom PRERENDER_ZOOMS) as soon as a new radar run is in, so no
-    user waits for them: the app asks for tiles up to zoom 8 only (enlarges them above), i.e. ~120 tiles per frame."""
+    user waits for them (~120 tiles per frame). The app asks for tiles up to zoom 10 (enlarges them above); zoom 9 and
+    10 are rendered on demand and cached here and by the CDN like the others."""
     done = None
     while True:
         try:
