@@ -193,6 +193,7 @@
 
   // account (optional sign-in, syncs favourites and settings)
   "account.title": "Account",
+  "fav.loginHint": "Sign in to save favourites – they will then be on all your devices.",
   "account.login": "Sign in",
   "account.logout": "Sign out",
   "account.loginTitle": "Sign in",

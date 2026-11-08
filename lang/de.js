@@ -192,6 +192,7 @@
 
   // account (optional sign-in, syncs favourites and settings)
   "account.title": "Konto",
+  "fav.loginHint": "Melde dich an, um Favoriten zu speichern – sie sind dann auf all deinen Geräten dabei.",
   "account.login": "Anmelden",
   "account.logout": "Abmelden",
   "account.loginTitle": "Anmelden",
