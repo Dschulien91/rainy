@@ -11,6 +11,12 @@
 <meta name="theme-color" content="#0B2A5B">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="rainy">
+<script>
+  // colours before the first paint (no light flash): dark unless the user chose "light" or "auto" in the settings
+  try { const t = (JSON.parse(localStorage.getItem("rainy.style")) || {}).theme;
+    if (t !== "auto") document.documentElement.classList.add(t === "light" ? "theme-light" : "theme-dark"); }
+  catch { document.documentElement.classList.add("theme-dark"); }
+</script>
 <link rel="stylesheet" href="vendor/leaflet.css">
 <link rel="stylesheet" href="vendor/maplibre-gl.css">
 <style>
@@ -358,7 +364,7 @@
 <script src="vendor/leaflet-maplibre-gl.js"></script>
 <script>
 "use strict";
-const VERSION = "v0.68";
+const VERSION = "v0.69";
 const FALLBACK = { lat: 53.5511, lon: 9.9937, name: "Hamburg" };
 const DWD_WMS = "https://maps.dwd.de/geoserver/dwd/wms";
 const EUM_WMS = "https://view.eumetsat.int/geoserver/ows";
@@ -476,7 +482,7 @@ const imgFrames = new Map();
 const MAP_STYLE = (() => {
   let st = {};
   try { st = JSON.parse(localStorage.getItem("rainy.style")) || {}; } catch {}
-  return { sat: st.sat === "photo" ? "photo" : "clouds", theme: ["light", "dark"].includes(st.theme) ? st.theme : "auto",
+  return { sat: st.sat === "photo" ? "photo" : "clouds", theme: ["light", "dark", "auto"].includes(st.theme) ? st.theme : "dark", // dark by default (07.11.)
     rain: st.rain === "eu" ? "eu" : "mix", fc: (new URLSearchParams(location.search).get("fc") || st.fc) === "own" ? "own" : "dwd", design: ["liberty", "bright", "fiord", "earth"].includes(st.design) ? st.design : "plain" };
 })();
 // Edition: "de" = first public version (Germany: rain radar 2 h + 24 h / 3 days; sunny and the Europe/USA radar are
@@ -1342,7 +1348,9 @@ async function countryOf(loc) {
 async function loadRadarPoint(loc) {
   const now = Date.now(), iso = (t) => new Date(t).toISOString().slice(0, 19) + "Z";
   state.radarPoint = [];
-  const cc = await countryOf(loc);
+  // Germany edition with our server: the server itself says whether a place is inside the radar area ("covered"),
+  // so skip the country lookup (an extra round trip to the geocoder of up to ~1 s before the radar could load)
+  const cc = DE_ONLY && API_BASE ? "DE" : await countryOf(loc);
   // Germany edition: radar in Germany and the border zone the map shows (the server answers "covered");
   // elsewhere the timeline falls back to the weather model
   if (DE_ONLY && cc && cc !== "DE" && !API_BASE) return;
