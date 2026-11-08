@@ -18,15 +18,19 @@ www.{$DOMAIN} {
 	# Languages: one folder per language (/de/, /en/). Only the bare domain picks one: the language the user chose
 	# (cookie rainy_lang, set by the switcher), else German for browsers that prefer German, else English. Deep links
 	# are never redirected (search engines crawl without Accept-Language). New language: add it here and in the switcher.
-	route / {
-		header Vary "Accept-Language, Cookie"
+	# (a "handle /" block, not a bare "route": Caddy runs route after handle, so the file server would answer first;
+	# the route inside keeps the checks in this order)
+	handle / {
 		@chosenDe header Cookie *rainy_lang=de*
-		redir @chosenDe /de/ 302
 		@chosenEn header Cookie *rainy_lang=en*
-		redir @chosenEn /en/ 302
 		@browserDe header_regexp Accept-Language ^\s*de
-		redir @browserDe /de/ 302
-		redir * /en/ 302
+		route {
+			header Vary "Accept-Language, Cookie"
+			redir @chosenDe /de/ 302
+			redir @chosenEn /en/ 302
+			redir @browserDe /de/ 302
+			redir * /en/ 302
+		}
 	}
 	# old addresses before the /de/ folder (08.11.)
 	redir /regenradar/* /de{uri} 301
