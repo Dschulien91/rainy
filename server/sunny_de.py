@@ -117,15 +117,23 @@ STATION_LAG_MS = 10 * 60_000   # SD_10 stamped T covers (T-10, T]; the satellite
 JUMP_MAX = 0.35
 JUMP_ACCEPT = 2
 TRUTH_KEEP_MS = 8 * 3600_000
+# Low sun: CS_A is fitted to the clearest pixels of an image, but at a low sun the beam through the usual haze is far
+# weaker. Where the IR cloud tops said "clear" (07.-09.11., 4 M pixels at sunrise/sunset) the beam was sunny in only
+# 26-40 % at 3-9 deg, 55 % at 9-12, 87 % at 12-16, 97 % above 16; k (old model) median 0.2-0.35 below 12 deg, 0.9 above
+# 16. So sunrise runs (k from IR = 1) forecast sun for ~5x the area that got it (09.11. morning). The clear beam is
+# scaled down by LOW_F at <= LOW_E0, fading out at LOW_E1. The analysis is unaffected (share = f(k * clear_dni) = f(DNI)).
+LOW_E0, LOW_E1 = 10.0, 18.0
+LOW_F = float(os.environ.get("SUNNY_LOW_F", "0.3"))  # env only for replays (server/replay_sun.py: 1 = without)
 
 
 def clear_dni(elev):
     """Clear-sky direct normal irradiance (W/m2) for a solar elevation in degrees (array): Meinel-type
-    transmittance CS_A ** (AM ** 0.678) with the Kasten & Young air mass. Only its shape over elevation matters for
-    the forecast (the index k is divided by it and multiplied back with it at the forecast time)."""
+    transmittance CS_A ** (AM ** 0.678) with the Kasten & Young air mass, lowered at a low sun (LOW_F). Only its shape
+    over elevation matters for the forecast (the index k is divided by it and multiplied back with it at the forecast time)."""
     e = np.maximum(np.asarray(elev, np.float32), 0.5)
     am = 1.0 / (np.sin(np.radians(e)) + 0.50572 * (e + 6.07995) ** -1.6364)
-    return (1361.0 * CS_A ** (am ** 0.678)).astype(np.float32)
+    low = LOW_F + (1.0 - LOW_F) * np.clip((e - LOW_E0) / (LOW_E1 - LOW_E0), 0.0, 1.0)
+    return (1361.0 * CS_A ** (am ** 0.678) * low).astype(np.float32)
 
 
 def share_from_k(k, elev):
