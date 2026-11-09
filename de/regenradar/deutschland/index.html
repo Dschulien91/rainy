@@ -436,11 +436,11 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=0.81"></script>
-<script src="lang/en.js?v=0.81"></script>
+<script src="lang/de.js?v=0.82"></script>
+<script src="lang/en.js?v=0.82"></script>
 <script>
 "use strict";
-const VERSION = "v0.81";
+const VERSION = "v0.82";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -1816,7 +1816,12 @@ const CloudTiles = L.GridLayer.extend({
   createTile(c, done) {
     const tile = document.createElement("canvas");
     tile.width = tile.height = 256;
+    // a tile that does not arrive must not hold up the whole layer: its "load" event decides when a time step is shown
+    let finished = false;
+    const finish = () => { if (!finished) { finished = true; done(null, tile); } };
+    setTimeout(finish, 15000);
     loadImage(L.Util.template(this.options.url, c)).then((img) => {
+      if (finished) return;
       const ctx = tile.getContext("2d", { willReadFrequently: true });
       ctx.drawImage(img, 0, 0);
       const d = ctx.getImageData(0, 0, 256, 256), px = d.data, day = isDayAt(this.options.ts) ? 1 : 0;
@@ -1825,8 +1830,8 @@ const CloudTiles = L.GridLayer.extend({
         paintSky(px, i, cloudOpacity(px[i] / 255), day);
       }
       ctx.putImageData(d, 0, 0);
-      done(null, tile);
-    }, () => done(null, tile)); // missing tile: stay empty
+      finish();
+    }).catch(finish); // missing tile: stay empty
     return tile;
   },
 });
@@ -1839,7 +1844,9 @@ function tileLayer(kind, ts) {
       // the server paints smooth, rounded class outlines up to zoom 10 (~100 m pixels, pre-rendered 4-8, 9-10 on
       // demand); closer in the zoom-10 tiles are only enlarged
       ? L.tileLayer(url, { pane: "weather", opacity: 0, maxNativeZoom: 10, className: "rain-tiles", crossOrigin: "anonymous" })
-      : new CloudTiles({ pane: "weather", opacity: 0, className: "cloud-tiles", url, ts });
+      // the sunny grid has ~2 km cells: zoom-8 tiles (~400 m pixels) hold all its detail, closer in they are only
+      // enlarged - no new server tiles per zoom step for every time step of the timeline (empty squares while zooming)
+      : new CloudTiles({ pane: "weather", opacity: 0, className: "cloud-tiles", url, ts, maxNativeZoom: 8 });
     layer.id = id;
     tileLayers.set(id, layer);
   }

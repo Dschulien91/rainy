@@ -124,6 +124,11 @@ TRUTH_KEEP_MS = 8 * 3600_000
 # scaled down by LOW_F at <= LOW_E0, fading out at LOW_E1. The analysis is unaffected (share = f(k * clear_dni) = f(DNI)).
 LOW_E0, LOW_E1 = 10.0, 18.0
 LOW_F = float(os.environ.get("SUNNY_LOW_F", "0.3"))  # env only for replays (server/replay_sun.py: 1 = without)
+# Fog and low stratus: their tops are about as warm as the ground, so the IR cloud top height calls them "clear" (CTH
+# near 0) and sunny showed full sunshine under fog at sunrise (Stuttgart 09.11.: fog, visibility ~1 km, gauges 0 sun;
+# ICON-D2 had 90-100 % low cloud). Where k comes from IR (low sun, night) it is capped by the weather model's low cloud
+# cover: k <= 1 - LOWCC_W * low cover. Env only for replays (0 = without).
+LOWCC_W = float(os.environ.get("SUNNY_LOWCC_W", "1.0"))
 
 
 def clear_dni(elev):
@@ -239,6 +244,7 @@ class SunModel:
         self.grid, self.url, self.available, self.log = grid, url, available, log
         self.lock = threading.Lock()
         self.times = self.share = None   # (T,) ms at the middle of each 15 min interval; (T, nlat, nlon)
+        self.low_times = self.low = None  # hourly low cloud cover 0..1 (T, nlat, nlon), for fog under "clear" IR
         self.at = 0.0
         self.lats = np.arange(46.0, 56.0 + 1e-6, MODEL_DEG)
         self.lons = np.arange(2.0, 19.0 + 1e-6, MODEL_DEG)
@@ -257,13 +263,15 @@ class SunModel:
             ok[ok] = near[row[ok], col[ok]] > 0
             self.points = np.flatnonzero(ok)
         la, lo = la[self.points], lo[self.points]
-        times, vals = None, None
+        times, vals, low_times, low = None, None, None, None
         for i in range(0, len(la), MODEL_BATCH):
             body = urllib.parse.urlencode({
                 "latitude": ",".join(f"{v:.2f}" for v in la[i:i + MODEL_BATCH]),
                 "longitude": ",".join(f"{v:.2f}" for v in lo[i:i + MODEL_BATCH]),
                 "minutely_15": "sunshine_duration", "past_minutely_15": str(past_steps),
-                "forecast_minutely_15": str(forecast_steps), "timeformat": "unixtime"}).encode()
+                "forecast_minutely_15": str(forecast_steps),
+                "hourly": "cloud_cover_low", "past_hours": str(past_steps // 4 + 2),
+                "forecast_hours": str(forecast_steps // 4 + 2), "timeformat": "unixtime"}).encode()
             req = urllib.request.Request(f"{self.url}/v1/forecast", data=body,
                                          headers={"Content-Type": "application/x-www-form-urlencoded"})
             with urllib.request.urlopen(req, timeout=600) as r:
@@ -272,19 +280,28 @@ class SunModel:
             if times is None:
                 times = np.array(d[0]["minutely_15"]["time"], np.int64) * 1000 - 450_000  # value = previous 15 min
                 vals = np.zeros((len(times), len(la)), np.float32)
+            if low_times is None:
+                low_times = np.array(d[0]["hourly"]["time"], np.int64) * 1000  # instantaneous value at the full hour
+                low = np.full((len(low_times), len(la)), np.nan, np.float32)
             for j, e in enumerate(d):
                 vals[:, i + j] = [min(1.0, (v or 0.0) / 900.0) for v in e["minutely_15"]["sunshine_duration"]]
+                low[:, i + j] = [np.nan if v is None else v / 100.0 for v in e["hourly"]["cloud_cover_low"]]
         share = np.full((len(times), len(self.lats) * len(self.lons)), np.nan, np.float32)
         share[:, self.points] = vals
         share = share.reshape(len(times), len(self.lats), len(self.lons))
+        low_g = np.full((len(low_times), len(self.lats) * len(self.lons)), np.nan, np.float32)
+        low_g[:, self.points] = low
+        low_g = low_g.reshape(len(low_times), len(self.lats), len(self.lons))
         with self.lock:
             self.times, self.share = times, share
+            self.low_times, self.low = low_times, low_g
         self.at = time.time()
         return len(la)
 
-    def field(self, ts):
+    def field(self, ts, what="share"):
+        """Model sunshine share ("share") or low cloud cover ("low"), 0..1 on the sunny grid at ts; None outside."""
         with self.lock:
-            times, share = self.times, self.share
+            times, share = (self.times, self.share) if what == "share" else (self.low_times, self.low)
         if share is None or not times[0] <= ts <= times[-1]:
             return None
         k = min(int(np.searchsorted(times, ts, side="right")) - 1, len(times) - 2)
@@ -571,6 +588,13 @@ class SunnyDE:
         if cth_data is not None:
             lat, lon, c = read_nc(cth_data, ["CTH"])
             k_ir = k_from_cth(self.grid.regrid(lat, lon, c["CTH"]))
+            low = self.model.field(ts, "low") if self.model and LOWCC_W > 0 else None
+            if low is not None:  # fog / low stratus the IR cannot tell from the ground
+                # night and rising sun only: replay 08./09.11. vs the DWD stations, morning MAE +60/+90/+120
+                # .102/.110/.124 -> .078/.084/.086, midday unchanged, but evening +10 .099 -> .127 (sunset: no fog cap)
+                fog_time = (e < 0) | (self.elev(ts + 1_800_000) > e)
+                cap = np.clip(1.0 - LOWCC_W * low, 0.0, 1.0)
+                k_ir = np.where(fog_time, np.minimum(k_ir, cap), k_ir).astype(np.float32)
         if k_ir is None:
             k = k_dni
         else:  # DNI by day, IR cloud tops at low sun and night, blended in between; either one fills in for the other

@@ -454,6 +454,8 @@ class Mosaic:
                 png = buf.getvalue()
             self.stats(z, time.perf_counter() - started, rgba is None)
             return png
+        if not prerender and not self.key_known(key):  # drawn from other data than the key names: never cached
+            return make()
         return self._cached(f"{'r' if use_de else 're'}{variant}/{key}/{ts}/{z}/{x}/{y}", make)
 
     def stats(self, z, seconds, dry):
@@ -474,7 +476,10 @@ class Mosaic:
         span = 2 * WORLD / (1 << z)
         bbox = (-WORLD + x * span, WORLD - (y + 1) * span, -WORLD + (x + 1) * span, WORLD - y * span)
         run = int(key) if key.isdigit() else None  # the cloud key is the run's ref (ms)
-        return self._cached(f"c/{key}/{ts}/{z}/{x}/{y}", lambda: self.clouds.image(ts, bbox, TILE, TILE, run=run))
+        make = lambda: self.clouds.image(ts, bbox, TILE, TILE, run=run)
+        if not self.cloud_key_known(key):  # e.g. just after a restart, before the run is loaded again: never cached
+            return make()
+        return self._cached(f"c/{key}/{ts}/{z}/{x}/{y}", make)
 
     def cloud_key_known(self, key):
         """The cloud key's run is still kept (or the source keeps no runs): its tiles can be cached as immutable."""
