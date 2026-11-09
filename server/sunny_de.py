@@ -87,6 +87,12 @@ POLL_S = 120                   # new files every 10 min
 SUN_ELEV = 3.0                 # below: no sunshine (the beam is too weak and the retrieval unreliable)
 DAY_ELEV = 8.0                 # above: k from DNI alone; between SUN_ELEV and DAY_ELEV it fades into the IR cloud top height
 DNI_SUN = 120.0                # WMO sunshine threshold, W/m2
+# The map shows clouds vs clear sky, not the sunshine that is left of a low sun: below DISP_ELEV its value is the share
+# the sky's k would give at DISP_ELEV. Before (share at the real sun, and k at 15 deg only below DAY_ELEV) every clear
+# area turned grey in the late afternoon (no beam > 120 W/m2 below ~8 deg) and yellow again at ~5 deg - Hannover 09.11.
+# showed "sunny, overcast, sunny" while the sky stayed clear (WetterOnline's cloud map, DWD station Hannover 0/8).
+# The sunshine itself (point "sun", the hours, the verification) still uses the real sun.
+DISP_ELEV = 15.0
 CS_A = 0.72                    # clear-sky beam transmittance per air mass (fitted to the clearest DWD pixels, 08.11.)
 K_MAX = 1.3
 # soft threshold: share = clip((DNI - (DNI_SUN - RAMP)) / (2 RAMP)); against SD_10 (replay_sun.py --calib, 08.11., 2467
@@ -603,15 +609,14 @@ class SunnyDE:
             ki = np.where(np.isfinite(k_ir), k_ir, kd)
             k = (w * kd + (1 - w) * ki).astype(np.float32)
         share = share_from_k(k, e)
-        return k, share, self._display(k, share, e)
+        return k, share, self._display(k, e)
 
     @staticmethod
-    def _display(k, share, e):
-        """Cloud value for the map: from the sun share by day, from k at a reference sun near and below the horizon
-        (no seam at the terminator); encoded so that the app's sunShare() returns the share by day."""
-        pot = share_from_k(k, np.full_like(e, 15.0))
-        w = np.clip((e - SUN_ELEV) / (DAY_ELEV - SUN_ELEV), 0.0, 1.0)
-        s = w * np.nan_to_num(share) + (1 - w) * np.nan_to_num(pot)
+    def _display(k, e):
+        """Cloud value for the map: the sun share k gives with the sun at least DISP_ELEV high (= the share by day, the
+        clouds at a low sun and at night: no fading to grey towards sunset, no seam at the terminator); encoded so that
+        the app's sunShare() returns that share."""
+        s = np.nan_to_num(share_from_k(k, np.maximum(e, DISP_ELEV)))
         v = np.clip(0.05 + 0.8 * (1.0 - s), 0, 1) * 254
         return np.where(np.isfinite(k), v, 255).astype(np.uint8)
 
@@ -652,7 +657,7 @@ class SunnyDE:
             kk = np.where(kn > 0.5, kk, np.nan).astype(np.float32)
             s = share_from_k(kk, e)
             out["sat"][ts] = s
-            disp[ts] = self._display(kk, s, e)
+            disp[ts] = self._display(kk, e)
             if lead in LEADS:  # shadows only where they are scored
                 out["kpers"][ts] = share_from_k(k1, e)
                 if obs is not None:
