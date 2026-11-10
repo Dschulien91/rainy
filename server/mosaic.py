@@ -311,9 +311,7 @@ class GermanyDwd:
         if getattr(self, "drizzle", None) is not None:
             self.drizzle.apply(grids, ref)
             self.vetoed = self.drizzle.veto(grids, ref, raw, motion=rain_motion(raw, ref))
-        smooth = {t: smooth_fc(g, (t - ref) / 60_000) for t, g in grids.items() if t > ref}  # shadow "dwdsmooth"
         with self.lock:
-            self.fc_smooth = smooth
             self.obs_raw = raw
             self.obs = {t: grids[t] for t in raw}
             self.fc, self.ref = {t: g for t, g in grids.items() if t > ref}, ref
@@ -584,24 +582,6 @@ DATA_ZOOMS = range(3, 9)        # the app asks for zoom 3-8 (closer in: zoom 8, 
 DATA_CACHE = 400                # data tiles kept in memory (~20-150 KB each)
 _LOG_EDGES = np.concatenate([[np.log(palette.FLOOR)], palette.LOG_BANDS,
                              [palette.LOG_BANDS[-1] + (palette.LOG_BANDS[-1] - palette.LOG_BANDS[-2])]])
-
-
-def smooth_fc(g, lead_min, sigma_60=1.6):
-    """DWD's RV forecast shifts the image step by step; after ~45 min its rain bands are full of thin lanes and holes
-    (10.11., the user: "roads through the rain"). Lead-dependent smoothing in log space (closing + blur, sigma growing
-    to sigma_60 px at +60 min) closes them. Shadow "dwdsmooth" first (fcverify), shown only if it scores no worse."""
-    g = np.asarray(g, np.float32)
-    s = sigma_60 * min(1.0, lead_min / 60.0)
-    if s <= 0.2:
-        return g.astype(np.float16)
-    lg = np.log1p(np.maximum(g, 0) * 10)
-    k = 2 * int(round(s)) + 1
-    lg = cv2.morphologyEx(lg, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
-    lg = cv2.GaussianBlur(lg, (0, 0), s)
-    out = np.expm1(lg) / 10
-    out[out < 0.03] = 0
-    out[g < 0] = g[g < 0]
-    return out.astype(np.float16)
 
 
 def rain_motion(raw, ref, back_min=30, down=4):
