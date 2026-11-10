@@ -10,7 +10,7 @@ as wet when its last two 10-min values are both > 0 and together >= 0.07 mm (~0.
 A value must not contradict the gauge's own "precipitation" indicator or duration, where the station has them.
 Backtest 30.10. 00-07 UTC: only Saxon stations qualified (1-5 at a time), exactly where
 WetterOnline showed drizzle; none of the trace stations in the north. Where the radar is already wet within
-NEAR_KM, the radar wins. The drizzle is painted as a small disc around the gauge (no motion: this kind of drizzle
+NEAR_KM, the radar wins. The drizzle is painted as a soft, ragged light patch around the gauge (no motion: this kind of drizzle
 stays put) and fades out over the first FADE_MIN of the forecast.
 
 The other way round (veto): weak radar echoes that do not reach the ground. Radar beams over the Alps or under dry
@@ -51,6 +51,7 @@ RADIUS_KM = 6.0      # drizzle disc around a wet gauge
 NEAR_KM = 5.0        # radar wet (>= RADAR_WET mm/h) this close to the gauge: the radar already shows it
 RADAR_WET = 0.1
 MAX_MMH = 1.0        # drizzle, not a downpour: cap what one gauge can paint
+SOFT_MAX_MMH = 0.25  # drawn as the lightest classes (a veil, not a solid patch)
 MAX_10MIN_MM = 0.3   # more than this in 10 min with a dry radar is a gauge fault, not drizzle (Moos 30.10.: 7 mm/h)
 MAX_HEIGHT_M = 1000  # summit gauges (Fichtelberg, Brocken) collect fog inside the cloud: not drizzle around them
 FADE_MIN = 60
@@ -268,6 +269,7 @@ class GaugeDrizzle:
             return []
         km = self.de.KM_PER_PX
         near, rad = int(round(NEAR_KM / km)), int(round(RADIUS_KM / km))
+        rad_soft = int(round(RADIUS_KM * 1.4 / km))  # the soft patch's tail reaches beyond RADIUS_KM
         analysis = grids[ref]
         used = []
         for sid, lat, lon, mmh in wet:
@@ -277,10 +279,17 @@ class GaugeDrizzle:
                 continue
             if float(analysis[max(row - near, 0):row + near + 1, max(col - near, 0):col + near + 1].max()) >= RADAR_WET:
                 continue  # the radar sees it
+            # a soft, ragged light patch, not a flat disc: perfect circles looked artificial on the map (10.11., variant B
+            # of three shown to the user). The outline comes from smooth noise seeded by the station, so it stays the
+            # same from frame to frame and run to run.
+            r0, r1 = max(row - rad_soft, 0), min(row + rad_soft + 1, analysis.shape[0])
+            c0, c1 = max(col - rad_soft, 0), min(col + rad_soft + 1, analysis.shape[1])
             yy, xx = np.mgrid[r0:r1, c0:c1]
             d = np.hypot(yy - row, xx - col) / rad
-            # flat top, soft edge: reads as a small drizzle area, not a dot
-            disc = (mmh * np.clip((1.0 - d) / 0.4, 0.0, 1.0)).astype(np.float32)
+            noise = cv2.GaussianBlur(np.random.default_rng(int(sid) if sid.isdigit() else 0).standard_normal(
+                (2 * rad_soft + 1, 2 * rad_soft + 1)).astype(np.float32), (0, 0), 2.5)
+            noise = (noise / (np.abs(noise).max() + 1e-6))[r0 - row + rad_soft:r1 - row + rad_soft, c0 - col + rad_soft:c1 - col + rad_soft]
+            disc = (min(mmh, SOFT_MAX_MMH) * np.exp(-2.2 * (d * (1.0 + 0.45 * noise)) ** 2)).astype(np.float32)
             for ts, g in grids.items():
                 f = 1.0 if ts <= ref else max(0.0, 1.0 - (ts - ref) / (FADE_MIN * 60_000))
                 if f > 0:
