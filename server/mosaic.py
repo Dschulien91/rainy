@@ -61,10 +61,10 @@ FADE_KM = 30.0
 BORDER_KM = float(os.environ.get("BORDER_KM", "50"))
 COVER_ERODE_KM = 10.0  # stay clear of the ragged outer edge of the radar range
 GERMANY_BOX = (5.87, 47.27, 15.04, 55.06)  # lon0, lat0, lon1, lat1
-# Europe test instance (EDITION=eu): the OPERA area most people look at, pre-rendered at the overview zooms (~120 tiles
+# Europe test instance (EDITION=eu): the OPERA area most people look at, pre-rendered at the overview zooms 3-6 (~100 tiles
 # per time step); closer zooms are rendered on demand and cached like the rest
 EUROPE_BOX = (-11.0, 35.5, 32.0, 62.0)
-EU_PRERENDER_ZOOMS = range(3, 6)
+EU_PRERENDER_ZOOMS = range(3, 7)
 
 
 SPECKLE_PX = 10        # isolated echoes below ~10 km2 on the 1 km DWD grid ...
