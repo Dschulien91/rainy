@@ -8,7 +8,12 @@ Both forecasts are scored: DWD's own nowcast ("dwd") and ours ("own", rainy_serv
 
 One JSON line per (run, lead) in verify_log/fcgrid_<YYYYMMDD>.jsonl; server/score_grid.py sums them up. No downloads,
 no screenshots: thousands of comparisons per rainy day instead of a few.
+
+Rows also carry "v" (the server version that made the forecast) and "seen" (when the forecast was there, ms: its data
+was seen - ref old at that moment). Forecasts waiting for their truth are kept on disk (Pending), so a restart loses
+nothing. Each run's timeline is handed to monitor.timeline (jumps between the steps a user would see).
 """
+import itertools
 import json
 import os
 import threading
@@ -18,6 +23,8 @@ from datetime import datetime, timezone
 import cv2
 import numpy as np
 
+import monitor
+
 LOG_DIR = os.environ.get("VERIFY_LOG_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "verify_log"))
 LEADS = (15, 30, 60, 90, 120)  # minutes; the same steps as the WetterOnline comparison, plus our +120
 DOWN = 3                       # ~3 km pixels
@@ -26,15 +33,88 @@ THRESHOLDS = (0.1, 1.0)        # mm/h: "wet" and "real rain"
 KEEP_MS = 3 * 3600_000
 OBS_DIR = os.path.join(LOG_DIR, "obs3km")
 OBS_KEEP_DAYS = 14
+TAG = ""                       # the server version (set by rainy_server): every row says which code made the forecast
+
+
+class Pending:
+    """Forecasts waiting for their truth: {(variant, ref, lead): arrays}, kept on disk
+    (<log dir>/pending/<name>/<variant>~<ref>~<lead>.npz) with only the keys in memory.
+    Until 10.11. they lived in memory, so every restart or deploy wiped up to 2 h of measurements (10.11.: 7 deploys,
+    no +90/+120 rows for 6 h; the Europe instance, killed every ~10 min, never got beyond +30) and the Europe instance
+    carried ~0.9 GB of waiting grids. name=None: in memory only (replays)."""
+
+    def __init__(self, name, log_dir=None):
+        self.dir = os.path.join(log_dir or LOG_DIR, "pending", name) if name else None
+        self.keys = {}  # key -> path (disk) or arrays (memory)
+        if not self.dir:
+            return
+        os.makedirs(self.dir, exist_ok=True)
+        for f in os.listdir(self.dir):
+            part = f[:-4].split("~")
+            try:
+                if f.endswith(".npz") and len(part) == 3:
+                    self.keys[(part[0], int(part[1]), int(part[2]))] = os.path.join(self.dir, f)
+                elif f.endswith(".tmp") and time.time() - os.path.getmtime(os.path.join(self.dir, f)) > 600:
+                    os.remove(os.path.join(self.dir, f))  # left by a kill (not one being written by the other instance)
+            except (ValueError, OSError):
+                pass
+
+    def __contains__(self, key):
+        return key in self.keys
+
+    def __iter__(self):
+        return iter(list(self.keys))
+
+    def __len__(self):
+        return len(self.keys)
+
+    def put(self, key, **arrays):
+        if not self.dir:
+            self.keys[key] = arrays
+            return
+        path = os.path.join(self.dir, "~".join(str(k) for k in key) + ".npz")
+        with open(path + ".tmp", "wb") as f:
+            np.savez_compressed(f, **arrays)
+        os.replace(path + ".tmp", path)
+        self.keys[key] = path
+
+    def get(self, key):
+        v = self.keys.get(key)
+        if v is None or not self.dir:
+            return v
+        try:
+            with np.load(v) as z:
+                return {k: z[k] for k in z.files}
+        except Exception:  # half-written or damaged file
+            self.drop(key)
+            return None
+
+    def drop(self, key):
+        v = self.keys.pop(key, None)
+        if self.dir and v:
+            try:
+                os.remove(v)
+            except OSError:
+                pass
+
+    __delitem__ = drop
+
+    def clear(self):
+        for key in list(self.keys):
+            self.drop(key)
 
 
 def _down(g, shape):
     return cv2.resize(np.asarray(g, np.float32), shape, interpolation=cv2.INTER_AREA)
 
 
-def _counts(fc, obs, mask):
-    """hits, misses, false alarms with TOL_PX tolerance in both directions."""
+def _counts(fc, obs, mask, tol=True):
+    """hits, misses, false alarms with TOL_PX tolerance in both directions (tol=False: cell by cell).
+    In widespread rain the tolerant score saturates (09./10.11.: "nothing moves" reached CSI 0.79 at +120, DWD 0.83),
+    so the strict counts are logged too ("st<threshold>"): they show who places the rain's edges better."""
     fc, obs = fc & mask, obs & mask
+    if not tol:
+        return int((fc & obs).sum()), int((obs & ~fc).sum()), int((fc & ~obs).sum())
     near_obs = cv2.dilate(obs.astype(np.uint8), np.ones((2 * TOL_PX + 1,) * 2, np.uint8)) > 0
     near_fc = cv2.dilate(fc.astype(np.uint8), np.ones((2 * TOL_PX + 1,) * 2, np.uint8)) > 0
     return int((fc & near_obs).sum()), int((obs & ~near_fc).sum()), int((fc & ~near_obs).sum())
@@ -44,8 +124,8 @@ class GridVerify:
     def __init__(self, de, log):
         self.de, self.log = de, log
         self.lock = threading.Lock()
-        self.pending = {}  # (variant, ref, lead) -> forecast grid (down)
-        self.issued = {}   # ref -> analysis at issue time (down), for persistence
+        # (variant, ref, lead) -> g: forecast grid (down); ("_issued", ref, 0): the analysis at issue time (persistence)
+        self.pending = Pending("fcgrid")
         self.done_ref, self.done_own = None, None
         self.shape = (de.nx // DOWN, de.ny // DOWN)  # cv2 (w, h)
         self.mask = None   # area the map shows, downsampled
@@ -59,42 +139,61 @@ class GridVerify:
             ref, obs, fc = de.ref, dict(de.obs), dict(de.fc)
             own_ref, own = de.own_ref, dict(de.fc_own)
             shadow = {k: dict(v) for k, v in getattr(de, "fc_shadow", {}).items()}
+        now = np.int64(time.time() * 1000)  # "seen": when the forecast was there (its data was seen - ref old then)
         if ref != self.done_ref and ref in obs:
             self.mask = _down(de.inside, self.shape) > 0.5  # Germany + border zone (radar range known after 1st run)
-            self.issued[ref] = _down(obs[ref], self.shape)
+            self.pending.put(("_issued", ref, 0), g=_down(obs[ref], self.shape))
             for lead in LEADS:
                 g = fc.get(ref + lead * 60_000)
-                if g is not None:
-                    self.pending[("dwd", ref, lead)] = _down(g, self.shape)
+                if g is not None and ("dwd", ref, lead) not in self.pending:
+                    self.pending.put(("dwd", ref, lead), g=_down(g, self.shape), seen=now)
             self.done_ref = ref
         if own_ref is not None and own_ref != self.done_own:
             for lead in LEADS:
                 for name, grids in [("own", own)] + list(shadow.items()):  # shadows: variants being tested
                     g = grids.get(own_ref + lead * 60_000)
-                    if g is not None:
-                        self.pending[(name, own_ref, lead)] = _down(g, self.shape)
+                    if g is not None and (name, own_ref, lead) not in self.pending:
+                        self.pending.put((name, own_ref, lead), g=_down(g, self.shape), seen=now)
             self.done_own = own_ref
-        lines = []
-        for (variant, r, lead), g in list(self.pending.items()):
+            if own_ref == ref and self.mask is not None:  # what the timeline of this run looks like, step by step
+                times = sorted(obs)
+                for product, grids in (("dwd", fc), ("own", own)):
+                    ft = sorted(t for t in grids if t > ref)
+                    monitor.timeline("rain", product, ref, [(t - ref) // 60_000 for t in times + ft],
+                                     [_down(obs[t], self.shape) for t in times] + [_down(grids[t], self.shape) for t in ft],
+                                     self.mask, len(times))
+        if self.mask is None:
+            return
+        lines, truth = [], {}
+        for key in self.pending:
+            variant, r, lead = key
             valid = r + lead * 60_000
-            if valid not in obs:
+            if variant == "_issued" or valid not in obs:
                 if ref - r > KEEP_MS:
-                    del self.pending[(variant, r, lead)]
+                    self.pending.drop(key)
                 continue
-            a = _down(obs[valid], self.shape)
-            p = self.issued.get(r)
-            row = {"variant": variant, "ref": r, "lead": lead, "valid": valid,
+            z = self.pending.get(key)
+            self.pending.drop(key)
+            if z is None or z["g"].shape != self.mask.shape:
+                continue
+            g = z["g"].astype(np.float32)
+            if valid not in truth:
+                truth[valid] = _down(obs[valid], self.shape)
+            a = truth[valid]
+            p = self.pending.get(("_issued", r, 0)) if variant == "dwd" else None
+            row = {"variant": variant, "ref": r, "lead": lead, "valid": valid, "v": TAG,
                    "sum": [round(float(g[self.mask].sum()), 1), round(float(a[self.mask].sum()), 1)]}  # rain amount: forecast, real
+            if "seen" in z:
+                row["seen"] = int(z["seen"])
             for th in THRESHOLDS:
                 o = a >= th
                 row[f"obs{th}"] = int((o & self.mask).sum())
                 row[f"fc{th}"] = list(_counts(g >= th, o, self.mask))
-                if p is not None and variant == "dwd":  # persistence once per run
-                    row[f"pers{th}"] = list(_counts(p >= th, o, self.mask))
+                row[f"st{th}"] = list(_counts(g >= th, o, self.mask, tol=False))
+                if p is not None and p["g"].shape == self.mask.shape:  # persistence once per run
+                    row[f"pers{th}"] = list(_counts(p["g"] >= th, o, self.mask))
+                    row[f"pst{th}"] = list(_counts(p["g"] >= th, o, self.mask, tol=False))
             lines.append(row)
-            del self.pending[(variant, r, lead)]
-        for r in [r for r in self.issued if ref - r > KEEP_MS]:
-            del self.issued[r]
         self._save_obs(obs)
         if lines:
             os.makedirs(LOG_DIR, exist_ok=True)
@@ -168,7 +267,7 @@ class RegionVerify:
         self.region, self.log, self.prefix = region, log, prefix
         self.down = getattr(region, "RAW_DOWN", 2)
         self.obs_dir = os.path.join(LOG_DIR, obs_dir)
-        self.pending = {}  # (variant, ref, lead) -> (forecast grid, coverage at issue time)
+        self.pending = Pending(prefix)  # (variant, ref, lead) -> g: forecast grid, cov: radar coverage at issue time
         self.done_ref = None
         self.saved = set()
         self.areas = None  # name -> mask on the verification grid (without the radar coverage)
@@ -197,40 +296,57 @@ class RegionVerify:
             return
         if ref != self.done_ref:
             a0, cov0 = self._grid(obs[ref])
+            c0, now = cov0.astype(np.uint8), np.int64(time.time() * 1000)
+            put = lambda key, g: key in self.pending or self.pending.put(key, g=g.astype(np.float32), cov=c0, seen=now)
             for lead in LEADS:
                 t = ref + lead * 60_000
-                self.pending[("pers", ref, lead)] = (a0, cov0)
+                put(("pers", ref, lead), a0)
                 if t in fc:
-                    self.pending[("own", ref, lead)] = (self._grid(fc[t])[0], cov0)
+                    put(("own", ref, lead), self._grid(fc[t])[0])
                 for name, src in (("sprog", raw), ("sprog0", pure)):
                     if t in src:
                         g = np.asarray(src[t], np.float32)
                         if g.shape != a0.shape:
                             g = cv2.resize(g, (a0.shape[1], a0.shape[0]), interpolation=cv2.INTER_AREA)
-                        self.pending[(name, ref, lead)] = (np.where(g < 0, 0, g), cov0)
+                        put((name, ref, lead), np.where(g < 0, 0, g))
             self.done_ref = ref
+            # the timeline of this run, step by step (every 2nd cell = ~8 km is plenty; one frame in memory at a time)
+            times, ft = sorted(obs), sorted(t for t in fc if t > ref)
+            half = lambda t, src: tuple(np.ascontiguousarray(v[::2, ::2]) for v in self._grid(src[t]))
+            seen = [half(t, obs) for t in times]
+            always = np.logical_and.reduce([c for _, c in seen])  # covered in every measured frame
+            monitor.timeline("rain", "eu", ref, [(t - ref) // 60_000 for t in times + ft],
+                             itertools.chain((g for g, _ in seen), (half(t, fc)[0] for t in ft)), always, len(times))
+            del seen
         lines, truth = [], {}
-        for (variant, rr, lead), (g, cov0) in list(self.pending.items()):
+        for key in self.pending:
+            variant, rr, lead = key
             valid = rr + lead * 60_000
             if valid not in obs:
                 if ref - rr > KEEP_MS:
-                    del self.pending[(variant, rr, lead)]
+                    self.pending.drop(key)
                 continue
+            z = self.pending.get(key)
+            self.pending.drop(key)
             if valid not in truth:
                 truth[valid] = self._grid(obs[valid])
             a, cov = truth[valid]
+            if z is None or z["g"].shape != a.shape:
+                continue
+            g, cov0 = z["g"], z["cov"] > 0
             if self.areas is None:
                 self.areas = self._areas(a.shape)
             for area, amask in self.areas.items():
                 mask = cov0 & cov & amask
-                row = {"variant": variant, "area": area, "ref": rr, "lead": lead, "valid": valid,
+                row = {"variant": variant, "area": area, "ref": rr, "lead": lead, "valid": valid, "v": TAG,
+                       "seen": int(z["seen"]),
                        "sum": [round(float(g[mask].sum()), 1), round(float(a[mask].sum()), 1)]}
                 for th in THRESHOLDS:
                     o = a >= th
                     row[f"obs{th}"] = int((o & mask).sum())
                     row[f"fc{th}"] = list(_counts(g >= th, o, mask))
+                    row[f"st{th}"] = list(_counts(g >= th, o, mask, tol=False))
                 lines.append(row)
-            del self.pending[(variant, rr, lead)]
         self._save_obs(obs)
         if lines:
             os.makedirs(LOG_DIR, exist_ok=True)

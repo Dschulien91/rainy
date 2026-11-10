@@ -85,6 +85,7 @@ import auth
 import clouds
 import fcverify
 import gauges
+import monitor
 import mosaic
 import palette  # stepped rain colours and the rain tile look (same table as the app)
 import ptype
@@ -99,7 +100,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v0.92"
+VERSION = "server-v0.93"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -163,6 +164,7 @@ def log(msg):
     """Server messages go to stderr: pySTEPS' progress output on stdout is silenced while it runs."""
     sys.stderr.write(msg + "\n")
     sys.stderr.flush()
+    monitor.note(msg)  # error messages are counted for the daily report (monitor.py)
 
 
 def dbz_to_rate(dbz):
@@ -283,7 +285,8 @@ class ModelRain:
                 "latitude": ",".join(f"{v:.3f}" for v in la[i:i + self.BATCH]),
                 "longitude": ",".join(f"{v:.3f}" for v in lo[i:i + self.BATCH]),
                 "minutely_15": "precipitation", "past_minutely_15": "1", "forecast_minutely_15": "14",
-                "timeformat": "unixtime", **({"models": self.region.MODELS} if self.region.MODELS else {})}).encode()
+                "timeformat": "unixtime",
+                **({"models": self.region.MODELS} if getattr(self.region, "MODELS", None) else {})}).encode()
             req = urllib.request.Request(f"{OPENMETEO_URL}/v1/forecast", data=body,
                                          headers={"Content-Type": "application/x-www-form-urlencoded"})
             with urllib.request.urlopen(req, timeout=600) as r:
@@ -475,6 +478,7 @@ def advect_blend(fc, last, motion, fade_min=ADV_FADE_MIN):
 class DeModelArea:
     """The German radar grid as a ModelRain region: model points only where the map shows the radar."""
     name, MODEL_DEG = "de_model", 0.05  # ICON-D2 has ~2.2 km; 0.05 deg (~4-5 km) is plenty for blending
+    MODELS = MODEL_DOMAIN = None        # best model per place, no area limit (ModelRain reads both)
 
     def __init__(self, de):
         self.de, self.KM_PER_PX = de, de.KM_PER_PX
@@ -1235,6 +1239,7 @@ CLOUDS = clouds.CloudNowcast(fetch, log, OPENMETEO_URL, openmeteo_available, ll_
 DE = mosaic.GermanyDwd(fetch, log)
 PTYPE = ptype.PrecipType(fetch, log, DE)
 DE.drizzle = gauges.GaugeDrizzle(fetch, log, DE, mosaic.merc, state_dir=os.path.join(DATA_DIR, "gauges"))
+fcverify.TAG = VERSION
 GRID_VERIFY = fcverify.GridVerify(DE, log)
 EU_VERIFY = fcverify.RegionVerify(REGIONS["eu"], log) if EDITION == "eu" else None
 OWN = OwnNowcast(DE)
@@ -1263,8 +1268,18 @@ if DEV:
     ALERTS.dev, ALERTS.outbox = True, devtools.OUTBOX
 CLOUDS.heavy_lock = SPROG_LOCK  # cloud nowcast and S-PROG take turns (Docker VM memory)
 
+def monitor_status():
+    """For monitor.py's health rows: how old the newest radar and satellite image are (minutes), and the memory."""
+    now = time.time() * 1000
+    ref = REGIONS["eu"].ref if EDITION == "eu" else DE.ref
+    sun = SUNNY.ref if SUNNY_ON else None
+    return {"rss": rss_mb(), "rain_age": round((now - ref) / 60_000, 1) if ref else None,
+            "sun_age": round((now - sun) / 60_000, 1) if sun else None}
+
+
 def main_eu():
     """Europe test instance: OPERA + own nowcast (+ the model's new showers), sunny for Europe, their verification."""
+    monitor.start(EDITION, VERSION, monitor_status)
     eu = REGIONS["eu"]
     threading.Thread(target=update_loop, args=(eu,), daemon=True).start()
     eu.model = ModelRain(eu)
@@ -1283,6 +1298,7 @@ def main_eu():
 if __name__ == "__main__" and EDITION == "eu":
     main_eu()
 elif __name__ == "__main__":
+    monitor.start(EDITION, VERSION, monitor_status)
     threading.Thread(target=ALERTS.loop, args=(ll_to_3857,), daemon=True).start()
     threading.Thread(target=mosaic.de_loop, args=(DE, log, PTYPE), daemon=True).start()
     threading.Thread(target=DE.drizzle.loop, daemon=True).start()

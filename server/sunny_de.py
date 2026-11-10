@@ -69,7 +69,9 @@ from PIL import Image
 from scipy.io import netcdf_file
 
 import gauges
+import monitor
 from clouds import sun_elevation
+from fcverify import Pending
 from mosaic import GermanyDwd, WORLD, merc
 
 SID_URL = "https://opendata.dwd.de/weather/satellite/radiation/sid/"
@@ -512,16 +514,30 @@ class EuSunStations(SunStations):
 
 
 class SunVerify:
-    """Scores every forecast run against the later SID analysis (grid) and the DWD stations (point)."""
+    """Scores every forecast run against the later SID analysis (grid) and the DWD stations (point).
+    Also at the stations: the analysis itself, variant "ana" at lead 0 (how well the satellite image says "sun or not"
+    where a gauge measures it - the ceiling for every forecast; rows of their own in score_sun.py).
+    The forecasts waiting for their truth are kept on disk (fcverify.Pending) and a run is taken only once, also across
+    restarts (last_ref): before 10.11. a restart lost them, and the last hour's runs were made again from the reloaded
+    images (the first of them without motion) and replaced the real rows. log_dir given (replays): memory only."""
 
     def __init__(self, sun, stations, log, log_dir=None, prefix=""):
         self.sun, self.stations, self.log, self.prefix = sun, stations, log, prefix
+        self.persist = log_dir is None
         self.log_dir = log_dir or LOG_DIR
         g = sun.grid
         self.shape = (int(round(g.nx / VERIFY_DOWN)), int(round(g.ny / VERIFY_DOWN)))  # cv2 (w, h)
-        self.pending = {}   # (variant, ref, lead) -> share on the verification grid (uint8, x 250, 255 = unknown)
-        self.spending = {}  # (variant, ref, lead) -> {station id: forecast share}
+        # (variant, ref, lead) -> g: share on the verification grid (uint8, x 250, 255 = unknown)
+        self.pending = Pending(prefix + "sungrid" if self.persist else None)
+        # (variant, ref, lead) -> sid, v: station ids and the forecast share there
+        self.spending = Pending(prefix + "sunstation" if self.persist else None)
         self.done_ref = None
+        self.last_file = os.path.join(self.log_dir, "pending", prefix + "sun_last_ref.txt")
+        try:
+            with open(self.last_file) as f:
+                self.last_ref = int(f.read().strip()) if self.persist else 0
+        except (OSError, ValueError):
+            self.last_ref = 0
 
     def _down(self, a):
         ok = np.isfinite(a)
@@ -539,19 +555,48 @@ class SunVerify:
 
     def take(self, ref, variants):
         """Keep the leads of a new run: variants = {name: {valid ts: share grid}}."""
-        if ref == self.done_ref:
+        if ref == self.done_ref or ref <= self.last_ref:
             return
         sts = self.sun.station_pixels()
+
+        def at_stations(key, g):
+            if sts:
+                vals = {sid: v for sid, v in self.sun.at_pixels(g, sts).items() if np.isfinite(v)}
+                self.spending.put(key, sid=np.array(list(vals), dtype=str), v=np.array(list(vals.values()), np.float32))
         for name, grids in variants.items():
             for lead in LEADS:
                 g = grids.get(ref + lead * 60_000)
                 if g is None:
                     continue
                 d = self._down(g)
-                self.pending[(name, ref, lead)] = np.where(np.isfinite(d), np.round(d * 250), 255).astype(np.uint8)
-                if sts:
-                    self.spending[(name, ref, lead)] = {sid: v for sid, v in self.sun.at_pixels(g, sts).items() if np.isfinite(v)}
+                self.pending.put((name, ref, lead), g=np.where(np.isfinite(d), np.round(d * 250), 255).astype(np.uint8))
+                at_stations((name, ref, lead), g)
+        a = self.sun.obs_share(ref)
+        if a is not None:
+            at_stations(("ana", ref, 0), a)
         self.done_ref = ref
+        if self.persist:
+            self.last_ref = ref
+            try:
+                with open(self.last_file, "w") as f:
+                    f.write(str(ref))
+            except OSError:
+                pass
+        self._timeline(ref)
+
+    def _timeline(self, ref):
+        """The run's map frames (last hour + forecast) as the app draws them, step by step: monitor.timeline."""
+        try:
+            with self.sun.lock:
+                disp = {t: d for t, d in self.sun.disp.items() if t >= ref - 3600_000}
+            times = sorted(disp)
+            # the displayed sun share (SunnyDE._display), every 2nd cell
+            share = lambda d: np.where(d[::2, ::2] == 255, np.nan, 1.0 - (d[::2, ::2].astype(np.float32) / 254 - 0.05) / 0.8)
+            monitor.timeline("sun", self.prefix or "de", ref, [(t - ref) // 60_000 for t in times],
+                             (share(disp[t]) for t in times), self.sun.inside()[::2, ::2] > 0.5,
+                             sum(t <= ref for t in times), log_dir=self.log_dir)
+        except Exception as e:
+            self.log(f"sunny timeline failed: {e}")
 
     def _write(self, kind, lines):
         if not lines:
@@ -569,7 +614,7 @@ class SunVerify:
         """Score what can be scored; now_ref = the newest analysis time (the server's clock for this purpose)."""
         sun, lines, slines = self.sun, [], []
         mask_area = self._down(sun.inside()) > 0.5
-        for key, g in list(self.pending.items()):
+        for key in self.pending:
             variant, r, lead = key
             valid = r + lead * 60_000
             a = sun.obs_share(valid)
@@ -577,21 +622,24 @@ class SunVerify:
                 if now_ref - r > OBS_KEEP_MS:
                     del self.pending[key]
                 continue
+            z = self.pending.get(key)
             del self.pending[key]
+            if z is None or z["g"].shape != mask_area.shape:
+                continue
             a = self._down(a)
-            g = np.where(g == 255, np.nan, g / 250.0).astype(np.float32)
+            g = np.where(z["g"] == 255, np.nan, z["g"] / 250.0).astype(np.float32)
             e = self._down(sun.elev(valid))
             mask = mask_area & (e >= SCORE_ELEV) & np.isfinite(a) & np.isfinite(g)
             n = int(mask.sum())
             if n < MIN_PX:
                 continue
             d = g[mask] - a[mask]
-            lines.append({"variant": variant, "ref": r, "lead": lead, "valid": valid, "n": n,
+            lines.append({"variant": variant, "ref": r, "lead": lead, "valid": valid, "v": monitor.TAG, "n": n,
                           "obs": int((a[mask] >= SUNNY).sum()), "fcn": int((g[mask] >= SUNNY).sum()),
                           "fc": list(self._counts(g >= SUNNY, a >= SUNNY, mask)),
                           "bias": round(float(d.mean()), 4), "mae": round(float(np.abs(d).mean()), 4)})
         newest = self.stations.newest() if self.stations else 0
-        for key, fc in list(self.spending.items()):
+        for key in self.spending:
             variant, r, lead = key
             valid = r + lead * 60_000
             end = valid + STATION_LAG_MS
@@ -599,7 +647,11 @@ class SunVerify:
                 if now_ref - r > STATION_WAIT_MS:
                     del self.spending[key]
                 continue
+            z = self.spending.get(key)
             del self.spending[key]
+            if z is None:
+                continue
+            fc = dict(zip((str(x) for x in z["sid"]), (float(x) for x in z["v"])))
             truth = self.stations.truth(end)
             where = sun.station_coords()
             pairs = [(fc[s], truth[s]) for s in fc if s in truth and s in where
@@ -607,7 +659,7 @@ class SunVerify:
             if len(pairs) < 5:
                 continue
             f, o = np.array(pairs, np.float32).T
-            slines.append({"variant": variant, "ref": r, "lead": lead, "valid": valid, "n": len(pairs),
+            slines.append({"variant": variant, "ref": r, "lead": lead, "valid": valid, "v": monitor.TAG, "n": len(pairs),
                            "mae": round(float(np.abs(f - o).mean()), 4), "bias": round(float((f - o).mean()), 4),
                            "hit": round(float(((f >= SUNNY) == (o >= SUNNY)).mean()), 4),
                            "obs": int((o >= SUNNY).sum()), "fcn": int((f >= SUNNY).sum())})

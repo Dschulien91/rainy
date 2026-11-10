@@ -6,7 +6,11 @@ the alert rule is applied to the gauge's forecast series: rain starts when the f
 +-15 min of the predicted start. The hit rates per lead time are the alert probabilities shown in the push
 messages (alerts.HIT_RATE); misses (rain that came without any predicted start) are counted too.
 
-  python verify_alerts.py [--since 2026-10-28T20:35] [--rate 0.3]
+  python verify_alerts.py [--since 2026-10-28T20:35 | --day 20261110] [--rate 0.3] [--truth radar]
+
+10.11.: over 08.-10.11. the hit rates were 12-20 % against the gauges and 26-37 % against the radar - well below
+alerts.HIT_RATE (set from the first 1.5 days), and 45 % of the rain onsets came without an alert. Part of the daily
+report since then.
 """
 import argparse
 import os
@@ -27,8 +31,13 @@ def main():
     ap.add_argument("--since", default="2026-10-28T20:35")
     ap.add_argument("--rate", type=float, default=0.3)
     ap.add_argument("--truth", choices=("gauge", "radar"), default="gauge")
+    ap.add_argument("--day", help="only forecasts issued on this UTC day, e.g. 20261110 (daily_report.py)")
     a = ap.parse_args()
     since = datetime.fromisoformat(a.since).replace(tzinfo=timezone.utc).timestamp() * 1000
+    if a.day:
+        import score
+        since = datetime.strptime(a.day, "%Y%m%d").replace(tzinfo=timezone.utc).timestamp() * 1000
+        score.UNTIL = since + 86400_000
     truth = load_truth("rain", since - 3600_000)
     if a.truth == "radar":  # later radar observation at the station (what the map showed), 10-min bins like the gauges
         radar = {}

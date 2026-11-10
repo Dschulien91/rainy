@@ -40,6 +40,7 @@ def load_truth(kind, since):
 
 
 SINCE = 0  # --since: ignore forecasts issued before this time (e.g. before a live change)
+UNTIL = float("inf")  # --day: only forecasts issued on that UTC day
 
 
 def records(kind, since):
@@ -49,7 +50,7 @@ def records(kind, since):
             r = dict(np.load(fp))
         except Exception:
             continue
-        if int(r["issued"]) >= since:
+        if since <= int(r["issued"]) < UNTIL:
             yield r
 
 
@@ -122,9 +123,12 @@ def score_rain(hours):
                     continue
                 fc = np.interp([t - 7.5 * 60_000, t - 2.5 * 60_000], ts, series).mean()
                 preds = [("rainy", fc), ("persist", at_issue)]
-                for name in ("opera", "noblend"):  # shadows: Europe composite only; same without model new cells
+                # own: our own forecast; shadows: Europe composite only; the same without the model's new cells
+                for name in ("own", "opera", "noblend"):
                     if name in r:
-                        preds.append((name, np.interp([t - 7.5 * 60_000, t - 2.5 * 60_000], ts, r[name][:, j]).mean()))
+                        v = np.interp([t - 7.5 * 60_000, t - 2.5 * 60_000], ts, r[name][:, j]).mean()
+                        if not math.isnan(v):
+                            preds.append((name, v))
                 for k, p in preds:
                     for th, (to, tf) in (("nass", (0.05, 0.3)), (">=1mm/h", (1 / 6, 1.0))):
                         e = acc.setdefault((k, b, th), [0, 0, 0])
@@ -132,8 +136,8 @@ def score_rain(hours):
                         e[0] += wo and wf; e[1] += wo and not wf; e[2] += wf and not wo
     print("REGEN  (CSI / POD / FAR)")
     for th in ("nass", ">=1mm/h"):
-        for k in ("rainy", "opera", "noblend", "persist"):
-            if not any(key[0] == k for key in acc):
+        for k in ("rainy", "own", "opera", "noblend", "persist"):
+            if not any(key[0] == k and v[0] + v[2] for key, v in acc.items()):  # never wet: not recorded (zeros)
                 continue
             cells = []
             for name, _, _ in BUCKETS:
@@ -206,11 +210,19 @@ if __name__ == "__main__":
     ap.add_argument("--sun-map", default="0.05,0.8")
     ap.add_argument("--visual")
     ap.add_argument("--since", help="only forecasts issued after this UTC time, e.g. 2026-10-28T20:35")
+    ap.add_argument("--day", help="only forecasts issued on this UTC day, e.g. 20261110")
+    ap.add_argument("--rain-only", action="store_true")
     a = ap.parse_args()
+    if a.day:
+        from datetime import datetime, timezone
+        SINCE = datetime.strptime(a.day, "%Y%m%d").replace(tzinfo=timezone.utc).timestamp() * 1000
+        UNTIL = SINCE + 86400_000
+        a.hours = (time.time() * 1000 - SINCE) / 3600_000
     if a.since:
         from datetime import datetime, timezone
         SINCE = datetime.fromisoformat(a.since).replace(tzinfo=timezone.utc).timestamp() * 1000
-    score_sun(a.hours, [float(v) for v in a.sun_map.split(",")])
+    if not a.rain_only:
+        score_sun(a.hours, [float(v) for v in a.sun_map.split(",")])
     score_rain(a.hours)
     if a.visual:
         visual(a.visual)

@@ -149,7 +149,9 @@ class Recorder:
         k = (1 / np.cos(np.radians(s["lat"])))[:, None]
         PX, PY = X[:, None] + dx.ravel()[None] * k, Y[:, None] + dy.ravel()[None] * k  # 3x3 like /api/rain/point
         frames = self.mosaic.frames()
-        ts, fc, rate, opera, noblend, maps = [], [], [], [], [], {}
+        ts, fc, rate, opera, noblend, own, maps = [], [], [], [], [], [], {}
+        de = self.mosaic.de
+        have_own = de.own_ref is not None and de.own_ref == de.ref  # our own forecast exists for this run
         eu = self.mosaic.regions["eu"]
         raw = getattr(eu, "fc_raw", None) or {}
         ec, er = (((np.asarray(v, np.float64) + 0.5) / 3 - 0.5).astype(np.float32) for v in eu.to_pixels(PX, PY))
@@ -157,6 +159,10 @@ class Recorder:
         for f in frames:
             r, _ = self.mosaic.rain(f["ts"], PX, PY)
             ts.append(f["ts"]); fc.append(f["fc"]); rate.append(r.mean(axis=1))
+            # our own forecast at the same gauges (since 10.11.): before, DWD's and ours were only compared against the
+            # radar image, never against what reached the ground
+            own.append(self.mosaic.rain(f["ts"], PX, PY, variant="own")[0].mean(axis=1) if have_own
+                       else np.full(len(X), np.nan, np.float32))
             o, _ = self.mosaic.rain(f["ts"], PX, PY, use_de=False)  # shadow: Europe composite only
             opera.append(o.mean(axis=1))
             g = raw.get(f["ts"]) if f["fc"] else None  # shadow 2: OPERA nowcast without the model's new cells
@@ -167,8 +173,10 @@ class Recorder:
                 maps[f"map{(f['ts'] - ref) // 60_000}"] = np.clip(m * 10, 0, 65535).astype(np.uint16)  # 0.1 mm/h
         np.savez_compressed(os.path.join(LOG_DIR, f"fc_rain_{ref}_{now}.npz"), issued=now, ref=ref, ts=np.array(ts),
                             ids=np.array(s["id"]), lat=s["lat"], lon=s["lon"],
-                            fc=np.array(fc), rate=np.array(rate, np.float32), opera=np.array(opera, np.float32),
-                            noblend=np.array(noblend, np.float32), **maps)
+                            fc=np.array(fc), rate=np.array(rate, np.float32), own=np.array(own, np.float32),
+                            **({"opera": np.array(opera, np.float32), "noblend": np.array(noblend, np.float32)}
+                               if eu.ref else {}),  # Germany edition: no Europe composite to compare with
+                            **maps)
         self.rain_key, self.rain_at = key, now
 
     def archive_cells(self):
