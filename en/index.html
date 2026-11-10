@@ -451,11 +451,11 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=0.92"></script>
-<script src="lang/en.js?v=0.92"></script>
+<script src="lang/de.js?v=0.93"></script>
+<script src="lang/en.js?v=0.93"></script>
 <script>
 "use strict";
-const VERSION = "v0.92";
+const VERSION = "v0.93";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -617,7 +617,8 @@ const MAP_STYLE = (() => {
   let st = {};
   try { st = JSON.parse(localStorage.getItem("rainy.style")) || {}; } catch {}
   return { sat: st.sat === "photo" ? "photo" : "clouds", theme: ["light", "dark", "auto"].includes(st.theme) ? st.theme : "dark", // dark by default (07.11.)
-    rain: st.rain === "eu" ? "eu" : "mix", area: st.area === "eu" ? "eu" : "de", render: st.render === "gl" ? "gl" : "img", fc: (new URLSearchParams(location.search).get("fc") || st.fc) === "own" ? "own" : "dwd", design: ["liberty", "bright", "fiord", "earth"].includes(st.design) ? st.design : "plain" };
+    rain: st.rain === "eu" ? "eu" : "mix", area: st.area === "eu" ? "eu" : "de", render: st.render === "img" ? "img" : "gl", // WebGL by default (10.11.); pictures without WebGL
+    fc: (new URLSearchParams(location.search).get("fc") || st.fc) === "own" ? "own" : "dwd", design: ["liberty", "bright", "fiord", "earth"].includes(st.design) ? st.design : "plain" };
 })();
 // Edition: "de" = first public version (Germany: rain radar 2 h + 24 h / 3 days; sunny 2 h from the server's DWD satellite
 // sunshine (server/sunny_de.py) + 24 h / 3 days from the weather model; the Europe/USA radar is hidden and everything
@@ -1494,12 +1495,17 @@ async function loadPoint(loc) {
 // Clouds at the place from our server (full edition: Europe, EUMETSAT; Germany edition: Germany + border zone, DWD
 // satellite sunshine with a 2 h forecast; empty elsewhere or without the server).
 async function loadCloudPoint(loc) {
-  state.cloudPoint = [];
+  state.cloudPoint = []; state.cloudFrames = [];
   if (!API_BASE || SAT_STYLE !== "clouds") return;
   await serverReady;
   try {
     const d = await getJSON(`${API_BASE}/api/cloud/point?lat=${loc.lat}&lon=${loc.lon}`);
     state.cloudPoint = d.series || []; state.cloudRef = d.ref; state.tileKey.cloud = d.ref;
+    state.cloudFrames = [];
+    if (!state.cloudPoint.length) { // outside the sunny area: the map still shows it (10.11.: it was empty)
+      const f = await getJSON(`${API_BASE}/api/cloud/frames`);
+      state.cloudFrames = f.frames || []; state.cloudRef = f.ref; state.tileKey.cloud = f.ref;
+    }
   } catch {}
 }
 // DWD thunderstorm warnings at the place (our server; Germany).
@@ -1523,7 +1529,7 @@ async function countryOf(loc) {
 }
 async function loadRadarPoint(loc) {
   const now = Date.now(), iso = (t) => new Date(t).toISOString().slice(0, 19) + "Z";
-  state.radarPoint = [];
+  state.radarPoint = []; state.rainMapOnly = false;
   // Germany edition with our server: the server itself says whether a place is inside the radar area ("covered"),
   // so skip the country lookup (an extra round trip to the geocoder of up to ~1 s before the radar could load)
   const cc = DE_ONLY && API_BASE ? "DE" : await countryOf(loc);
@@ -1538,8 +1544,10 @@ async function loadRadarPoint(loc) {
     try {
       await serverReady;
       const d = await getJSON(`${RADAR_BASE}/api/rain/point?lat=${loc.lat.toFixed(2)}&lon=${loc.lon.toFixed(2)}${RAIN_EU ? "&src=eu" : ""}${FC_OWN ? "&fc=own" : ""}`);
-      state.radarPoint = DE_ONLY && d.covered === false ? [] :
-        (d.series || []).map((r) => ({ ts: r.ts, mmh: r.mmh, ref: r.fc ? 1 : null, kind: r.kind }));
+      // a place outside the radar area (Germany edition): the map still shows the German radar (10.11.: it was empty),
+      // the place's own values then come from the weather model (rainMapOnly)
+      state.rainMapOnly = DE_ONLY && d.covered === false;
+      state.radarPoint = (d.series || []).map((r) => ({ ts: r.ts, mmh: r.mmh, ref: r.fc ? 1 : null, kind: r.kind }));
       state.radarSource = "rtile"; state.tileKey.rain = d.key;
     } catch { state.radarPoint = []; }
   }
@@ -1676,7 +1684,8 @@ function buildViews() {
 
   // rain, 2 h: 5-minute radar frames (or the model outside radar coverage)
   // radar where available (never mixed with the model); the model only where there is no radar at all
-  const short = R.length ? R.map((r) => ({ ts: r.ts, value: r.mmh, ptype: r.kind, temp: temp(r.ts), map: { kind: state.radarSource, ts: r.ts, ref: r.ref } }))
+  const short = R.length && state.rainMapOnly ? R.map((r) => ({ ts: r.ts, value: modelRain(r.ts), temp: temp(r.ts), map: { kind: state.radarSource, ts: r.ts, ref: r.ref } }))
+    : R.length ? R.map((r) => ({ ts: r.ts, value: r.mmh, ptype: r.kind, temp: temp(r.ts), map: { kind: state.radarSource, ts: r.ts, ref: r.ref } }))
     : steps(2).map((ts) => ({ ts, value: modelRain(ts), temp: temp(ts), map: { kind: "model" } }));
   state.views["rain-short"] = finish(short);
 
@@ -1694,6 +1703,10 @@ function buildViews() {
       // Sun share = clear-sky share from the same cloud cover the map shows (the model's separate
       // sunshine-duration field often contradicts its own cloud cover).
       const sun = isDay ? clamp(1 - interp(p.t, p.cover, ts) / 100, 0, 1) : 0;
+      const F = state.cloudFrames || [];
+      const g = F.length ? F.reduce((a, b) => (Math.abs(b.ts - ts) < Math.abs(a.ts - ts) ? b : a)) : null;
+      if (g && Math.abs(g.ts - ts) <= 7.5 * 60e3) // place outside the sunny area: its map, the model's values
+        return { ts, value: sun, model: sun, isDay, temp: temp(ts), map: { kind: "ctile", ts: g.ts, fc: g.fc } };
       const S = state.satLatest;
       let map = { kind: "model" };
       if (S && ts <= S) map = { kind: "sat", ts };
@@ -3463,7 +3476,7 @@ try {
   // Germany edition: a place outside the radar area (e.g. on holiday in Italy) has no radar frames, so the map would
   // stay empty. Then show the Germany overview with its radar instead; the user can still pick any place.
   const GERMANY_VIEW = { lat: 51.16, lon: 10.45, zoom: 6, name: t("place.germany") };
-  const outsideRadar = () => DE_ONLY && API_BASE && !state.radarPoint.length && !params.has("lat");
+  const outsideRadar = () => DE_ONLY && API_BASE && (!state.radarPoint.length || state.rainMapOnly) && !params.has("lat");
   async function showGermany() {
     map.setView([GERMANY_VIEW.lat, GERMANY_VIEW.lon], GERMANY_VIEW.zoom, { animate: false });
     await setLocation({ lat: GERMANY_VIEW.lat, lon: GERMANY_VIEW.lon }, false, GERMANY_VIEW.name);
