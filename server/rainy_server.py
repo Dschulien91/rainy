@@ -99,7 +99,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v0.84"
+VERSION = "server-v0.85"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -978,6 +978,19 @@ class Handler(BaseHTTPRequestHandler):
                         "auth": AUTH.providers(),  # sign-in methods the app may offer
                         "tiles": MOSAIC.render_summary()}  # rain tile render time per zoom (server CPU)
                 return self.send(200, json.dumps(body).encode(), "application/json", 10)
+            if u.path.startswith("/tiles/raindata"):  # data tiles for the app's WebGL map (mosaic.rain_data_tile)
+                m = re.fullmatch(r"/tiles/(raindata|raindataown|raindataeu)/([\w-]+)/(\d+)-(\d+)/(\d+)/(\d+)/(\d+)\.png", u.path)
+                if not m:
+                    return self.send(404, b"not found", "text/plain", 60)
+                kind, key = m.group(1), m.group(2)
+                t0, n, z, x, y = map(int, m.groups()[2:])
+                if not (0 <= x < (1 << z) and 0 <= y < (1 << z)):
+                    return self.send(404, b"bad tile", "text/plain", 3600)
+                png = MOSAIC.rain_data_tile(key, t0, n, z, x, y, use_de=kind != "raindataeu",
+                                            variant="own" if kind == "raindataown" else "dwd")
+                if png is None:
+                    return self.send(404, b"bad tile", "text/plain", 3600)
+                return self.send(200, png, "image/png", 86400 if MOSAIC.key_known(key) else 60)
             if u.path.startswith("/tiles/"):
                 m = re.fullmatch(r"/tiles/(rain|rainown|raineu|cloud)/([\w-]+)/(\d+)/(\d+)/(\d+)/(\d+)\.png", u.path)
                 if not m:

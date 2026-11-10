@@ -445,11 +445,11 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=0.90"></script>
-<script src="lang/en.js?v=0.90"></script>
+<script src="lang/de.js?v=0.91"></script>
+<script src="lang/en.js?v=0.91"></script>
 <script>
 "use strict";
-const VERSION = "v0.90";
+const VERSION = "v0.91";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -611,7 +611,7 @@ const MAP_STYLE = (() => {
   let st = {};
   try { st = JSON.parse(localStorage.getItem("rainy.style")) || {}; } catch {}
   return { sat: st.sat === "photo" ? "photo" : "clouds", theme: ["light", "dark", "auto"].includes(st.theme) ? st.theme : "dark", // dark by default (07.11.)
-    rain: st.rain === "eu" ? "eu" : "mix", area: st.area === "eu" ? "eu" : "de", fc: (new URLSearchParams(location.search).get("fc") || st.fc) === "own" ? "own" : "dwd", design: ["liberty", "bright", "fiord", "earth"].includes(st.design) ? st.design : "plain" };
+    rain: st.rain === "eu" ? "eu" : "mix", area: st.area === "eu" ? "eu" : "de", render: st.render === "gl" ? "gl" : "img", fc: (new URLSearchParams(location.search).get("fc") || st.fc) === "own" ? "own" : "dwd", design: ["liberty", "bright", "fiord", "earth"].includes(st.design) ? st.design : "plain" };
 })();
 // Edition: "de" = first public version (Germany: rain radar 2 h + 24 h / 3 days; sunny 2 h from the server's DWD satellite
 // sunshine (server/sunny_de.py) + 24 h / 3 days from the weather model; the Europe/USA radar is hidden and everything
@@ -1905,9 +1905,220 @@ function tileLayer(kind, ts, coarse = false) {
   if (!map.hasLayer(layer)) layer.addTo(map);
   return layer;
 }
+// ---------- WebGL rain map (settings "Darstellung: WebGL", beta) ----------
+// The server sends data instead of pictures (server/mosaic.py rain_data_tile): one image per tile holds every time
+// step of the timeline as the display class (in 1/8 steps), the precipitation kind and the "faint" flag. This layer
+// draws them on the GPU in the look of the server's pictures (palette colours, darker inner contour, smooth edges):
+// the timeline and zooming need no new downloads, and each zoom asks for one file per tile instead of 36.
+// The pictures stay the default and the fallback (no WebGL, or the switch off).
+const GL_DATA = { size: 128, margin: 2, cols: 7, rows: 6, q: 8, zooms: [3, 8], step: 5 * 60e3 };
+// server/palette.py STEPS: RGBA (alpha 0-255) per kind (rain, sleet, snow, freezing rain, graupel, hail) and class 1-8
+const GL_PALETTE = [
+  [[150, 200, 255, 150], [110, 175, 255, 190], [40, 130, 255, 215], [20, 70, 235, 235], [120, 50, 235, 245], [205, 30, 205, 250], [255, 50, 90, 255], [255, 215, 0, 255]],
+  [[190, 232, 240, 130], [170, 225, 236, 185], [115, 200, 226, 210], [60, 160, 212, 228], [60, 115, 220, 240], [70, 90, 215, 246], [60, 70, 200, 255], [40, 50, 160, 255]],
+  [[236, 240, 255, 140], [225, 232, 255, 195], [195, 205, 255, 215], [155, 160, 255, 232], [125, 110, 240, 242], [110, 85, 230, 248], [95, 60, 215, 255], [70, 40, 175, 255]],
+  [[255, 190, 220, 140], [255, 170, 212, 200], [250, 120, 190, 222], [235, 70, 160, 238], [205, 25, 130, 248], [180, 0, 115, 252], [150, 0, 95, 255], [115, 0, 70, 255]],
+  [[200, 242, 204, 140], [185, 238, 190, 205], [150, 225, 165, 220], [105, 200, 130, 232], [75, 180, 105, 240], [50, 155, 85, 246], [25, 120, 60, 255], [15, 90, 45, 255]],
+  [[255, 130, 85, 160], [255, 105, 55, 238], [250, 75, 40, 244], [235, 35, 25, 248], [220, 15, 10, 252], [195, 0, 0, 255], [150, 0, 0, 255], [110, 0, 0, 255]],
+];
+const GL_VS = `attribute vec2 a_pos; attribute vec2 a_uv; varying vec2 v_uv;
+void main() { v_uv = a_uv; gl_Position = vec4(a_pos, 0.0, 1.0); }`;
+const GL_FS = `#extension GL_OES_standard_derivatives : enable
+precision highp float;
+varying vec2 v_uv;
+uniform sampler2D u_data, u_pal;
+uniform vec2 u_cell;     // texel origin of this time step's cell (inside its margin)
+uniform vec2 u_tex;      // texture size in texels
+uniform float u_px;      // texels per device pixel (contour width)
+vec4 cubic(float v) {
+  vec4 n = vec4(1.0, 2.0, 3.0, 4.0) - v; vec4 s = n * n * n;
+  float x = s.x, y = s.y - 4.0 * s.x, z = s.z - 4.0 * s.y + 6.0 * s.x;
+  return vec4(x, y, z, 6.0 - x - y - z) * (1.0 / 6.0);
+}
+// smooth B-spline sampling with 4 bilinear taps (like the server's blur + bicubic upsampling)
+vec4 bicubic(vec2 t) {
+  t -= 0.5; vec2 f = fract(t); t -= f;
+  vec4 xc = cubic(f.x), yc = cubic(f.y);
+  vec4 c = t.xxyy + vec2(-0.5, 1.5).xyxy;
+  vec4 s = vec4(xc.xz + xc.yw, yc.xz + yc.yw);
+  vec4 o = (c + vec4(xc.yw, yc.yw) / s) / u_tex.xxyy;
+  vec4 s0 = texture2D(u_data, o.xz), s1 = texture2D(u_data, o.yz), s2 = texture2D(u_data, o.xw), s3 = texture2D(u_data, o.yw);
+  float sx = s.x / (s.x + s.y), sy = s.z / (s.z + s.w);
+  return mix(mix(s3, s2, sx), mix(s1, s0, sx), sy);
+}
+float classAt(vec2 t) { return bicubic(t).r * 255.0 / ${GL_DATA.q}.0; }
+void main() {
+  vec2 t = u_cell + v_uv * ${GL_DATA.size}.0;
+  vec4 d = bicubic(t);
+  float q = d.r * 255.0 / ${GL_DATA.q}.0;
+  if (q < 0.6) discard;
+  float cls = clamp(floor(q), 1.0, 8.0);
+  // smooth outer edge (dry -> class 1) over about one device pixel
+  float edge = clamp((q - 1.0) / max(fwidth(q), 1e-4) + 0.5, 0.0, 1.0);
+  if (edge <= 0.0) discard;
+  float kind = clamp(floor(d.g * 255.0 / 40.0 + 0.5), 0.0, 5.0);
+  vec4 c = texture2D(u_pal, vec2((cls - 0.5) / 8.0, (kind + 0.5) / 6.0));
+  // inner side of a boundary to a lower class (incl. dry): darker contour, as the server's pictures
+  float lo = min(min(classAt(t + vec2(u_px, 0.0)), classAt(t - vec2(u_px, 0.0))),
+                 min(classAt(t + vec2(0.0, u_px)), classAt(t - vec2(0.0, u_px))));
+  if (floor(lo) < cls) c.rgb *= 0.7;
+  float a = c.a * edge * (d.b > 0.5 ? 0.65 : 1.0);
+  gl_FragColor = vec4(c.rgb * a, a);
+}`;
+// WebGL usable? (also: textures large enough for a data tile)
+const GL_OK = (() => {
+  try {
+    const g = document.createElement("canvas").getContext("webgl", { failIfMajorPerformanceCaveat: true });
+    return !!(g && g.getExtension("OES_standard_derivatives") &&
+      g.getParameter(g.MAX_TEXTURE_SIZE) >= (GL_DATA.size + 2 * GL_DATA.margin) * GL_DATA.cols);
+  } catch { return false; }
+})();
+const GLRain = L.Renderer.extend({
+  options: { padding: 0.3, pane: "weather" },
+  initialize(opts) {
+    L.Renderer.prototype.initialize.call(this, opts);
+    this.tex = new Map();  // url -> {tex, z, x, y, t0, n, key, used}
+    this.ts = null; this.visible = false;
+  },
+  _initContainer() {
+    const c = this._container = document.createElement("canvas");
+    c.className = "rain-gl";
+    // the browser may drop the GPU context (memory pressure, older iPhones): rebuild it and load the tiles again
+    c.addEventListener("webglcontextlost", (e) => { e.preventDefault(); this.lost = true; });
+    c.addEventListener("webglcontextrestored", () => { this.lost = false; this.tex.clear(); this._setupGL(); this._load(); this.redraw(); });
+    this._setupGL();
+  },
+  _setupGL() {
+    const gl = this.gl = this._container.getContext("webgl", { premultipliedAlpha: true, alpha: true, antialias: false });
+    gl.getExtension("OES_standard_derivatives");
+    const sh = (type, src) => { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+      if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); return s; };
+    const p = this.prog = gl.createProgram();
+    gl.attachShader(p, sh(gl.VERTEX_SHADER, GL_VS)); gl.attachShader(p, sh(gl.FRAGMENT_SHADER, GL_FS));
+    gl.linkProgram(p);
+    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+    this.buf = gl.createBuffer();
+    // palette texture: 8 classes x 6 kinds
+    const px = new Uint8Array(8 * 6 * 4);
+    GL_PALETTE.forEach((row, k) => row.forEach((c, i) => px.set(c, (k * 8 + i) * 4)));
+    this.pal = this._texture(px, 8, 6, gl.NEAREST);
+  },
+  _texture(src, w, h, filter) {
+    const gl = this.gl, t = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+    gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.NONE);
+    if (w) gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, src);
+    else gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, src);
+    for (const [k, v] of [[gl.TEXTURE_MIN_FILTER, filter], [gl.TEXTURE_MAG_FILTER, filter], [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]])
+      gl.texParameteri(gl.TEXTURE_2D, k, v);
+    return t;
+  },
+  _update() {
+    if (this._map._animatingZoom && this._bounds) return;
+    L.Renderer.prototype._update.call(this);
+    const b = this._bounds, size = b.getSize(), r = window.devicePixelRatio || 1, c = this._container;
+    L.DomUtil.setPosition(c, b.min);
+    c.width = Math.round(r * size.x); c.height = Math.round(r * size.y);
+    c.style.width = size.x + "px"; c.style.height = size.y + "px";
+    this._load(); this.redraw();
+  },
+  show(ts) { this.ts = ts; this.visible = true; if (this._container) this._container.style.display = ""; this._load(); this.redraw(); },
+  hide() { this.visible = false; if (this._container) this._container.style.display = "none"; },
+  // the run's data: key, first time step, number of steps (from the timeline), base URL
+  setRun(key, t0, n, base) { this.run = { key, t0, n, base }; this._load(); },
+  _dz() { return Math.max(GL_DATA.zooms[0], Math.min(GL_DATA.zooms[1], Math.round(this._map.getZoom()))); },
+  _tilesInView(z) {
+    const b = this._bounds, zoom = this._map.getZoom(), o = this._map.getPixelOrigin(), span = 256 * Math.pow(2, zoom - z);
+    const x0 = Math.floor((b.min.x + o.x) / span), x1 = Math.floor((b.max.x + o.x) / span);
+    const y0 = Math.max(0, Math.floor((b.min.y + o.y) / span)), y1 = Math.min((1 << z) - 1, Math.floor((b.max.y + o.y) / span));
+    const out = [];
+    for (let x = x0; x <= x1; x++) for (let y = y0; y <= y1; y++) out.push([z, ((x % (1 << z)) + (1 << z)) % (1 << z), y]);
+    return out;
+  },
+  _load() {
+    if (!this.run || !this._map || !this._bounds || !this.visible) return;
+    const { key, t0, n, base } = this.run;
+    for (const [z, x, y] of this._tilesInView(this._dz())) {
+      const url = `${base}/${key}/${t0}-${n}/${z}/${x}/${y}.png`;
+      if (this.tex.has(url)) { this.tex.get(url).used = Date.now(); continue; }
+      const entry = { z, x, y, t0, n, key, used: Date.now(), tex: null };
+      this.tex.set(url, entry);
+      const get = (tries) => fetch(url).then((r) => { if (!r.ok) throw new Error(r.status); return r.blob(); })
+        .then((b) => (window.createImageBitmap ? createImageBitmap(b, { premultiplyAlpha: "none", colorSpaceConversion: "none" }) : loadImage(URL.createObjectURL(b))))
+        .then((img) => { if (this.lost) return; entry.tex = this._texture(img, 0, 0, this.gl.LINEAR); entry.w = img.width; entry.h = img.height; this.redraw(); })
+        .catch(() => { if (tries < 2) setTimeout(() => get(tries + 1), 1500 * (tries + 1)); else this.tex.delete(url); });
+      get(0);
+    }
+    // keep the GPU memory bounded: forget the least recently used tiles beyond 48
+    if (this.tex.size > 48) {
+      const old = [...this.tex.entries()].filter(([, e]) => e.tex).sort((a, b) => a[1].used - b[1].used).slice(0, this.tex.size - 48);
+      for (const [u, e] of old) { this.gl.deleteTexture(e.tex); this.tex.delete(u); }
+    }
+  },
+  redraw() {
+    if (!this._map || !this._bounds || this.lost || !this.visible || this.ts == null) return;
+    const gl = this.gl, c = this._container, b = this._bounds, zoom = this._map.getZoom(), o = this._map.getPixelOrigin();
+    const r = c.width / Math.max(1, b.getSize().x);
+    gl.viewport(0, 0, c.width, c.height);
+    gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.disable(gl.BLEND);
+    gl.useProgram(this.prog);
+    const dz = this._dz(), key = this.run && this.run.key;
+    // coarser or older data first, the wanted zoom of the current run on top (it replaces them where it is in)
+    const items = [...this.tex.values()].filter((e) => e.tex && Number.isInteger((this.ts - e.t0) / GL_DATA.step) &&
+      (this.ts - e.t0) / GL_DATA.step >= 0 && (this.ts - e.t0) / GL_DATA.step < e.n)
+      .sort((a, b2) => ((a.key === key) - (b2.key === key)) * 100 + (Math.abs(b2.z - dz) - Math.abs(a.z - dz)));
+    const S = GL_DATA.size + 2 * GL_DATA.margin;
+    const loc = (n) => gl.getUniformLocation(this.prog, n);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this.pal); gl.uniform1i(loc("u_pal"), 1);
+    const aPos = gl.getAttribLocation(this.prog, "a_pos"), aUv = gl.getAttribLocation(this.prog, "a_uv");
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.buf);
+    gl.enableVertexAttribArray(aPos); gl.enableVertexAttribArray(aUv);
+    gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 16, 0); gl.vertexAttribPointer(aUv, 2, gl.FLOAT, false, 16, 8);
+    for (const e of items) {
+      const span = 256 * Math.pow(2, zoom - e.z), W = 1 << e.z;
+      // the tile copy nearest to the view (the map wraps around the world)
+      let px0 = e.x * span - (b.min.x + o.x);
+      const world = W * span;
+      while (px0 + span < 0) px0 += world;
+      while (px0 > b.getSize().x) px0 -= world;
+      const py0 = e.y * span - (b.min.y + o.y);
+      if (px0 > b.getSize().x || py0 > b.getSize().y || px0 + span < 0 || py0 + span < 0) continue;
+      const X = (v) => (v / b.getSize().x) * 2 - 1, Y = (v) => 1 - (v / b.getSize().y) * 2;
+      const x0 = X(px0), x1 = X(px0 + span), y0 = Y(py0), y1 = Y(py0 + span);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([x0, y0, 0, 0, x1, y0, 1, 0, x0, y1, 0, 1, x1, y1, 1, 1]), gl.STREAM_DRAW);
+      const i = (this.ts - e.t0) / GL_DATA.step, row = Math.floor(i / GL_DATA.cols), col = i % GL_DATA.cols;
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, e.tex); gl.uniform1i(loc("u_data"), 0);
+      gl.uniform2f(loc("u_cell"), col * S + GL_DATA.margin, row * S + GL_DATA.margin);
+      gl.uniform2f(loc("u_tex"), e.w, e.h);
+      gl.uniform1f(loc("u_px"), GL_DATA.size / (span * r));
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    }
+  },
+});
+const USE_GL = MAP_STYLE.render === "gl" && GL_OK && !!API_BASE;
+let glRain = null;
+if (USE_GL) {
+  try { glRain = new GLRain(); map.addLayer(glRain); glRain.hide(); } catch (e) { console.warn("webgl", e); glRain = null; }
+}
+// the run the WebGL layer draws: the rain timeline's key and steps
+function glSetRun() {
+  if (!glRain || !state.radarPoint.length || state.radarSource !== "rtile") return;
+  glRain.setRun(state.tileKey.rain, state.radarPoint[0].ts, state.radarPoint.length,
+    `${RADAR_BASE}/tiles/${RAIN_EU ? "raindataeu" : FC_OWN ? "raindataown" : "raindata"}`);
+}
+
 // Show a time step; the previous one stays visible until the new tiles are in (no blank flashes while playing).
-// Not loaded yet: its coarse copy meanwhile (rain, zoomed in).
+// Not loaded yet: its coarse copy meanwhile (rain, zoomed in). WebGL map: rain is drawn by glRain instead.
 function showTiles(kind, ts) {
+  if (kind === "rain" && glRain) {
+    showTiles.want = null;
+    if (shownTiles) { shownTiles.setOpacity(0); if (shownTiles.stale) shownTiles.remove(); shownTiles = null; }
+    glSetRun(); glRain.show(ts);
+    return;
+  }
+  if (glRain) glRain.hide();
   const layer = tileLayer(kind, ts);
   const show = (l) => {
     l.setOpacity(1);
@@ -1928,6 +2139,7 @@ function showTiles(kind, ts) {
 }
 function hideTiles() {
   showTiles.want = null;
+  if (glRain) glRain.hide();
   if (shownTiles) { shownTiles.setOpacity(0); if (shownTiles.stale) shownTiles.remove(); }
   shownTiles = null;
 }
@@ -1935,7 +2147,7 @@ function hideTiles() {
 function preloadTiles(s) {
   if (placeLoading) return; // setLocation preloads once the place's data is in
   const ids = [...s.frames.slice(s.idx), ...s.frames.slice(0, s.idx).reverse()]
-    .filter((f) => f.map.kind === "rtile" || f.map.kind === "ctile")
+    .filter((f) => (f.map.kind === "rtile" && !glRain) || f.map.kind === "ctile")
     .map((f) => `${f.map.kind === "rtile" ? "rain" : "cloud"}/${state.tileKey[f.map.kind === "rtile" ? "rain" : "cloud"]}/${f.map.ts}`);
   // all coarse copies first (fast), then the sharp tiles
   const want = [...ids.filter((id) => coarseUseful(id.split("/")[0])).map((id) => id + "/c"), ...ids];
@@ -2794,6 +3006,7 @@ function showSettings() {
     ${DE_ONLY ? "" : `<div class="row"><span>${t("settings.clouds")}</span>${seg("sat", [["clouds", t("settings.cloudsStandard")], ["photo", t("settings.cloudsPhoto")]])}</div>
     <div class="row"><span>${t("settings.rain")}</span>${seg("rain", [["mix", t("settings.rainMix")], ["eu", t("settings.rainEu")]])}</div>`}
     ${DE_ONLY && API_BASE ? `<div class="row"><span>${t("settings.area")}</span>${seg("area", [["de", t("settings.areaDe")], ["eu", t("settings.areaEu") + BETA_MARK]])}</div>` : ""}
+    ${API_BASE && GL_OK ? `<div class="row"><span>${t("settings.render")}</span>${seg("render", [["img", t("settings.renderImg")], ["gl", t("settings.renderGl") + BETA_MARK]])}</div>` : ""}
     ${DE_ONLY && API_BASE && !EU_AREA ? `<div class="row"><span>${t("settings.forecast")}</span>${seg("fc", [["dwd", t("settings.fcDwd")], ["own", t("settings.fcOwn") + BETA_MARK]])}</div>` : ""}
     <div class="actions"><span></span><button class="done">${t("common.done")}</button></div>`;
   const update = () => alertsUpdated(a);
@@ -2807,8 +3020,8 @@ function showSettings() {
     a.places.splice(+b.dataset.rm, 1);
     update(); renderPlace(); showSettings();
   }));
-  card.querySelectorAll("[data-sat], [data-theme], [data-rain], [data-fc], [data-design], [data-area]").forEach((b) => b.addEventListener("click", () => {
-    const key = ["sat", "theme", "rain", "fc", "design", "area"].find((k) => b.dataset[k] != null), next = { ...MAP_STYLE, [key]: b.dataset[key] };
+  card.querySelectorAll("[data-sat], [data-theme], [data-rain], [data-fc], [data-design], [data-area], [data-render]").forEach((b) => b.addEventListener("click", () => {
+    const key = ["sat", "theme", "rain", "fc", "design", "area", "render"].find((k) => b.dataset[k] != null), next = { ...MAP_STYLE, [key]: b.dataset[key] };
     if (next[key] === MAP_STYLE[key]) return;
     try { localStorage.setItem("rainy.style", JSON.stringify(next)); } catch {}
     flushSync(true); // keepalive request: survives the reload

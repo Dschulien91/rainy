@@ -37,6 +37,7 @@ import h5py
 import numpy as np
 from PIL import Image
 
+import palette
 from ptype import NAMES as ptype_names, dwd_grid_maps
 
 WORLD = 20037508.342789244
@@ -343,6 +344,7 @@ class Mosaic:
         self.ptype = ptype  # precipitation type from the DWD radar (Germany), or None
         self.de_only = de_only  # Germany edition: DWD only, fading out 30 km beyond the border, no satellite estimate
         self.cache, self.cache_lock = OrderedDict(), threading.Lock()  # small in-process cache; the CDN does the rest
+        self.data_cache = OrderedDict()  # data tiles for the WebGL map (rain_data_tile)
         self.render_stats = {}  # zoom -> [tiles, dry tiles, seconds, max seconds] (rain tiles)
 
     # ---------- timeline ----------
@@ -462,6 +464,47 @@ class Mosaic:
             return make()
         return self._cached(f"{'r' if use_de else 're'}{variant}/{key}/{ts}/{z}/{x}/{y}", make)
 
+    def rain_data_tile(self, key, t0, n, z, x, y, use_de=True, variant="dwd"):
+        """Data tile PNG (see DATA_SIZE) of the time steps t0, t0 + 5 min, ... (n of them) for the WebGL map; the
+        timeline's first step is part of the URL, so a tile never changes for its URL (cacheable like the pictures)."""
+        if not (z in DATA_ZOOMS and 1 <= n <= DATA_COLS * DATA_ROWS):
+            return None
+        run, own = self.key_run(key)
+
+        def make():
+            span = 2 * WORLD / (1 << z)
+            step = span / DATA_SIZE
+            idx = np.arange(-DATA_MARGIN, DATA_SIZE + DATA_MARGIN) + 0.5
+            X, Y = np.meshgrid(-WORLD + x * span + idx * step, WORLD - y * span - idx * step)
+            S = DATA_SIZE + 2 * DATA_MARGIN
+            img = np.zeros((S * DATA_ROWS, S * DATA_COLS, 3), np.uint8)
+            for i in range(n):
+                ts = t0 + i * STEP_MS
+                rate, faint = self.rain(ts, X, Y, use_de, variant, run, own)
+                kind = self.kind(ts, X, Y)
+                r, c = divmod(i, DATA_COLS)
+                cell = img[r * S:(r + 1) * S, c * S:(c + 1) * S]
+                cell[..., 0] = class_q(rate)
+                if kind is not None:
+                    cell[..., 1] = np.asarray(kind, np.uint8) * 40
+                cell[..., 2] = np.where(faint, 255, 0)
+            buf = io.BytesIO()
+            Image.fromarray(img, "RGB").save(buf, "PNG", compress_level=6)
+            return buf.getvalue()
+        if not self.key_known(key):
+            return make()
+        ck = f"{'d' if use_de else 'de'}{variant}/{key}/{t0}/{n}/{z}/{x}/{y}"
+        with self.cache_lock:
+            if ck in self.data_cache:
+                self.data_cache.move_to_end(ck)
+                return self.data_cache[ck]
+        png = make()
+        with self.cache_lock:
+            self.data_cache[ck] = png
+            while len(self.data_cache) > DATA_CACHE:
+                self.data_cache.popitem(last=False)
+        return png
+
     def stats(self, z, seconds, dry):
         """Render time per tile and zoom (GET /api/health -> tiles): keeps an eye on the server CPU."""
         with self.cache_lock:
@@ -520,6 +563,32 @@ class Mosaic:
                 e["kind"] = ptype_names[int(np.bincount(k[rate >= 0.1].ravel(), minlength=6).argmax())]
             out.append(e)
         return out
+
+
+# ---------- data tiles (the app's WebGL map, "Darstellung: WebGL") ----------
+# Instead of a picture per time step and zoom, one image per tile holds every time step of the timeline as data; the
+# app draws it on the GPU in the same look (palette colours, contours) at any zoom, and the timeline is instant.
+# Only what the map shows is sent: the display class (palette.BANDS) in steps of 1/DATA_Q class - enough for smooth,
+# round outlines - not the rain rate itself, plus the precipitation kind and the "faint" flag. RGB PNG:
+#   R = class * DATA_Q (0 = dry; class k from R = k * DATA_Q; between FLOOR and the first band R rises 0 -> DATA_Q, so
+#       edges fade like the pictures)   G = kind * 40 (ptype.NAMES order)   B = 255 where faint (satellite estimate)
+# Layout: DATA_COLS x DATA_ROWS cells, time step i in cell (i // DATA_COLS, i % DATA_COLS), each DATA_SIZE cells plus
+# DATA_MARGIN on every side (bilinear/bicubic sampling across tile edges without seams).
+DATA_SIZE = 128
+DATA_MARGIN = 2
+DATA_COLS, DATA_ROWS = 7, 6     # up to 42 time steps (the timeline has 36-37)
+DATA_Q = 8
+DATA_ZOOMS = range(3, 9)        # the app asks for zoom 3-8 (closer in: zoom 8, enlarged on the GPU)
+DATA_CACHE = 400                # data tiles kept in memory (~20-150 KB each)
+_LOG_EDGES = np.concatenate([[np.log(palette.FLOOR)], palette.LOG_BANDS,
+                             [palette.LOG_BANDS[-1] + (palette.LOG_BANDS[-1] - palette.LOG_BANDS[-2])]])
+
+
+def class_q(rate):
+    """Display class as uint8 R channel (see DATA_Q): log-linear between the band edges."""
+    lg = np.log(np.maximum(rate, palette.FLOOR))
+    q = np.interp(lg, _LOG_EDGES, np.arange(len(_LOG_EDGES), dtype=np.float64))
+    return np.clip(np.round(q * DATA_Q), 0, 255).astype(np.uint8)
 
 
 KEEP_RUNS = 3  # runs kept for tile keys of the last ~15 min (the app reloads every 5 min)
