@@ -172,6 +172,8 @@
   .alert-card .places button { border: 1px solid var(--line); background: none; color: var(--fg); font: inherit; font-size: 13px; padding: 4px 9px; border-radius: 999px; cursor: pointer; margin: 2px 0 2px 4px; }
   #styleCard { max-height: calc(100vh - var(--sheet-h) - 40px); overflow-y: auto; }
   .alert-card .lead-val { min-width: 54px; text-align: right; font-variant-numeric: tabular-nums; }
+  /* small "beta" mark behind features still being verified (own forecast, Europe radar) */
+  .beta { font-size: 9px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; opacity: 0.7; margin-left: 3px; vertical-align: 1px; }
   .alert-card .seg button { border: 1px solid var(--line); background: none; color: var(--fg); font: inherit; font-size: 13px; padding: 5px 10px; border-radius: 999px; cursor: pointer; }
   .alert-card .seg button.on { background: var(--rain); border-color: var(--rain); color: #fff; }
   .alert-card input[type=checkbox] { width: 20px; height: 20px; accent-color: var(--rain); }
@@ -442,7 +444,7 @@
 <script src="lang/en.js"></script>
 <script>
 "use strict";
-const VERSION = "v0.85";
+const VERSION = "v0.86";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -614,16 +616,8 @@ const DE_ONLY = EDITION === "de";
 // Europe radar (beta, being verified - parallel to the Germany edition): the rain radar for all of Europe from the
 // Europe test server (EUMETNET OPERA + our own 2 h nowcast, server EDITION=eu behind /eu/ on the same domain; locally
 // port 8772). Everything else (sunny, alerts, weather model, place search) stays with the Germany edition. Chosen in
-// the settings ("Gebiet"), which only show the choice in beta mode (?beta=1 once on this device; ?beta=0 ends it).
-const BETA = (() => {
-  const q = new URLSearchParams(location.search).get("beta");
-  try {
-    if (q === "1") localStorage.setItem("rainy.beta", "1");
-    if (q === "0") localStorage.removeItem("rainy.beta");
-    return localStorage.getItem("rainy.beta") === "1";
-  } catch { return q === "1"; }
-})();
-const EU_AREA = DE_ONLY && (BETA && MAP_STYLE.area === "eu" || new URLSearchParams(location.search).get("area") === "eu");
+// the settings ("Gebiet", marked beta like every feature still being verified; ?area=eu works too).
+const EU_AREA = DE_ONLY && (MAP_STYLE.area === "eu" || new URLSearchParams(location.search).get("area") === "eu");
 // the chart canvas sizes itself on window resize only; the wide layout changes its box without one
 window.addEventListener("load", () => setTimeout(() => window.dispatchEvent(new Event("resize")), 300));
 if (DE_ONLY) {
@@ -1958,7 +1952,7 @@ function updateSource() {
     : k === "srvsat" ? t("source.satRain")
     : k === "ca" ? (fc ? t("source.caForecast") : t("source.caMeasured"))
     : k === "us" ? t("source.noaaMeasured")
-    : k === "rtile" ? (RAIN_EU ? (shown.ref ? t("source.operaForecast") : t("source.operaNoaaMeasured"))
+    : k === "rtile" ? (RAIN_EU ? (shown.ref ? t("source.operaForecast") : t(EU_AREA ? "source.operaMeasured" : "source.operaNoaaMeasured"))
       : DE_ONLY ? (shown.ref ? (FC_OWN ? t("source.ownForecast") : t("source.dwdForecast")) : t("source.dwdMeasured"))
       : shown.ref ? t("source.mixForecast") : t("source.mixMeasured"))
     : k === "ctile" ? (DE_ONLY ? (shown.fc ? t("source.sunDwdNowcast", { time: fmtTime(state.cloudRef) }) : t("source.sunDwd", { time: fmtTime(f.map.ts) }))
@@ -2739,6 +2733,7 @@ map.on("click", () => document.getElementById("alertCard").classList.remove("sho
 // ---------- Settings ----------
 // Rain alert for the own position (plus its settings and further places) and the map look. Map changes re-initialise
 // the map colours, so the page reloads with the new choice; alert changes apply at once.
+const BETA_MARK = `<span class="beta">${t("common.beta")}</span>`;
 function showSettings() {
   const card = document.getElementById("styleCard"), a = loadAlerts();
   const seg = (key, opts) => `<span class="seg">${opts.map(([v, label]) =>
@@ -2760,8 +2755,8 @@ function showSettings() {
     <div class="row"><span>${t("settings.colors")}</span>${seg("theme", [["auto", t("settings.themeAuto")], ["light", t("settings.themeLight")], ["dark", t("settings.themeDark")]])}</div>
     ${DE_ONLY ? "" : `<div class="row"><span>${t("settings.clouds")}</span>${seg("sat", [["clouds", t("settings.cloudsStandard")], ["photo", t("settings.cloudsPhoto")]])}</div>
     <div class="row"><span>${t("settings.rain")}</span>${seg("rain", [["mix", t("settings.rainMix")], ["eu", t("settings.rainEu")]])}</div>`}
-    ${DE_ONLY && API_BASE && BETA ? `<div class="row"><span>${t("settings.area")}</span>${seg("area", [["de", t("settings.areaDe")], ["eu", t("settings.areaEu")]])}</div>` : ""}
-    ${DE_ONLY && API_BASE && !EU_AREA ? `<div class="row"><span>${t("settings.forecast")}</span>${seg("fc", [["dwd", t("settings.fcDwd")], ["own", t("settings.fcOwn")]])}</div>` : ""}
+    ${DE_ONLY && API_BASE ? `<div class="row"><span>${t("settings.area")}</span>${seg("area", [["de", t("settings.areaDe")], ["eu", t("settings.areaEu") + BETA_MARK]])}</div>` : ""}
+    ${DE_ONLY && API_BASE && !EU_AREA ? `<div class="row"><span>${t("settings.forecast")}</span>${seg("fc", [["dwd", t("settings.fcDwd")], ["own", t("settings.fcOwn") + BETA_MARK]])}</div>` : ""}
     <div class="actions"><span></span><button class="done">${t("common.done")}</button></div>`;
   const update = () => alertsUpdated(a);
   bindAlertControls(card, a, update);
