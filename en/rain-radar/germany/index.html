@@ -439,11 +439,11 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=0.88"></script>
-<script src="lang/en.js?v=0.88"></script>
+<script src="lang/de.js?v=0.89"></script>
+<script src="lang/en.js?v=0.89"></script>
 <script>
 "use strict";
-const VERSION = "v0.88";
+const VERSION = "v0.89";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -1894,7 +1894,10 @@ function showTiles(kind, ts) {
   const layer = tileLayer(kind, ts);
   const show = (l) => {
     l.setOpacity(1);
-    if (shownTiles && shownTiles !== l) shownTiles.setOpacity(0);
+    if (shownTiles && shownTiles !== l) {
+      shownTiles.setOpacity(0);
+      if (shownTiles.stale) shownTiles.remove(); // a time step of the previous run, kept until now (preloadTiles)
+    }
     shownTiles = l;
   };
   showTiles.want = layer;
@@ -1908,7 +1911,7 @@ function showTiles(kind, ts) {
 }
 function hideTiles() {
   showTiles.want = null;
-  if (shownTiles) shownTiles.setOpacity(0);
+  if (shownTiles) { shownTiles.setOpacity(0); if (shownTiles.stale) shownTiles.remove(); }
   shownTiles = null;
 }
 // Load all time steps of the open timeline one after another (from the selected one), drop the others.
@@ -1920,7 +1923,11 @@ function preloadTiles(s) {
   // all coarse copies first (fast), then the sharp tiles
   const want = [...ids.filter((id) => coarseUseful(id.split("/")[0])).map((id) => id + "/c"), ...ids];
   for (const [id, layer] of tileLayers) {
-    if (!want.includes(id)) { layer.remove(); tileLayers.delete(id); if (shownTiles === layer) shownTiles = null; }
+    if (want.includes(id)) continue;
+    tileLayers.delete(id);
+    // the step on screen stays until its successor is in: removing it at once left the map empty for a moment
+    // whenever a new radar run arrived (every 5 min; 10.11. "whole clouds vanish briefly")
+    if (shownTiles === layer) layer.stale = true; else layer.remove();
   }
   const token = preloadToken, queue = [...new Set(want)];
   const next = () => {

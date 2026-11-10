@@ -99,7 +99,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v0.83"
+VERSION = "server-v0.84"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -552,7 +552,9 @@ class Region:
 
     def update(self):
         now = int(time.time() * 1000)
-        avail = {t: s for t, s in self.list_times().items() if t > now - HISTORY_MS}
+        # 15 min more than the hour the timeline shows: its first step (Mosaic.frames, now - 60 min rounded down) must
+        # still have its image when it is asked for a few minutes later (10.11.: the first Europe step was empty)
+        avail = {t: s for t, s in self.list_times().items() if t > now - HISTORY_MS - 15 * 60_000}
         new = [t for t in sorted(avail) if t not in self.obs]
         for t in new:
             g = self.load(avail[t]).astype(np.float16)  # half the memory; plenty precise for rain rates
