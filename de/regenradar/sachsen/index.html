@@ -441,11 +441,11 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=0.94"></script>
-<script src="lang/en.js?v=0.94"></script>
+<script src="lang/de.js?v=0.95"></script>
+<script src="lang/en.js?v=0.95"></script>
 <script>
 "use strict";
-const VERSION = "v0.94";
+const VERSION = "v0.95";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -909,8 +909,8 @@ const cloudCover = (v) => smoothstep(CLOUD_EDGE[0], CLOUD_EDGE[1], v);
 const cloudOpacity = (v) => Math.max(VEIL_ALPHA * smoothstep(VEIL[0], VEIL[1], v),
   cloudCover(v) * (0.62 + 0.3 * clamp((v - CLOUD_EDGE[1]) / 0.25, 0, 1)));
 // Paint cloud opacity ac over the sun tint (by day) into an RGBA buffer at i4; returns the resulting alpha.
-function paintSky(px, i4, ac, day) {
-  const tint = day ? SUN_ALPHA * (1 - Math.min(1, ac / 0.5)) : 0, a = ac + tint * (1 - ac);
+function paintSky(px, i4, ac, day) { // day: 0 (night) .. 1 (daylight), fractional in twilight
+  const tint = day > 0 ? day * SUN_ALPHA * (1 - Math.min(1, ac / 0.5)) : 0, a = ac + tint * (1 - ac);
   if (a <= 0.01) { px[i4 + 3] = 0; return 0; }
   for (let k = 0; k < 3; k++) px[i4 + k] = (CLOUD_RGB[k] * ac + SUN_RGB[k] * tint * (1 - ac)) / a;
   px[i4 + 3] = a * 255;
@@ -1628,6 +1628,12 @@ async function loadSatLatest(loc) {
   } catch { state.satLatest = null; }
 }
 // Day or night: from the weather model when available, otherwise from the sun's elevation at the place.
+// Daylight 0..1 at the place for the sunny map's sun tint: fades out between 4 deg sun and 1 deg below the horizon
+// (~30-40 min), as the light does. Before (10.11.) the tint switched off at once at sunset - a big jump on the map.
+function daylightAt(ts) {
+  if (!state.loc) return isDayAt(ts) ? 1 : 0;
+  return clamp((sunElevation(ts, state.loc.lat, state.loc.lon) + 1) / 5, 0, 1);
+}
 function isDayAt(ts) {
   const p = state.point;
   if (p && p.t.length) return interp(p.t, p.isDay, ts) >= 0.5;
@@ -1872,7 +1878,7 @@ const CloudTiles = L.GridLayer.extend({
     const attempt = (n) => loadImage(url).then((img) => {
       const ctx = tile.getContext("2d", { willReadFrequently: true });
       ctx.drawImage(img, 0, 0);
-      const d = ctx.getImageData(0, 0, 256, 256), px = d.data, day = isDayAt(this.options.ts) ? 1 : 0;
+      const d = ctx.getImageData(0, 0, 256, 256), px = d.data, day = daylightAt(this.options.ts);
       for (let i = 0; i < px.length; i += 4) {
         if (px[i + 3] < 128) { px[i + 3] = 0; continue; }
         paintSky(px, i, cloudOpacity(px[i] / 255), day);
