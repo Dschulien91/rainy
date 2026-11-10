@@ -30,14 +30,18 @@ def load(kind):
             r = json.loads(line)
             if r["valid"] >= since:
                 rows[(r["ref"], r["lead"])][r["variant"]] = r
-    return {k: v for k, v in rows.items() if all(n in v for n in names)}
+    have = [n for n in names if any(n in v for v in rows.values())]  # a new shadow without rows yet is left out
+    if len(have) < len(names):
+        print(f"({kind}: no data yet: {', '.join(n for n in names if n not in have)})")
+    load.names = have
+    return {k: v for k, v in rows.items() if all(n in v for n in have)}
 
 
 grid = load("sungrid")
 leads = sorted({lead for _, lead in grid})
 print(f"grid: {len(grid)} checks, {len({r for r, _ in grid})} runs, last {hours:.0f} h   (sunny = share >= 0.5)")
 print("  variant   lead   CSI   POD   FAR  bias   MAE   sunny fc/obs")
-for n in names:
+for n in load.names:
     for lead in leads:
         h = m = f = b = e = w = fcn = obs = 0
         for (_, l), v in grid.items():
@@ -52,7 +56,7 @@ st = load("sunstation")
 leads = sorted({lead for _, lead in st})
 print(f"stations: {len(st)} checks, {len({r for r, _ in st})} runs   (share vs DWD SD_10)")
 print("  variant   lead   MAE   hit  bias      n")
-for n in names:
+for n in load.names:
     for lead in leads:
         e = b = h = w = 0
         for (_, l), v in st.items():

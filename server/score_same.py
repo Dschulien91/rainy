@@ -24,6 +24,11 @@ for fp in glob.glob(os.path.join(LOG_DIR, f"{prefix}_*.jsonl")):
         r = json.loads(line)
         if r["valid"] >= since and r.get("area", "all") == area:
             rows[(r["ref"], r["lead"])][r.get("variant", "dwd")] = r
+present = {n for v in rows.values() for n in v}
+missing = [n for n in names if n not in present]
+names = [n for n in names if n in present]  # a variant without rows yet (new shadow) must not empty the comparison
+if missing:
+    print(f"(no data yet: {', '.join(missing)})")
 common = {k: v for k, v in rows.items() if all(n in v for n in names)}
 leads = sorted({lead for _, lead in common})
 print(f"{len(common)} checks, {len({r for r, _ in common})} runs, last {hours:.0f} h   CSI (amount forecast/real)")
