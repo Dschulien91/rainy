@@ -438,11 +438,11 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=0.89"></script>
-<script src="lang/en.js?v=0.89"></script>
+<script src="lang/de.js?v=0.90"></script>
+<script src="lang/en.js?v=0.90"></script>
 <script>
 "use strict";
-const VERSION = "v0.89";
+const VERSION = "v0.90";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -1844,12 +1844,14 @@ const CloudTiles = L.GridLayer.extend({
   createTile(c, done) {
     const tile = document.createElement("canvas");
     tile.width = tile.height = 256;
-    // a tile that does not arrive must not hold up the whole layer: its "load" event decides when a time step is shown
+    // a tile that does not arrive must not hold up the whole layer: its "load" event decides when a time step is shown.
+    // A late tile is still painted, and a failed one is asked for again twice: before (10.11.) a tile that missed the
+    // 15 s or failed once stayed empty for good - enlarged from zoom 8 that was a big empty rectangle on the map.
     let finished = false;
     const finish = () => { if (!finished) { finished = true; done(null, tile); } };
     setTimeout(finish, 15000);
-    loadImage(L.Util.template(this.options.url, c)).then((img) => {
-      if (finished) return;
+    const url = L.Util.template(this.options.url, c);
+    const attempt = (n) => loadImage(url).then((img) => {
       const ctx = tile.getContext("2d", { willReadFrequently: true });
       ctx.drawImage(img, 0, 0);
       const d = ctx.getImageData(0, 0, 256, 256), px = d.data, day = isDayAt(this.options.ts) ? 1 : 0;
@@ -1859,7 +1861,8 @@ const CloudTiles = L.GridLayer.extend({
       }
       ctx.putImageData(d, 0, 0);
       finish();
-    }).catch(finish); // missing tile: stay empty
+    }).catch(() => (n < 2 ? setTimeout(() => attempt(n + 1), 1500 * (n + 1)) : finish())); // then: stay empty
+    attempt(0);
     return tile;
   },
 });
@@ -1881,6 +1884,14 @@ function tileLayer(kind, ts, coarse = false) {
       // the sunny grid has ~2 km cells: zoom-8 tiles (~400 m pixels) hold all its detail, closer in they are only
       // enlarged - no new server tiles per zoom step for every time step of the timeline (empty squares while zooming)
       : new CloudTiles({ pane: "weather", opacity: 0, className: "cloud-tiles", url, ts, maxNativeZoom: 8 });
+    if (kind === "rain") { // a rain tile that failed once (server busy) is asked for again instead of staying empty
+      layer.on("tileerror", (e) => {
+        const n = (e.tile.retries || 0) + 1;
+        if (n > 2) return;
+        e.tile.retries = n;
+        setTimeout(() => { e.tile.src = L.Util.template(url, e.coords) + `?retry=${n}`; }, 1500 * n);
+      });
+    }
     layer.id = id;
     tileLayers.set(id, layer);
   }
