@@ -443,11 +443,11 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=0.83"></script>
-<script src="lang/en.js?v=0.83"></script>
+<script src="lang/de.js?v=0.84"></script>
+<script src="lang/en.js?v=0.84"></script>
 <script>
 "use strict";
-const VERSION = "v0.83";
+const VERSION = "v0.84";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -735,11 +735,11 @@ map.getPane("labels").style.pointerEvents = "none";
         paint: { "line-color": mapDark ? "#c3c9d4" : "#4a515d", "line-opacity": 0.95,
           "line-width": ["interpolate", ["linear"], ["zoom"], 3, 1.2, 6, 2, 10, 2.8, 13, 3.4] } },
     ];
-    // sunny mode: white clouds hide light borders - a contrasting casing under the state and country lines (shown in
-    // sun mode only; the look is picked with ?bd=a..d while testing, see applyBasemapMode)
+    // sunny mode: white clouds hide light borders - a light casing under dark state and country lines (sun mode only,
+    // see applyBasemapMode)
     const casing = (id, width) => ({ id: id + "_case", type: "line", source: src, "source-layer": "boundary",
       filter: borders.find((b) => b.id === id).filter, layout: { "line-join": "round", "line-cap": "round", visibility: "none" },
-      paint: { "line-color": mapDark ? "#14181e" : "#ffffff", "line-opacity": 0.6, "line-blur": 0.6, "line-width": width } });
+      paint: { "line-color": "#ffffff", "line-opacity": 0.5, "line-blur": 0.6, "line-width": width } });
     borders.splice(1, 0, casing("rainy_border_state", ["interpolate", ["linear"], ["zoom"], 4, 2, 7, 3, 10, 4, 13, 4.6]));
     borders.splice(3, 0, casing("rainy_border_country", ["interpolate", ["linear"], ["zoom"], 3, 3.2, 6, 4.5, 10, 5.8, 13, 6.6]));
     const part = (keep) => ({ ...style, layers: style.layers.filter(keep) });
@@ -773,26 +773,15 @@ function applyBasemapMode() {
   if (!m || !m.isStyleLoaded()) return;
   const sun = state.mode === "sun";
   for (const id of ["rainy_sun_water", "rainy_sun_coast"]) m.setLayoutProperty(id, "visibility", sun ? "visible" : "none");
-  // borders over white clouds (variants while testing: ?bd=a..d; none = as in rain mode)
-  const v = sun ? BORDER_VARIANT : null;
+  // sun mode: white clouds hide the light borders - dark lines on a light casing instead (variant B of A-D, 10.11.)
   const keep = (id, prop) => (BORDER_PAINT[id + prop] ??= m.getPaintProperty(id, prop));
-  const set = (id, prop, val) => m.setPaintProperty(id, prop, val ?? keep(id, prop));
   for (const id of ["rainy_border_state", "rainy_border_country"]) {
-    keep(id, "line-color"); keep(id, "line-width"); keep(id, "line-opacity");
-    m.setLayoutProperty(id + "_case", "visibility", v === "a" || v === "b" || v === "d" ? "visible" : "none");
-    const country = id === "rainy_border_country";
-    // a: soft dark (dark map) / white (light map) shadow under the usual lines
-    // b: dark lines with a light casing
-    // c: blue lines (like the coast), no casing
-    // d: the usual lines a bit thicker with a stronger shadow
-    set(id, "line-color", v === "b" ? (country ? "#1b2027" : "#3a414c") : v === "c" ? (country ? "#3d82e6" : "#5b93e0") : null);
-    set(id + "_case", "line-color", v === "b" ? "#ffffff" : null);
-    set(id + "_case", "line-opacity", v === "d" ? 0.85 : v === "b" ? 0.5 : null);
-    set(id, "line-opacity", v === "c" || v === "b" || v === "d" ? 1 : null);
-    set(id, "line-width", v === "d" ? keep(id, "line-width").map((x, i) => (i >= 4 && i % 2 === 0 ? x * 1.35 : x)) : null);
+    keep(id, "line-color"); keep(id, "line-opacity"); // the rain-mode look, saved before the first change
+    m.setLayoutProperty(id + "_case", "visibility", sun ? "visible" : "none");
+    m.setPaintProperty(id, "line-color", sun ? (id === "rainy_border_country" ? "#1b2027" : "#3a414c") : keep(id, "line-color"));
+    m.setPaintProperty(id, "line-opacity", sun ? 1 : keep(id, "line-opacity"));
   }
 }
-const BORDER_VARIANT = (new URLSearchParams(location.search).get("bd") || "").toLowerCase() || null;
 const BORDER_PAINT = {};
 const youAreHere = L.circleMarker([FALLBACK.lat, FALLBACK.lon], {
   radius: 7, color: "#fff", weight: 3, fillColor: "#2f7bf5", fillOpacity: 1, pane: "labels",
