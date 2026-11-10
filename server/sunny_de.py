@@ -186,16 +186,25 @@ def ts_stamp(ts):
 
 KEEP_RUNS = 3  # runs (10 min apart) whose map frames stay available for tile keys (the app reloads every 5 min)
 
+# sunny for all of Europe (the Europe test instance, server EDITION=eu): DWD's satellite files already cover
+# 35.5-59.8 N, 13 W-26 E; the grid is 4 km Web Mercator (~2.6 km on the ground at 50 N: 4x the Germany area's pixels
+# for ~11x its area), the weather model (fog cap, shadows) on a 0.25 deg grid from ICON-EU only (on the server's disk).
+# Verified against the later analysis on the whole area and at the DWD stations (Germany) - files eusungrid_* and
+# eusunstation_* next to the Germany edition's.
+_ex, _ey = merc(np.array([-12.0, 25.5]), np.array([36.2, 59.3]))
+EUROPE = {"bbox": (float(_ex[0]), float(_ey[0]), float(_ex[1]), float(_ey[1])), "cell": 4000.0,
+          "model": {"lats": (36.0, 59.5), "lons": (-12.0, 25.5), "deg": 0.25, "models": "icon_eu"}, "prefix": "eu"}
+
 
 class SunGrid:
-    """The sunny grid: GermanyDwd's Web Mercator box at twice its cell size."""
-    BBOX = GermanyDwd.BBOX
+    """The sunny grid: a Web Mercator box (default GermanyDwd's at twice its cell size; EUROPE: see there)."""
 
-    def __init__(self):
+    def __init__(self, bbox=GermanyDwd.BBOX, cell=CELL):
+        self.BBOX, self.cell = bbox, cell
         x0, y0, x1, y1 = self.BBOX
-        self.nx, self.ny = int(round((x1 - x0) / CELL)), int(round((y1 - y0) / CELL))
-        xs = x0 + (np.arange(self.nx) + 0.5) * CELL
-        ys = y1 - (np.arange(self.ny) + 0.5) * CELL
+        self.nx, self.ny = int(round((x1 - x0) / cell)), int(round((y1 - y0) / cell))
+        xs = x0 + (np.arange(self.nx) + 0.5) * cell
+        ys = y1 - (np.arange(self.ny) + 0.5) * cell
         lon = xs / WORLD * 180.0
         lat = np.degrees(2 * np.arctan(np.exp(ys / WORLD * np.pi)) - np.pi / 2)
         self.lat, self.lon = (a.astype(np.float32) for a in np.meshgrid(lat, lon, indexing="ij"))
@@ -204,7 +213,7 @@ class SunGrid:
 
     def to_pixels(self, x, y):
         x0, _, _, y1 = self.BBOX
-        return (np.asarray(x) - x0) / CELL - 0.5, (y1 - np.asarray(y)) / CELL - 0.5
+        return (np.asarray(x) - x0) / self.cell - 0.5, (y1 - np.asarray(y)) / self.cell - 0.5
 
     def elev(self, ts):
         return sun_elevation(ts, self.lat, self.lon).astype(np.float32)
@@ -246,17 +255,18 @@ class SunModel:
     """Weather model sunshine share (Open-Meteo minutely_15 sunshine_duration / 900 s) on a 0.1 deg grid over the
     shown area, for the "model" and "nwp" shadows."""
 
-    def __init__(self, grid, url, available, log):
+    def __init__(self, grid, url, available, log, lats=(46.0, 56.0), lons=(2.0, 19.0), deg=MODEL_DEG, models=None):
         self.grid, self.url, self.available, self.log = grid, url, available, log
+        self.deg, self.models = deg, models
         self.lock = threading.Lock()
         self.times = self.share = None   # (T,) ms at the middle of each 15 min interval; (T, nlat, nlon)
         self.low_times = self.low = None  # hourly low cloud cover 0..1 (T, nlat, nlon), for fog under "clear" IR
         self.at = 0.0
-        self.lats = np.arange(46.0, 56.0 + 1e-6, MODEL_DEG)
-        self.lons = np.arange(2.0, 19.0 + 1e-6, MODEL_DEG)
+        self.lats = np.arange(lats[0], lats[1] + 1e-6, deg)
+        self.lons = np.arange(lons[0], lons[1] + 1e-6, deg)
         self.points = None
-        self.maps = (((grid.lon - self.lons[0]) / MODEL_DEG).astype(np.float32),
-                     ((grid.lat - self.lats[0]) / MODEL_DEG).astype(np.float32))
+        self.maps = (((grid.lon - self.lons[0]) / deg).astype(np.float32),
+                     ((grid.lat - self.lats[0]) / deg).astype(np.float32))
 
     def refresh(self, inside, past_steps=4, forecast_steps=14):
         if not self.available() or time.time() - self.at < MODEL_REFRESH_S:
@@ -277,7 +287,8 @@ class SunModel:
                 "minutely_15": "sunshine_duration", "past_minutely_15": str(past_steps),
                 "forecast_minutely_15": str(forecast_steps),
                 "hourly": "cloud_cover_low", "past_hours": str(past_steps // 4 + 2),
-                "forecast_hours": str(forecast_steps // 4 + 2), "timeformat": "unixtime"}).encode()
+                "forecast_hours": str(forecast_steps // 4 + 2), "timeformat": "unixtime",
+                **({"models": self.models} if self.models else {})}).encode()
             req = urllib.request.Request(f"{self.url}/v1/forecast", data=body,
                                          headers={"Content-Type": "application/x-www-form-urlencoded"})
             with urllib.request.urlopen(req, timeout=600) as r:
@@ -416,8 +427,8 @@ class SunStations:
 class SunVerify:
     """Scores every forecast run against the later SID analysis (grid) and the DWD stations (point)."""
 
-    def __init__(self, sun, stations, log, log_dir=None):
-        self.sun, self.stations, self.log = sun, stations, log
+    def __init__(self, sun, stations, log, log_dir=None, prefix=""):
+        self.sun, self.stations, self.log, self.prefix = sun, stations, log, prefix
         self.log_dir = log_dir or LOG_DIR
         g = sun.grid
         self.shape = (int(round(g.nx / VERIFY_DOWN)), int(round(g.ny / VERIFY_DOWN)))  # cv2 (w, h)
@@ -513,17 +524,19 @@ class SunVerify:
                            "mae": round(float(np.abs(f - o).mean()), 4), "bias": round(float((f - o).mean()), 4),
                            "hit": round(float(((f >= SUNNY) == (o >= SUNNY)).mean()), 4),
                            "obs": int((o >= SUNNY).sum()), "fcn": int((f >= SUNNY).sum())})
-        self._write("sungrid", lines)
-        self._write("sunstation", slines)
+        self._write(self.prefix + "sungrid", lines)
+        self._write(self.prefix + "sunstation", slines)
         return len(lines), len(slines)
 
 
 class SunnyDE:
     name = "sunny"
 
-    def __init__(self, fetch, log, de, openmeteo_url=None, openmeteo_available=lambda: False, stations=True, log_dir=None):
-        self.fetch, self.log, self.de = fetch, log, de
-        self.grid = SunGrid()
+    def __init__(self, fetch, log, de, openmeteo_url=None, openmeteo_available=lambda: False, stations=True, log_dir=None,
+                 area=None):
+        """de: the Germany radar (its shown area is sunny's); area: EUROPE (then de may be None: the whole grid)."""
+        self.fetch, self.log, self.de, self.area = fetch, log, de, area
+        self.grid = SunGrid(area["bbox"], area["cell"]) if area else SunGrid()
         self.lock = threading.Lock()
         self.obs, self.fc, self.ref = {}, {}, None  # ts -> share grid (float16, NaN = unknown); ref = newest image
         self.disp = {}                              # ts -> cloud value for the map (uint8, 255 = unknown)
@@ -534,8 +547,9 @@ class SunnyDE:
         self.shift_ms = 0                           # DEV replay: frames relabelled by this, the sun stays at the real time
         self.frozen = False
         self.stations = SunStations(fetch, log) if stations else None
-        self.model = SunModel(self.grid, openmeteo_url, openmeteo_available, log) if openmeteo_url else None
-        self.verify = SunVerify(self, self.stations, log, log_dir)
+        self.model = (SunModel(self.grid, openmeteo_url, openmeteo_available, log, **(area or {}).get("model", {}))
+                      if openmeteo_url else None)
+        self.verify = SunVerify(self, self.stations, log, log_dir, prefix=(area or {}).get("prefix", ""))
         self._inside = None
         self.cycle_s = None
         self._st_pix = None
@@ -543,7 +557,11 @@ class SunnyDE:
 
     # ---------- helpers ----------
     def inside(self):
-        """Area the map shows (Germany + border zone, from the rain radar's mask) on the sunny grid."""
+        """Area the map shows (Germany + border zone, from the rain radar's mask) on the sunny grid; Europe: all of it."""
+        if self.de is None:
+            if self._inside is None:
+                self._inside = np.ones((self.grid.ny, self.grid.nx), np.float32)
+            return self._inside
         if self._inside is None or getattr(self, "_inside_from", None) is not self.de.inside:
             self._inside = cv2.resize(self.de.inside, (self.grid.nx, self.grid.ny), interpolation=cv2.INTER_AREA)
             self._inside_from = self.de.inside

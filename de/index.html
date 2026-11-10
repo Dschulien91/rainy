@@ -452,11 +452,11 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=0.93"></script>
-<script src="lang/en.js?v=0.93"></script>
+<script src="lang/de.js?v=0.94"></script>
+<script src="lang/en.js?v=0.94"></script>
 <script>
 "use strict";
-const VERSION = "v0.93";
+const VERSION = "v0.94";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -649,6 +649,8 @@ document.getElementById("aboutClose").addEventListener("click", () => document.g
 const RAIN_EU = EU_AREA || (!DE_ONLY && MAP_STYLE.rain === "eu");
 // the server for the rain radar: the Europe test server in the Europe area, else the usual one
 const RADAR_BASE = EU_AREA && API_BASE ? (LOCAL_DEV ? `${location.protocol}//${location.hostname}:8772` : `${API_BASE}/eu`) : API_BASE;
+// sunny too: Europe area = the Europe instance's sunny for all of Europe
+const SUN_BASE = RADAR_BASE;
 const FC_OWN = DE_ONLY && !EU_AREA && MAP_STYLE.fc === "own"; // our own forecast (server variant "own") instead of DWD's
 if (MAP_STYLE.theme !== "auto") document.documentElement.classList.add(`theme-${MAP_STYLE.theme}`);
 const dark = MAP_STYLE.theme === "auto" ? window.matchMedia("(prefers-color-scheme: dark)").matches : MAP_STYLE.theme === "dark";
@@ -1500,11 +1502,11 @@ async function loadCloudPoint(loc) {
   if (!API_BASE || SAT_STYLE !== "clouds") return;
   await serverReady;
   try {
-    const d = await getJSON(`${API_BASE}/api/cloud/point?lat=${loc.lat}&lon=${loc.lon}`);
+    const d = await getJSON(`${SUN_BASE}/api/cloud/point?lat=${loc.lat}&lon=${loc.lon}`);
     state.cloudPoint = d.series || []; state.cloudRef = d.ref; state.tileKey.cloud = d.ref;
     state.cloudFrames = [];
     if (!state.cloudPoint.length) { // outside the sunny area: the map still shows it (10.11.: it was empty)
-      const f = await getJSON(`${API_BASE}/api/cloud/frames`);
+      const f = await getJSON(`${SUN_BASE}/api/cloud/frames`);
       state.cloudFrames = f.frames || []; state.cloudRef = f.ref; state.tileKey.cloud = f.ref;
     }
   } catch {}
@@ -1794,8 +1796,8 @@ async function updateNodata() {
   } else if (DE_ONLY) {
     // Germany edition: hatch everything outside Germany (the server's mask is the German border; the same area for
     // the rain radar and the DWD satellite sunshine)
-    const base = state.mode === "sun" ? API_BASE : RADAR_BASE; // sunny stays Germany + border zone
-    const mask = base ? await loadImage(`${base}/api/radar/mask?bbox=${nw.x},${se.y},${se.x},${nw.y}&width=${w}&height=${h}`).catch(() => null) : null;
+    const mask = RADAR_BASE ? await loadImage(`${RADAR_BASE}/api/radar/mask?bbox=${nw.x},${se.y},${se.x},${nw.y}&width=${w}&height=${h}` +
+      (state.mode === "sun" ? "&kind=sun" : "")).catch(() => null) : null;
     if (token !== nodataToken) return;
     if (mask) ctx.drawImage(mask, 0, 0, w, h); else box(DE_BOX);
   } else {
@@ -1903,7 +1905,7 @@ function tileLayer(kind, ts, coarse = false) {
   const id = `${kind}/${state.tileKey[kind]}/${ts}${coarse ? "/c" : ""}`;
   let layer = tileLayers.get(id);
   if (!layer) {
-    const url = `${kind === "rain" ? RADAR_BASE : API_BASE}/tiles/${kind === "rain" && RAIN_EU ? "raineu" : kind === "rain" && FC_OWN ? "rainown" : kind}/${state.tileKey[kind]}/${ts}/{z}/{x}/{y}.png`;
+    const url = `${kind === "rain" ? RADAR_BASE : SUN_BASE}/tiles/${kind === "rain" && RAIN_EU ? "raineu" : kind === "rain" && FC_OWN ? "rainown" : kind}/${state.tileKey[kind]}/${ts}/{z}/{x}/{y}.png`;
     layer = kind === "rain"
       // the server paints smooth, rounded class outlines up to zoom 10 (~100 m pixels, pre-rendered 4-8, 9-10 on
       // demand); closer in the zoom-10 tiles are only enlarged

@@ -99,7 +99,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v0.86"
+VERSION = "server-v0.87"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -864,11 +864,19 @@ def render(region, grid, bbox, w, h, ts):
     return buf.getvalue()
 
 
-def coverage_mask(bbox, w, h):
+def coverage_mask(bbox, w, h, kind="rain"):
     """Opaque where any radar (Europe from OPERA's real coverage, CONUS box for the USA) exists;
-    in the Germany edition exactly Germany."""
+    in the Germany edition exactly Germany. kind "sun" in the Europe instance: the Europe sunny area."""
     X, Y = view_coords(bbox, w, h)
     cov = np.zeros((h, w), bool)
+    if kind == "sun" and EDITION == "eu":
+        col, row = (v.astype(np.float32) for v in SUNNY.grid.to_pixels(X, Y))
+        cov = cv2.remap(SUNNY.inside(), col, row, cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT, borderValue=0) > 0.5
+        img = np.zeros((h, w, 4), np.uint8)
+        img[cov] = (0, 0, 0, 255)
+        buf = io.BytesIO()
+        Image.fromarray(img, "RGBA").save(buf, "PNG", compress_level=3)
+        return buf.getvalue()
     if EDITION == "de":
         col, row = (v.astype(np.float32) for v in DE.to_pixels(X, Y))
         cov = cv2.remap(DE.inside, col, row, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0) > 0.5
@@ -1085,7 +1093,7 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/radar/mask":
                 bbox = [float(v) for v in q["bbox"].split(",")]
                 w, h = min(int(q["width"]), 1024), min(int(q["height"]), 1024)
-                return self.send(200, coverage_mask(bbox, w, h), "image/png", 600)
+                return self.send(200, coverage_mask(bbox, w, h, q.get("kind", "rain")), "image/png", 600)
             if u.path == "/api/radar/point":
                 name, series, ref = point_series(float(q["lat"]), float(q["lon"]))
                 return self.send(200, json.dumps({"region": name, "series": series, "ref": ref}).encode(), "application/json", 60)
@@ -1178,8 +1186,10 @@ EU_VERIFY = fcverify.RegionVerify(REGIONS["eu"], log) if EDITION == "eu" else No
 OWN = OwnNowcast(DE)
 # Germany edition: sunshine from DWD satellite data (sunny_de.py) behind the same cloud API and tiles as the full
 # edition's EUMETSAT clouds, so the app's sunny mode is the same code for both
-SUNNY = sunny_de.SunnyDE(fetch, log, DE, OPENMETEO_URL, openmeteo_available)
-SUNNY_ON = EDITION == "de" and os.environ.get("SUNNY_DE", "1") != "0"
+# Europe test instance: the same sunny for all of Europe (sunny_de.EUROPE: 4 km grid, ICON-EU, files eusun*)
+SUNNY = (sunny_de.SunnyDE(fetch, log, None, OPENMETEO_URL, openmeteo_available, area=sunny_de.EUROPE) if EDITION == "eu"
+         else sunny_de.SunnyDE(fetch, log, DE, OPENMETEO_URL, openmeteo_available))
+SUNNY_ON = EDITION in ("de", "eu") and os.environ.get("SUNNY_DE", "1") != "0"
 SKY = SUNNY if SUNNY_ON else CLOUDS
 MOSAIC = mosaic.Mosaic(REGIONS, DE, SKY, sample, palette.paint, log, de_only=EDITION == "de", ptype=PTYPE)
 THUNDER = thunder.Thunder(fetch, log)
@@ -1200,12 +1210,14 @@ if DEV:
 CLOUDS.heavy_lock = SPROG_LOCK  # cloud nowcast and S-PROG take turns (Docker VM memory)
 
 def main_eu():
-    """Europe test instance: OPERA + own nowcast (+ the model's new showers), its verification, nothing else."""
+    """Europe test instance: OPERA + own nowcast (+ the model's new showers), sunny for Europe, their verification."""
     eu = REGIONS["eu"]
     threading.Thread(target=update_loop, args=(eu,), daemon=True).start()
     eu.model = ModelRain(eu)
     threading.Thread(target=model_loop, args=(eu.model,), daemon=True).start()
     threading.Thread(target=EU_VERIFY.loop, daemon=True).start()
+    if SUNNY_ON:
+        threading.Thread(target=SUNNY.loop, daemon=True).start()
     threading.Thread(target=mosaic.prerender_box_loop, args=(MOSAIC, log, mosaic.EUROPE_BOX, mosaic.EU_PRERENDER_ZOOMS),
                      daemon=True).start()
     threading.Thread(target=memory_loop, daemon=True).start()
