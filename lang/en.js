@@ -193,6 +193,8 @@
   "design.earth": "Satellite (coarse)",
 
   // favourites panel
+  "favs.add": "Add a place",
+  "favs.addPlaceholder": "Add a place to your favourites …",
   "favs.title": "Favourites",
   "favs.empty": "No favourites yet. Tap the star next to the place name or search for a place with the magnifier.",
   "favs.move": "Move",

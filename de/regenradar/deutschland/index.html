@@ -140,6 +140,7 @@
   .panel { position: fixed; inset: 0; z-index: 2000; background: var(--bg); display: flex; flex-direction: column;
     padding: max(12px, env(safe-area-inset-top)) 16px max(12px, env(safe-area-inset-bottom)); }
   .panel[hidden] { display: none; }
+  #searchPanel.over-favs { z-index: 2001; } /* search opened from the favourites: above them */
   .panel-head { display: flex; align-items: center; gap: 10px; }
   .panel-head h2 { flex: 1; margin: 0; font-size: 22px; }
   .icon-btn { flex: none; width: 40px; height: 40px; border: 0; border-radius: 50%; background: var(--night); color: var(--fg);
@@ -366,6 +367,7 @@
 <div class="panel" id="favPanel" hidden>
   <div class="panel-head">
     <h2 data-i18n="favs.title">Favoriten</h2>
+    <button class="icon-btn" id="favSearch" aria-label="Ort hinzufügen" data-i18n-attr="aria-label:favs.add;title:favs.add" title="Ort hinzufügen"><svg viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="10.5" cy="10.5" r="6"/><line x1="15" y1="15" x2="20" y2="20"/></g></svg></button>
     <button class="icon-btn" id="favClose" aria-label="Schließen" data-i18n-attr="aria-label:common.close"><svg viewBox="0 0 24 24"><g stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></g></svg></button>
   </div>
   <div class="head fav-controls">
@@ -438,11 +440,11 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=0.91"></script>
-<script src="lang/en.js?v=0.91"></script>
+<script src="lang/de.js?v=0.92"></script>
+<script src="lang/en.js?v=0.92"></script>
 <script>
 "use strict";
-const VERSION = "v0.91";
+const VERSION = "v0.92";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -3151,13 +3153,23 @@ favList.addEventListener("pointerdown", (e) => {
 
 // ---------- Search ----------
 const searchInput = document.getElementById("searchInput"), results = document.getElementById("results");
-let searchTimer = null, lastResults = [];
-function openSearch() {
-  document.getElementById("searchPanel").hidden = false;
+let searchTimer = null, lastResults = [], searchForFavs = false;
+// forFavs: opened from the favourites (magnifier in their head): a result is added to them and the list comes back,
+// instead of going to the place on the map
+function openSearch(forFavs = false) {
+  searchForFavs = forFavs === true;
+  const panel = document.getElementById("searchPanel");
+  panel.classList.toggle("over-favs", searchForFavs);
+  panel.hidden = false;
+  searchInput.placeholder = t(searchForFavs ? "favs.addPlaceholder" : "search.placeholder");
   searchInput.value = ""; results.innerHTML = "";
   setTimeout(() => searchInput.focus(), 50);
 }
-function closeSearch() { document.getElementById("searchPanel").hidden = true; searchInput.blur(); }
+function closeSearch() {
+  document.getElementById("searchPanel").hidden = true; searchInput.blur();
+  if (searchForFavs && !document.getElementById("favPanel").hidden) renderFavs();
+  searchForFavs = false;
+}
 function renderResults() {
   if (!lastResults.length) { results.innerHTML = searchInput.value.trim().length >= 2 ? `<li class="hint">${t("search.none")}</li>` : ""; return; }
   results.innerHTML = lastResults.map((r, i) => {
@@ -3188,10 +3200,16 @@ results.addEventListener("click", (e) => {
   if (!li) return;
   const r = lastResults[+li.dataset.i], loc = { lat: r.latitude, lon: r.longitude };
   if (e.target.closest(".star-btn")) { toggleFav(loc, r.name); renderResults(); return; }
+  if (searchForFavs) { // add it (if new) and back to the favourites
+    if (!isFav(loc)) toggleFav(loc, r.name);
+    closeSearch();
+    return;
+  }
   closeSearch();
   goTo(loc, r.name);
 });
-document.getElementById("search").addEventListener("click", openSearch);
+document.getElementById("search").addEventListener("click", () => openSearch());
+document.getElementById("favSearch").addEventListener("click", () => openSearch(true));
 document.getElementById("searchClose").addEventListener("click", closeSearch);
 
 // ---------- Account (optional) ----------

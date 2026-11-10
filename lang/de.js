@@ -192,6 +192,8 @@
   "design.earth": "Satellit (grob)",
 
   // favourites panel
+  "favs.add": "Ort hinzufügen",
+  "favs.addPlaceholder": "Ort zu den Favoriten hinzufügen …",
   "favs.title": "Favoriten",
   "favs.empty": "Noch keine Favoriten. Tippe auf den Stern neben dem Ortsnamen oder suche einen Ort mit der Lupe.",
   "favs.move": "Verschieben",
