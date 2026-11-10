@@ -22,7 +22,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 LOG_DIR = os.environ.get("VERIFY_LOG_DIR", os.path.join(HERE, "verify_log"))
 REPORT_HOUR_UTC = 5
 JOBS = [
-    ("Regen Deutschland (CSI, Menge Vorhersage/real)", ["score_same.py", "dwd", "own", "sprog0", "model", "cells"]),
+    ("Regen Deutschland (CSI, Menge Vorhersage/real)", ["score_same.py", "dwd", "dwdsmooth", "own", "sprog0", "model", "cells"]),
     ("Regen Europa, ganzes OPERA-Gebiet", ["score_same.py", "own", "sprog", "sprog0", "pers", "--log", "eugrid"]),
     ("Regen Europa, Ausschnitt wie WetterOnline", ["score_same.py", "own", "sprog", "sprog0", "pers", "--log", "eugrid", "--area", "wo"]),
     ("sunny Deutschland", ["score_sun.py", "sat", "satold", "pers", "kpers", "model", "nwp"]),

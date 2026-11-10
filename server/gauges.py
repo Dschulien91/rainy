@@ -216,9 +216,12 @@ class GaugeDrizzle:
                 except OSError:
                     pass
 
-    def veto(self, grids, ref, raw):
+    def veto(self, grids, ref, raw, motion=None):
         """Remove weak echoes over dry gauges from every frame (past, analysis, forecast), in place.
         raw: the measured frames as the radar sent them (the radar history the gauges are compared with).
+        motion: (dx, dy) radar pixels per minute: the vetoed area moves with the rain in the forecast frames. Before
+        (10.11.) it stayed where it was, the forecast's rain moved through it and the map showed lanes cut through
+        the rain bands ("roads"); ~8 % of the wet area is vetoed. Without motion: no veto beyond the analysis.
         Returns the number of pixels removed from the analysis (ref)."""
         if ref not in grids:
             return 0
@@ -255,7 +258,14 @@ class GaugeDrizzle:
         area = (n_dry >= VETO_MIN_DRY - 0.5) & ~any_damp & was_wet
         removed = 0
         for ts, g in grids.items():
-            weak = area & (np.asarray(g, np.float32) < VETO_MAX)
+            a = area
+            if ts > ref:  # forecast: the area travels with the rain
+                if motion is None:
+                    continue
+                lead = (ts - ref) / 60_000
+                shift = np.float32([[1, 0, motion[0] * lead], [0, 1, motion[1] * lead]])
+                a = cv2.warpAffine(area.astype(np.uint8), shift, (area.shape[1], area.shape[0]), flags=cv2.INTER_NEAREST) > 0
+            weak = a & (np.asarray(g, np.float32) < VETO_MAX)
             if ts == ref:
                 removed = int((weak & (np.asarray(g, np.float32) > 0)).sum())
             g[weak] = 0

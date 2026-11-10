@@ -99,7 +99,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v0.90"
+VERSION = "server-v0.91"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -545,7 +545,8 @@ class OwnNowcast:
             if de.ref == ref:
                 de.set_own(ref, grids)
                 # scored by fcverify only: pure S-PROG; DWD's own forecast plus the model's new showers in the 2nd hour
-                de.fc_shadow = {"model": model, "dwdnew": dwd_new, "cells": cells, "sprog0": sprog0}
+                de.fc_shadow = {"model": model, "dwdnew": dwd_new, "cells": cells, "sprog0": sprog0,
+                                "dwdsmooth": dict(getattr(de, "fc_smooth", None) or {})}
         self.done = ref
         log(f"[{datetime.now():%H:%M:%S}] own nowcast: run {datetime.fromtimestamp(ref / 1000, timezone.utc):%H:%M}Z in {time.time() - started:.0f}s")
 
