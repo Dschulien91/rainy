@@ -5,6 +5,8 @@ exactly as a visitor sees it (anonymous: nothing identifies us; no data files ar
 
 Files: tools/fc_shots/wom_<valid UTC YYYYmmddHHMM>_L<lead>.png, 640x650 (map frame without its bottom bar).
 Usage: python tools/wo_capture.py        (one run takes ~3 min; run every 15-30 min)
+       python tools/wo_capture.py --eu   (their Europe view for the Europe beta: centre 48.5 N 11.0 E, zoom 5 = Paris -
+                                          Warsaw - Rome, 15 min steps; files woe_<...>.png, scored by tools/wo_verify_eu.py)
 """
 import base64
 import json
@@ -24,6 +26,8 @@ import websocket
 
 EDGE = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
 MAP = "https://radar.wo-cloud.com/desktop/rr/compact?wrx=51.014,10.503&wrm=6&wrp=periodCurrentHighRes"
+MAP_EU = "https://radar.wo-cloud.com/desktop/rr/compact?wrx=48.5,11.0&wrm=5&wrp=periodCurrentHighRes"
+EU_CENTER, EU_ZOOM = (11.0, 48.5), 5   # lon, lat of MAP_EU (its centre pixel is at (320, 345) like the Germany view)
 W, H, CROP_H = 640, 690, 650
 SHOTS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fc_shots")
 LEADS = (15, 30, 45, 60, 75, 90)
@@ -99,7 +103,7 @@ def wid(t):
     return t.strftime("%Y%m%d-%H%M") + "-1"
 
 
-def main():
+def main(url=MAP, prefix="wom"):
     os.makedirs(SHOTS, exist_ok=True)
     prof = tempfile.mkdtemp(prefix="edge-wo-")
     with socket.socket() as s:
@@ -113,27 +117,27 @@ def main():
         c = Cdp(port)
         c.call("Page.enable")
         c.call("Emulation.setDeviceMetricsOverride", width=W, height=H, deviceScaleFactor=1, mobile=False)
-        img, label = capture(c, MAP)
+        img, label = capture(c, url)
         if img is None or not label:
             print("live map did not load"); return 1
         l0 = utc_of(label, datetime.now(timezone.utc))
         frames = [(l0, 0, img)]
         for lead in LEADS:
             t = l0 + timedelta(minutes=lead)
-            im, lab = capture(c, MAP + "&wrt=" + wid(t))
+            im, lab = capture(c, url + "&wrt=" + wid(t))
             if im is not None and lab and utc_of(lab, t) == t:
                 frames.append((t, lead, im))
             else:
                 print(f"+{lead}: not shown (label {lab})")
         for back in PAST:
             t = l0 - timedelta(minutes=back)
-            if os.path.exists(os.path.join(SHOTS, f"wom_{t:%Y%m%d%H%M}_L0.png")):
+            if os.path.exists(os.path.join(SHOTS, f"{prefix}_{t:%Y%m%d%H%M}_L0.png")):
                 continue
-            im, lab = capture(c, MAP + "&wrt=" + wid(t))
+            im, lab = capture(c, url + "&wrt=" + wid(t))
             if im is not None and lab and utc_of(lab, t) == t:
                 frames.append((t, 0, im))
         for t, lead, im in frames:
-            p = os.path.join(SHOTS, f"wom_{t:%Y%m%d%H%M}_L{lead}.png")
+            p = os.path.join(SHOTS, f"{prefix}_{t:%Y%m%d%H%M}_L{lead}.png")
             cv2.imwrite(p, im[:CROP_H, :W])
             saved.append(os.path.basename(p))
     finally:
@@ -148,4 +152,4 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(MAP_EU, "woe") if "--eu" in sys.argv else main())

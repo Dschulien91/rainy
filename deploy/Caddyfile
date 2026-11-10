@@ -45,6 +45,11 @@ www.{$DOMAIN} {
 		reverse_proxy api:8771
 	}
 
+	# Europe test instance (beta): /eu/api/..., /eu/tiles/... -> api-eu (prefix stripped)
+	handle_path /eu/* {
+		reverse_proxy api-eu:8771
+	}
+
 	# Weather model API; responses may be cached briefly by a CDN in front of this server.
 	handle_path /om/* {
 		reverse_proxy openmeteo:8080

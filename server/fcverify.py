@@ -138,3 +138,134 @@ class GridVerify:
             except Exception as e:
                 self.log(f"fcverify: {e}")
             time.sleep(60)
+
+
+def wo_eu_box():
+    """lon0, lat0, lon1, lat1 of WetterOnline's Europe view (tools/wo_capture.py MAP_EU: centre 48.5 N 11.0 E, zoom 5,
+    the 640 x 650 px frame with its centre at pixel (320, 345)): the area tools/wo_verify_eu.py scores, so that our rows
+    for area "wo" cover exactly the same ground."""
+    import math
+    n = 256 * 2 ** 5
+    cx = (11.0 + 180) / 360 * n
+    cy = (1 - math.log(math.tan(math.radians(48.5)) + 1 / math.cos(math.radians(48.5))) / math.pi) / 2 * n
+    lon = lambda x: x / n * 360 - 180
+    lat = lambda y: math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * y / n))))
+    return lon(cx - 320), lat(cy + 305), lon(cx + 320), lat(cy - 345)
+
+
+class RegionVerify:
+    """The same verification for a radar region without an official nowcast (the Europe test instance, OPERA):
+    every run's forecasts against the region's later radar image, inside the radar coverage at both times, on a grid of
+    ~4 km (region grid / down). Variants: "own" (as served: S-PROG + the weather model's new showers in the 2nd hour),
+    "sprog" (S-PROG alone, Region.fc_raw) and "pers" (the analysis at issue time: the baseline to beat).
+    Rows as fcgrid (score_same.py --log eugrid): verify_log/eugrid_<YYYYMMDD>.jsonl. Every analysis is saved on that
+    grid to verify_log/obs_eu/ (truth for tools/wo_verify_eu.py, kept OBS_KEEP_DAYS) with grid.json (the region's
+    projection and cell size). Each row is written twice: area "all" (the whole radar coverage) and area "wo" (only
+    WetterOnline's Europe view, wo_eu_box: the same ground as their map for a fair comparison)."""
+
+    def __init__(self, region, log, prefix="eugrid", obs_dir="obs_eu"):
+        self.region, self.log, self.prefix = region, log, prefix
+        self.down = getattr(region, "RAW_DOWN", 2)
+        self.obs_dir = os.path.join(LOG_DIR, obs_dir)
+        self.pending = {}  # (variant, ref, lead) -> (forecast grid, coverage at issue time)
+        self.done_ref = None
+        self.saved = set()
+        self.areas = None  # name -> mask on the verification grid (without the radar coverage)
+
+    def _areas(self, shape):
+        h, w = shape
+        cols, rows = np.meshgrid((np.arange(w) + 0.5) * self.down - 0.5, (np.arange(h) + 0.5) * self.down - 0.5)
+        lon, lat = (np.asarray(v).reshape(h, w) for v in self.region.pixel_lonlat(cols.ravel(), rows.ravel()))
+        x0, y0, x1, y1 = wo_eu_box()
+        return {"all": np.ones((h, w), bool), "wo": (lon >= x0) & (lon <= x1) & (lat >= y0) & (lat <= y1)}
+
+    def _grid(self, g):
+        """(rate, covered) on the verification grid; NODATA (< 0) = outside the radar range."""
+        g = np.asarray(g, np.float32)
+        h, w = g.shape[0] // self.down, g.shape[1] // self.down
+        cov = _down((g >= 0).astype(np.float32), (w, h)) > 0.5
+        return _down(np.where(g < 0, 0, g), (w, h)), cov
+
+    def step(self):
+        r = self.region
+        with r.lock:
+            ref, obs = r.ref, dict(r.obs)
+            fc, raw = dict(r.fc), dict(getattr(r, "fc_raw", None) or {})
+        if not ref or ref not in obs:
+            return
+        if ref != self.done_ref:
+            a0, cov0 = self._grid(obs[ref])
+            for lead in LEADS:
+                t = ref + lead * 60_000
+                self.pending[("pers", ref, lead)] = (a0, cov0)
+                if t in fc:
+                    self.pending[("own", ref, lead)] = (self._grid(fc[t])[0], cov0)
+                if t in raw:
+                    g = np.asarray(raw[t], np.float32)
+                    if g.shape != a0.shape:
+                        g = cv2.resize(g, (a0.shape[1], a0.shape[0]), interpolation=cv2.INTER_AREA)
+                    self.pending[("sprog", ref, lead)] = (np.where(g < 0, 0, g), cov0)
+            self.done_ref = ref
+        lines, truth = [], {}
+        for (variant, rr, lead), (g, cov0) in list(self.pending.items()):
+            valid = rr + lead * 60_000
+            if valid not in obs:
+                if ref - rr > KEEP_MS:
+                    del self.pending[(variant, rr, lead)]
+                continue
+            if valid not in truth:
+                truth[valid] = self._grid(obs[valid])
+            a, cov = truth[valid]
+            if self.areas is None:
+                self.areas = self._areas(a.shape)
+            for area, amask in self.areas.items():
+                mask = cov0 & cov & amask
+                row = {"variant": variant, "area": area, "ref": rr, "lead": lead, "valid": valid,
+                       "sum": [round(float(g[mask].sum()), 1), round(float(a[mask].sum()), 1)]}
+                for th in THRESHOLDS:
+                    o = a >= th
+                    row[f"obs{th}"] = int((o & mask).sum())
+                    row[f"fc{th}"] = list(_counts(g >= th, o, mask))
+                lines.append(row)
+            del self.pending[(variant, rr, lead)]
+        self._save_obs(obs)
+        if lines:
+            os.makedirs(LOG_DIR, exist_ok=True)
+            day = datetime.fromtimestamp(lines[0]["valid"] / 1000, timezone.utc).strftime("%Y%m%d")
+            with open(os.path.join(LOG_DIR, f"{self.prefix}_{day}.jsonl"), "a") as f:
+                for row in lines:
+                    f.write(json.dumps(row) + "\n")
+
+    def _save_obs(self, obs):
+        os.makedirs(self.obs_dir, exist_ok=True)
+        meta = os.path.join(self.obs_dir, "grid.json")
+        if not os.path.exists(meta):
+            r = self.region
+            with open(meta, "w") as f:
+                json.dump({"proj": getattr(r, "LAEA", None), "cell": r.CELL * self.down, "origin": "top left of the "
+                           "region grid (x = col * cell, y = -row * cell)"}, f)
+        for t, g in obs.items():
+            name = datetime.fromtimestamp(t / 1000, timezone.utc).strftime("%Y%m%d%H%M")
+            if name in self.saved:
+                continue
+            path = os.path.join(self.obs_dir, name + ".npz")
+            if not os.path.exists(path):
+                a, cov = self._grid(g)
+                np.savez_compressed(path, rate=np.where(cov, a, -1).astype(np.float16))
+            self.saved.add(name)
+        if len(self.saved) > 400:
+            cutoff = datetime.now(timezone.utc).timestamp() - OBS_KEEP_DAYS * 86400
+            for p in os.listdir(self.obs_dir):
+                if p.endswith(".npz") and datetime.strptime(p[:12], "%Y%m%d%H%M").replace(
+                        tzinfo=timezone.utc).timestamp() < cutoff:
+                    os.remove(os.path.join(self.obs_dir, p))
+            self.saved = {n for n in self.saved if datetime.strptime(n, "%Y%m%d%H%M").replace(
+                tzinfo=timezone.utc).timestamp() >= cutoff}
+
+    def loop(self):
+        while True:
+            try:
+                self.step()
+            except Exception as e:
+                self.log(f"euverify: {e}")
+            time.sleep(60)

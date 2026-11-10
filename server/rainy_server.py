@@ -98,9 +98,12 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v0.79"
+VERSION = "server-v0.80"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
-# satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything.
+# satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
+# "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
+# domain): EUMETNET OPERA radar + our own 2 h nowcast for all of Europe and its verification - no DWD source, no USA,
+# no satellite clouds or sunny, no alerts, so that it fits next to the Germany edition on the same 8 GB server.
 EDITION = os.environ.get("EDITION", "de")
 DEV = os.environ.get("RAINY_DEV") == "1"  # local development only: fake scenarios + dry-run alert outbox (devtools.py)
 PORT = int(os.environ.get("PORT", "8771"))
@@ -110,6 +113,9 @@ FC_STEPS = 24               # nowcast steps of 5 min (2 h)
 STEP_MS = 5 * 60_000
 POLL_S = 60
 NODATA = np.float32(-1.0)   # outside radar coverage
+# Europe grid in km (OPERA comes at 1 km). 2 = a quarter of the memory per frame (8 MB instead of 33 MB, float16) and
+# S-PROG at 4 km: the Europe test instance must fit next to the Germany edition (server: 8 GB, no swap at first).
+EU_KM = int(os.environ.get("EU_KM", "2" if EDITION == "eu" else "1"))
 # Self-hosted Open-Meteo. In production Caddy routes /om to it; locally this server proxies /om when it runs.
 OPENMETEO_URL = os.environ.get("OPENMETEO_URL", "http://127.0.0.1:8080")
 _om_state = {"at": 0.0, "ok": False}
@@ -272,7 +278,7 @@ class ModelRain:
                 "latitude": ",".join(f"{v:.3f}" for v in la[i:i + self.BATCH]),
                 "longitude": ",".join(f"{v:.3f}" for v in lo[i:i + self.BATCH]),
                 "minutely_15": "precipitation", "past_minutely_15": "1", "forecast_minutely_15": "14",
-                "timeformat": "unixtime"}).encode()
+                "timeformat": "unixtime", **({"models": self.region.MODELS} if self.region.MODELS else {})}).encode()
             req = urllib.request.Request(f"{OPENMETEO_URL}/v1/forecast", data=body,
                                          headers={"Content-Type": "application/x-www-form-urlencoded"})
             with urllib.request.urlopen(req, timeout=600) as r:
@@ -521,6 +527,8 @@ class Region:
     FLOW_DOWN = 2     # optical flow is computed at grid resolution / FLOW_DOWN
     MODEL_DEG = None  # lat/lon spacing of the weather model rain used for blending (None: no blending)
     SPROG_DOWN = 0    # S-PROG runs at grid resolution / SPROG_DOWN (0: simple nowcast only)
+    RAW_DOWN = 3      # the forecast without the model's new cells (fc_raw) is kept at grid resolution / RAW_DOWN
+    MODELS = None     # Open-Meteo "models" for the blend (None: best match per place)
 
     def __init__(self):
         self.lock = threading.Lock()
@@ -578,7 +586,8 @@ class Region:
         raw = None
         if self.model:  # backtest (verify_blend.py, variant N): same skill as radar only, plus showers yet to form
             # the forecast without the model's new cells is kept at 1/3 resolution for the gauge verification
-            raw = {last_t + (i + 1) * STEP_MS: cv2.resize(np.asarray(g, np.float32), (g.shape[1] // 3, g.shape[0] // 3),
+            d = self.RAW_DOWN
+            raw = {last_t + (i + 1) * STEP_MS: cv2.resize(np.asarray(g, np.float32), (g.shape[1] // d, g.shape[0] // d),
                                                           interpolation=cv2.INTER_AREA).astype(np.float16)
                    for i, g in enumerate(fc)}
             fc = blend_new_cells(self.model, fc, last_t)
@@ -593,11 +602,17 @@ class EuropeOpera(Region):
     name, credit = "eu", "EUMETNET OPERA"
     BUCKET = "https://s3.waw3-1.cloudferro.com/openradar-24h"
     LAEA = "+proj=laea +lat_0=55.0 +lon_0=10.0 +x_0=1950000.0 +y_0=-2100000.0 +units=m +ellps=WGS84"
-    CELL, NY, NX = 1000.0, 4400, 3800   # full 1 km resolution
-    KM_PER_PX = 1.0
-    SMOOTH, FLOW_DOWN = 2.0, 4          # same physical scales as the backtested 2 km setup
+    CELL, NY, NX = 1000.0 * EU_KM, 4400 // EU_KM, 3800 // EU_KM   # OPERA's 1 km grid, kept at EU_KM km
+    KM_PER_PX = float(EU_KM)
+    SMOOTH, FLOW_DOWN = 2.0 / EU_KM, max(1, 4 // EU_KM)  # same physical scales as the backtested 2 km setup
     MODEL_DEG = 0.15
-    SPROG_DOWN = 3                      # S-PROG at 3 km: about half the memory of 2 km (peak ~5.3 GB was too close to the laptop Docker limit)
+    # S-PROG at 3 km (1 km grid) or 4 km (2 km grid): about half the memory of 2 km (peak ~5.3 GB was too close to the
+    # laptop Docker limit)
+    SPROG_DOWN = 3 if EU_KM == 1 else 2
+    RAW_DOWN = 3 if EU_KM == 1 else 2   # S-PROG alone, at ~3-4 km: the verification's "sprog" variant
+    # Europe test instance: ICON-EU only - it is on the server's disk (openmeteo-sync); "best match" read AROME, HARMONIE,
+    # MET Nordic ... from the remote mirror for ~60k points per refresh (took > 15 min locally)
+    MODELS = os.environ.get("EU_MODELS") or None
     # OPERA DBZH via Marshall-Palmer shows 1.94x the rain of ~300 German 10-min gauges (22 h, server/check_opera_gauges.py)
     # while DWD shows 0.65x; x0.5 matches the gauges, gives the best CSI and removes the step at the German border.
     GAIN = 0.5
@@ -630,6 +645,13 @@ class EuropeOpera(Region):
         dbz = d * gain + offset
         dbz[(d == undetect) | nod] = -32.0
         rate = cv2.medianBlur(dbz_to_rate(dbz), 3) * self.GAIN   # median removes single-pixel clutter
+        if EU_KM > 1:  # mean over the covered 1 km pixels; no data where most of the block is outside the radar range
+            k = EU_KM
+            h, w = rate.shape[0] // k * k, rate.shape[1] // k * k
+            cov = (~nod[:h, :w]).reshape(h // k, k, w // k, k).mean(axis=(1, 3))
+            tot = np.where(nod[:h, :w], 0, rate[:h, :w]).reshape(h // k, k, w // k, k).mean(axis=(1, 3))
+            rate = np.where(cov >= 0.5, tot / np.maximum(cov, 1e-6), NODATA).astype(np.float32)
+            return rate
         rate[nod] = NODATA
         return rate
 
@@ -835,8 +857,9 @@ def coverage_mask(bbox, w, h):
     frames, _ = eu.frames()
     if frames:
         cov |= sample(eu, eu.grid(frames[0]["ts"]), X, Y)[1]
-    x0, y0, x1, y1 = UsaNowcoast.BBOX
-    cov |= (X >= x0) & (X <= x1) & (Y >= y0) & (Y <= y1)
+    if EDITION == "full":
+        x0, y0, x1, y1 = UsaNowcoast.BBOX
+        cov |= (X >= x0) & (X <= x1) & (Y >= y0) & (Y <= y1)
     img = np.zeros((h, w, 4), np.uint8)
     img[cov] = (0, 0, 0, 255)
     buf = io.BytesIO()
@@ -917,7 +940,8 @@ class Handler(BaseHTTPRequestHandler):
                 with urllib.request.urlopen(f"{OPENMETEO_URL}{self.path[3:]}", timeout=60) as r:
                     return self.send(r.status, r.read(), r.headers.get("Content-Type", "application/json"), 600)
             if u.path == "/api/ready":  # for uptime monitors: 503 when the German radar data is stale
-                age = (time.time() * 1000 - DE.ref) / 60_000 if DE.ref else None
+                src_ref = REGIONS["eu"].ref if EDITION == "eu" else DE.ref
+                age = (time.time() * 1000 - src_ref) / 60_000 if src_ref else None
                 ok = age is not None and age < 20
                 return self.send(200 if ok else 503, json.dumps({"ok": ok, "radar_age_min": age and round(age)}).encode(), "application/json", 0)
             if u.path == "/api/health":
@@ -1113,6 +1137,7 @@ DE = mosaic.GermanyDwd(fetch, log)
 PTYPE = ptype.PrecipType(fetch, log, DE)
 DE.drizzle = gauges.GaugeDrizzle(fetch, log, DE, mosaic.merc, state_dir=os.path.join(DATA_DIR, "gauges"))
 GRID_VERIFY = fcverify.GridVerify(DE, log)
+EU_VERIFY = fcverify.RegionVerify(REGIONS["eu"], log) if EDITION == "eu" else None
 OWN = OwnNowcast(DE)
 # Germany edition: sunshine from DWD satellite data (sunny_de.py) behind the same cloud API and tiles as the full
 # edition's EUMETSAT clouds, so the app's sunny mode is the same code for both
@@ -1137,7 +1162,22 @@ if DEV:
     ALERTS.dev, ALERTS.outbox = True, devtools.OUTBOX
 CLOUDS.heavy_lock = SPROG_LOCK  # cloud nowcast and S-PROG take turns (Docker VM memory)
 
-if __name__ == "__main__":
+def main_eu():
+    """Europe test instance: OPERA + own nowcast (+ the model's new showers), its verification, nothing else."""
+    eu = REGIONS["eu"]
+    threading.Thread(target=update_loop, args=(eu,), daemon=True).start()
+    eu.model = ModelRain(eu)
+    threading.Thread(target=model_loop, args=(eu.model,), daemon=True).start()
+    threading.Thread(target=EU_VERIFY.loop, daemon=True).start()
+    threading.Thread(target=memory_loop, daemon=True).start()
+    log(f"nowcast: {'pySTEPS S-PROG' if HAVE_PYSTEPS else 'simple (pySTEPS not installed)'}, Europe grid {EU_KM} km")
+    log(f"rainy {VERSION} (eu edition) on http://0.0.0.0:{PORT}")
+    ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
+
+
+if __name__ == "__main__" and EDITION == "eu":
+    main_eu()
+elif __name__ == "__main__":
     threading.Thread(target=ALERTS.loop, args=(ll_to_3857,), daemon=True).start()
     threading.Thread(target=mosaic.de_loop, args=(DE, log, PTYPE), daemon=True).start()
     threading.Thread(target=DE.drizzle.loop, daemon=True).start()

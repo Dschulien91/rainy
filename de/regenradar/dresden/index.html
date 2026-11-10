@@ -443,11 +443,11 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=0.84"></script>
-<script src="lang/en.js?v=0.84"></script>
+<script src="lang/de.js?v=0.85"></script>
+<script src="lang/en.js?v=0.85"></script>
 <script>
 "use strict";
-const VERSION = "v0.84";
+const VERSION = "v0.85";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -609,13 +609,26 @@ const MAP_STYLE = (() => {
   let st = {};
   try { st = JSON.parse(localStorage.getItem("rainy.style")) || {}; } catch {}
   return { sat: st.sat === "photo" ? "photo" : "clouds", theme: ["light", "dark", "auto"].includes(st.theme) ? st.theme : "dark", // dark by default (07.11.)
-    rain: st.rain === "eu" ? "eu" : "mix", fc: (new URLSearchParams(location.search).get("fc") || st.fc) === "own" ? "own" : "dwd", design: ["liberty", "bright", "fiord", "earth"].includes(st.design) ? st.design : "plain" };
+    rain: st.rain === "eu" ? "eu" : "mix", area: st.area === "eu" ? "eu" : "de", fc: (new URLSearchParams(location.search).get("fc") || st.fc) === "own" ? "own" : "dwd", design: ["liberty", "bright", "fiord", "earth"].includes(st.design) ? st.design : "plain" };
 })();
 // Edition: "de" = first public version (Germany: rain radar 2 h + 24 h / 3 days; sunny 2 h from the server's DWD satellite
 // sunshine (server/sunny_de.py) + 24 h / 3 days from the weather model; the Europe/USA radar is hidden and everything
 // outside Germany is hatched); "full" = everything (test with ?edition=full).
 const EDITION = new URLSearchParams(location.search).get("edition") === "full" ? "full" : "de";
 const DE_ONLY = EDITION === "de";
+// Europe radar (beta, being verified - parallel to the Germany edition): the rain radar for all of Europe from the
+// Europe test server (EUMETNET OPERA + our own 2 h nowcast, server EDITION=eu behind /eu/ on the same domain; locally
+// port 8772). Everything else (sunny, alerts, weather model, place search) stays with the Germany edition. Chosen in
+// the settings ("Gebiet"), which only show the choice in beta mode (?beta=1 once on this device; ?beta=0 ends it).
+const BETA = (() => {
+  const q = new URLSearchParams(location.search).get("beta");
+  try {
+    if (q === "1") localStorage.setItem("rainy.beta", "1");
+    if (q === "0") localStorage.removeItem("rainy.beta");
+    return localStorage.getItem("rainy.beta") === "1";
+  } catch { return q === "1"; }
+})();
+const EU_AREA = DE_ONLY && (BETA && MAP_STYLE.area === "eu" || new URLSearchParams(location.search).get("area") === "eu");
 // the chart canvas sizes itself on window resize only; the wide layout changes its box without one
 window.addEventListener("load", () => setTimeout(() => window.dispatchEvent(new Event("resize")), 300));
 if (DE_ONLY) {
@@ -631,8 +644,10 @@ document.getElementById("aboutBtn").addEventListener("click", () => {
   document.getElementById("aboutCard").classList.toggle("show");
 });
 document.getElementById("aboutClose").addEventListener("click", () => document.getElementById("aboutCard").classList.remove("show"));
-const RAIN_EU = !DE_ONLY && MAP_STYLE.rain === "eu";
-const FC_OWN = DE_ONLY && MAP_STYLE.fc === "own"; // our own forecast (server variant "own") instead of DWD's
+const RAIN_EU = EU_AREA || (!DE_ONLY && MAP_STYLE.rain === "eu");
+// the server for the rain radar: the Europe test server in the Europe area, else the usual one
+const RADAR_BASE = EU_AREA && API_BASE ? (LOCAL_DEV ? `${location.protocol}//${location.hostname}:8772` : `${API_BASE}/eu`) : API_BASE;
+const FC_OWN = DE_ONLY && !EU_AREA && MAP_STYLE.fc === "own"; // our own forecast (server variant "own") instead of DWD's
 if (MAP_STYLE.theme !== "auto") document.documentElement.classList.add(`theme-${MAP_STYLE.theme}`);
 const dark = MAP_STYLE.theme === "auto" ? window.matchMedia("(prefers-color-scheme: dark)").matches : MAP_STYLE.theme === "dark";
 document.body.classList.toggle("dark", dark);
@@ -662,7 +677,7 @@ const fitMinZoom = () => {
   if (!DE_ONLY || !map.getSize().x || !map.getSize().y) return;
   map.options.minZoom = 0;
   const z = map.getBoundsZoom(EUROPE, false);
-  map.setMinZoom(Math.max(3, z) + 1);
+  map.setMinZoom(Math.max(3, z) + (EU_AREA ? 0 : 1));
 };
 fitMinZoom();
 map.on("resize", fitMinZoom);
@@ -1522,7 +1537,7 @@ async function loadRadarPoint(loc) {
     // our server: the same seamless mosaic the map shows (DWD in Germany, OPERA, NOAA, satellite estimate)
     try {
       await serverReady;
-      const d = await getJSON(`${API_BASE}/api/rain/point?lat=${loc.lat.toFixed(2)}&lon=${loc.lon.toFixed(2)}${RAIN_EU ? "&src=eu" : ""}${FC_OWN ? "&fc=own" : ""}`);
+      const d = await getJSON(`${RADAR_BASE}/api/rain/point?lat=${loc.lat.toFixed(2)}&lon=${loc.lon.toFixed(2)}${RAIN_EU ? "&src=eu" : ""}${FC_OWN ? "&fc=own" : ""}`);
       state.radarPoint = DE_ONLY && d.covered === false ? [] :
         (d.series || []).map((r) => ({ ts: r.ts, mmh: r.mmh, ref: r.fc ? 1 : null, kind: r.kind }));
       state.radarSource = "rtile"; state.tileKey.rain = d.key;
@@ -1764,7 +1779,8 @@ async function updateNodata() {
   } else if (DE_ONLY) {
     // Germany edition: hatch everything outside Germany (the server's mask is the German border; the same area for
     // the rain radar and the DWD satellite sunshine)
-    const mask = API_BASE ? await loadImage(`${API_BASE}/api/radar/mask?bbox=${nw.x},${se.y},${se.x},${nw.y}&width=${w}&height=${h}`).catch(() => null) : null;
+    const base = state.mode === "sun" ? API_BASE : RADAR_BASE; // sunny stays Germany + border zone
+    const mask = base ? await loadImage(`${base}/api/radar/mask?bbox=${nw.x},${se.y},${se.x},${nw.y}&width=${w}&height=${h}`).catch(() => null) : null;
     if (token !== nodataToken) return;
     if (mask) ctx.drawImage(mask, 0, 0, w, h); else box(DE_BOX);
   } else {
@@ -1863,7 +1879,7 @@ function tileLayer(kind, ts) {
   const id = `${kind}/${state.tileKey[kind]}/${ts}`;
   let layer = tileLayers.get(id);
   if (!layer) {
-    const url = `${API_BASE}/tiles/${kind === "rain" && RAIN_EU ? "raineu" : kind === "rain" && FC_OWN ? "rainown" : kind}/${state.tileKey[kind]}/${ts}/{z}/{x}/{y}.png`;
+    const url = `${kind === "rain" ? RADAR_BASE : API_BASE}/tiles/${kind === "rain" && RAIN_EU ? "raineu" : kind === "rain" && FC_OWN ? "rainown" : kind}/${state.tileKey[kind]}/${ts}/{z}/{x}/{y}.png`;
     layer = kind === "rain"
       // the server paints smooth, rounded class outlines up to zoom 10 (~100 m pixels, pre-rendered 4-8, 9-10 on
       // demand); closer in the zoom-10 tiles are only enlarged
@@ -2749,7 +2765,8 @@ function showSettings() {
     <div class="row"><span>${t("settings.colors")}</span>${seg("theme", [["auto", t("settings.themeAuto")], ["light", t("settings.themeLight")], ["dark", t("settings.themeDark")]])}</div>
     ${DE_ONLY ? "" : `<div class="row"><span>${t("settings.clouds")}</span>${seg("sat", [["clouds", t("settings.cloudsStandard")], ["photo", t("settings.cloudsPhoto")]])}</div>
     <div class="row"><span>${t("settings.rain")}</span>${seg("rain", [["mix", t("settings.rainMix")], ["eu", t("settings.rainEu")]])}</div>`}
-    ${DE_ONLY && API_BASE ? `<div class="row"><span>${t("settings.forecast")}</span>${seg("fc", [["dwd", t("settings.fcDwd")], ["own", t("settings.fcOwn")]])}</div>` : ""}
+    ${DE_ONLY && API_BASE && BETA ? `<div class="row"><span>${t("settings.area")}</span>${seg("area", [["de", t("settings.areaDe")], ["eu", t("settings.areaEu")]])}</div>` : ""}
+    ${DE_ONLY && API_BASE && !EU_AREA ? `<div class="row"><span>${t("settings.forecast")}</span>${seg("fc", [["dwd", t("settings.fcDwd")], ["own", t("settings.fcOwn")]])}</div>` : ""}
     <div class="actions"><span></span><button class="done">${t("common.done")}</button></div>`;
   const update = () => alertsUpdated(a);
   bindAlertControls(card, a, update);
@@ -2762,8 +2779,8 @@ function showSettings() {
     a.places.splice(+b.dataset.rm, 1);
     update(); renderPlace(); showSettings();
   }));
-  card.querySelectorAll("[data-sat], [data-theme], [data-rain], [data-fc], [data-design]").forEach((b) => b.addEventListener("click", () => {
-    const key = ["sat", "theme", "rain", "fc", "design"].find((k) => b.dataset[k] != null), next = { ...MAP_STYLE, [key]: b.dataset[key] };
+  card.querySelectorAll("[data-sat], [data-theme], [data-rain], [data-fc], [data-design], [data-area]").forEach((b) => b.addEventListener("click", () => {
+    const key = ["sat", "theme", "rain", "fc", "design", "area"].find((k) => b.dataset[k] != null), next = { ...MAP_STYLE, [key]: b.dataset[key] };
     if (next[key] === MAP_STYLE[key]) return;
     try { localStorage.setItem("rainy.style", JSON.stringify(next)); } catch {}
     flushSync(true); // keepalive request: survives the reload

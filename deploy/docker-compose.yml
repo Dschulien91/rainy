@@ -6,6 +6,7 @@ volumes:
   model-log:
   push-data:
   verify-log:
+  eu-data:
 
 services:
   api:
@@ -36,6 +37,31 @@ services:
       - verify-log:/app/verify_log         # forecasts + DWD station truth for score.py / verify_alerts.py
       - push-data:/app/data                # push subscriptions, the VAPID key, users.db (must survive updates; back up)
     healthcheck:                           # unhealthy when the DWD data is older than 20 min (/api/ready)
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8771/api/ready', timeout=10)"]
+      interval: 2m
+      timeout: 15s
+      retries: 3
+
+  # Europe test instance (beta, parallel to the Germany edition): EUMETNET OPERA radar + our own 2 h nowcast for all of
+  # Europe, verified like the Germany edition (verify_log/eugrid_*.jsonl, score_same.py --log eugrid). Served under
+  # /eu/ (Caddyfile). Memory-capped: it can never push the Germany edition out of memory (measured ~0.8-1.1 GB).
+  api-eu:
+    build: ../server
+    restart: always
+    mem_limit: 2500m
+    environment:
+      PORT: "8771"
+      EDITION: eu
+      EU_MODELS: icon_eu       # the model blend reads only the model on local disk
+      OPENMETEO_URL: http://openmeteo:8080
+      MODEL_LOG_DIR: /app/model_log
+      VERIFY_LOG_DIR: /app/verify_log
+      DATA_DIR: /app/data
+      MALLOC_ARENA_MAX: "2"
+    volumes:
+      - verify-log:/app/verify_log         # eugrid_*.jsonl + obs_eu/ next to the Germany logs
+      - eu-data:/app/data
+    healthcheck:                           # unhealthy when the OPERA data is older than 20 min (/api/ready)
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8771/api/ready', timeout=10)"]
       interval: 2m
       timeout: 15s
