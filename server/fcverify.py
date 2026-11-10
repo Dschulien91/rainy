@@ -157,7 +157,8 @@ class RegionVerify:
     """The same verification for a radar region without an official nowcast (the Europe test instance, OPERA):
     every run's forecasts against the region's later radar image, inside the radar coverage at both times, on a grid of
     ~4 km (region grid / down). Variants: "own" (as served: S-PROG + the weather model's new showers in the 2nd hour),
-    "sprog" (S-PROG alone, Region.fc_raw) and "pers" (the analysis at issue time: the baseline to beat).
+    "sprog" (S-PROG alone, Region.fc_raw), "sprog0" (S-PROG before the advection blend of 10.11., Region.fc_pure) and
+    "pers" (the analysis at issue time: the baseline to beat).
     Rows as fcgrid (score_same.py --log eugrid): verify_log/eugrid_<YYYYMMDD>.jsonl. Every analysis is saved on that
     grid to verify_log/obs_eu/ (truth for tools/wo_verify_eu.py, kept OBS_KEEP_DAYS) with grid.json (the region's
     projection and cell size). Each row is written twice: area "all" (the whole radar coverage) and area "wo" (only
@@ -191,6 +192,7 @@ class RegionVerify:
         with r.lock:
             ref, obs = r.ref, dict(r.obs)
             fc, raw = dict(r.fc), dict(getattr(r, "fc_raw", None) or {})
+            pure = dict(getattr(r, "fc_pure", None) or {})
         if not ref or ref not in obs:
             return
         if ref != self.done_ref:
@@ -200,11 +202,12 @@ class RegionVerify:
                 self.pending[("pers", ref, lead)] = (a0, cov0)
                 if t in fc:
                     self.pending[("own", ref, lead)] = (self._grid(fc[t])[0], cov0)
-                if t in raw:
-                    g = np.asarray(raw[t], np.float32)
-                    if g.shape != a0.shape:
-                        g = cv2.resize(g, (a0.shape[1], a0.shape[0]), interpolation=cv2.INTER_AREA)
-                    self.pending[("sprog", ref, lead)] = (np.where(g < 0, 0, g), cov0)
+                for name, src in (("sprog", raw), ("sprog0", pure)):
+                    if t in src:
+                        g = np.asarray(src[t], np.float32)
+                        if g.shape != a0.shape:
+                            g = cv2.resize(g, (a0.shape[1], a0.shape[0]), interpolation=cv2.INTER_AREA)
+                        self.pending[(name, ref, lead)] = (np.where(g < 0, 0, g), cov0)
             self.done_ref = ref
         lines, truth = [], {}
         for (variant, rr, lead), (g, cov0) in list(self.pending.items()):

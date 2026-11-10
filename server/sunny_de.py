@@ -105,6 +105,10 @@ CTH0, CTH1 = 3000.0, 4000.0
 FLOW_DOWN = 3                  # optical flow on a ~6 km grid: large-scale motion only
 FLOW_SIGMA = 10.0              # flow smoothing (down pixels, ~55 km)
 BLUR = 1.2                     # blur sigma (px) at 10 min lead, grows with sqrt(lead)
+# ... but only from SHARP_MIN on in full: before 10.11. the first step (+10) was blurred at once and small clouds
+# vanished exactly at "now" (a visible break). Now the blur ramps up over the first hour; the old way is the scored
+# shadow "satold".
+SHARP_MIN = 60
 # model shadow (Open-Meteo)
 MODEL_DEG, MODEL_BATCH, MODEL_REFRESH_S = 0.1, 2000, 30 * 60
 MODEL_START, MODEL_END, MODEL_END_W = 60, 120, 0.5   # satellite weight 1 until +60, 0.5 at +120 (shadow "model")
@@ -424,6 +428,89 @@ class SunStations:
             time.sleep(max(30.0, gauges.LIST_EVERY_S - (time.time() - started)))
 
 
+GEOSPHERE = "https://dataset.api.hub.geosphere.at/v1/station/current/tawes-v1-10min"
+SMN_ITEMS = "https://data.geo.admin.ch/api/stac/v1/collections/ch.meteoschweiz.ogd-smn/items?limit=100"
+
+
+class EuSunStations(SunStations):
+    """The Europe instance's station truth: the DWD stations plus Austria (GeoSphere TAWES, open data CC BY 4.0: "SO",
+    sunshine seconds in the last 10 min) and Switzerland (MeteoSwiss SwissMetNet open data, source MeteoSwiss:
+    "sre000z0", sunshine minutes in 10 min). Ids "AT:<id>" / "CH:<abbr>". The timestamps are taken as the END of the
+    10 min like DWD's SD_10 (to be checked against the satellite analysis once a few days exist)."""
+
+    def __init__(self, fetch, log):
+        super().__init__(fetch, log)
+        self.at_ids, self.ch_items, self.extra_day = [], {}, None
+
+    def _extra_lists(self):
+        d = json.loads(self.fetch(f"{GEOSPHERE}/metadata", timeout=60))
+        at = {f"AT:{x['id']}": (float(x["lat"]), float(x["lon"])) for x in d.get("stations", []) if x.get("is_active")}
+        ch, url = {}, SMN_ITEMS
+        while url:
+            j = json.loads(self.fetch(url, timeout=60))
+            for f in j.get("features", []):
+                lon, lat = f["geometry"]["coordinates"][:2]
+                href = next((a["href"] for k, a in f["assets"].items() if k.endswith("_t_now.csv")), None)
+                if href:
+                    ch[f"CH:{f['id']}"] = (float(lat), float(lon), href)
+            url = next((l["href"] for l in j.get("links", []) if l.get("rel") == "next"), None)
+        return at, ch
+
+    def _poll_extra(self):
+        if time.strftime("%Y%m%d") != self.extra_day:
+            at, ch = self._extra_lists()
+            self.at_ids, self.ch_items, self.extra_day = [k[3:] for k in at], ch, time.strftime("%Y%m%d")
+            with self.lock:
+                self.stations.update(at)
+                self.stations.update({k: v[:2] for k, v in ch.items()})
+        got = {}
+        # Austria: the current 10 min of every station in one request
+        d = json.loads(self.fetch(f"{GEOSPHERE}?parameters=SO&station_ids={','.join(self.at_ids)}", timeout=60))
+        # stations that are behind make the answer list several times; each data array is aligned with them
+        ts = [int(datetime.fromisoformat(x).timestamp() * 1000) for x in d.get("timestamps", [])]
+        for f in d.get("features", []):
+            vals = {t: min(1.0, v / 600.0) for t, v in zip(ts, f["properties"]["parameters"]["SO"]["data"])
+                    if v is not None and v >= 0}
+            if vals:
+                got[f"AT:{f['properties']['station']}"] = vals
+        # Switzerland: one small file per station (today's 10-min values)
+        for sid, (_, _, href) in self.ch_items.items():
+            time.sleep(0.2)
+            try:
+                rows = self.fetch(href, timeout=30, tries=1).decode("latin-1").splitlines()
+            except Exception:
+                continue
+            head = rows[0].split(";")
+            if "sre000z0" not in head:
+                continue
+            k = head.index("sre000z0")
+            vals = {}
+            for r in rows[-30:]:  # the last ~5 h
+                p = r.split(";")
+                try:
+                    vals[int(datetime.strptime(p[1], "%d.%m.%Y %H:%M").replace(tzinfo=timezone.utc).timestamp() * 1000)] =                         min(1.0, float(p[k]) / 10.0)
+                except (ValueError, IndexError):
+                    continue
+            if vals:
+                got[sid] = vals
+        cut = time.time() * 1000 - TRUTH_KEEP_MS
+        with self.lock:
+            for sid, vals in got.items():
+                dd = self.values.setdefault(sid, {})
+                dd.update({tt: v for tt, v in vals.items() if tt >= cut})
+                for tt in [tt for tt in dd if tt < cut]:
+                    del dd[tt]
+        return len(got)
+
+    def poll(self):
+        n = super().poll()
+        try:
+            n += self._poll_extra()
+        except Exception as e:
+            self.log(f"sunny stations AT/CH: {e}")
+        return n
+
+
 class SunVerify:
     """Scores every forecast run against the later SID analysis (grid) and the DWD stations (point)."""
 
@@ -546,7 +633,7 @@ class SunnyDE:
         self.k = {}                                 # ts -> clear-sky index (float16), last K_KEEP_MS only
         self.shift_ms = 0                           # DEV replay: frames relabelled by this, the sun stays at the real time
         self.frozen = False
-        self.stations = SunStations(fetch, log) if stations else None
+        self.stations = ((EuSunStations if area else SunStations)(fetch, log)) if stations else None
         self.model = (SunModel(self.grid, openmeteo_url, openmeteo_available, log, **(area or {}).get("model", {}))
                       if openmeteo_url else None)
         self.verify = SunVerify(self, self.stations, log, log_dir, prefix=(area or {}).get("prefix", ""))
@@ -660,7 +747,7 @@ class SunnyDE:
         flow = self._motion(prev[0].astype(np.float32), k1, prev[1]) if prev else None
         base = fill_nan(k1)
         known = np.isfinite(k1).astype(np.float32)
-        out = {"sat": {}, "kpers": {}, "pers": {}, "model": {}, "nwp": {}}
+        out = {"sat": {}, "satold": {}, "kpers": {}, "pers": {}, "model": {}, "nwp": {}}
         disp = {}
         for lead in FC_LEADS:
             ts = ref + lead * 60_000
@@ -671,12 +758,16 @@ class SunnyDE:
                 kn = cv2.remap(known, mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
             else:
                 kk, kn = base.copy(), known
-            kk = cv2.GaussianBlur(kk, (0, 0), BLUR * math.sqrt(lead / 10))
+            kold = None
+            if lead in LEADS:  # the old blur, for the shadow "satold"
+                kold = np.where(kn > 0.5, cv2.GaussianBlur(kk, (0, 0), BLUR * math.sqrt(lead / 10)), np.nan).astype(np.float32)
+            kk = cv2.GaussianBlur(kk, (0, 0), max(0.3, BLUR * math.sqrt(lead / 10) * min(1.0, lead / SHARP_MIN)))
             kk = np.where(kn > 0.5, kk, np.nan).astype(np.float32)
             s = share_from_k(kk, e)
             out["sat"][ts] = s
             disp[ts] = self._display(kk, e)
             if lead in LEADS:  # shadows only where they are scored
+                out["satold"][ts] = share_from_k(kold, e)
                 out["kpers"][ts] = share_from_k(k1, e)
                 if obs is not None:
                     out["pers"][ts] = obs.astype(np.float32)

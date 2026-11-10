@@ -4,7 +4,8 @@ Grid (verify_log/sungrid_*.jsonl, against the later DWD satellite analysis, ~3 k
 CSI / POD / FAR, mean share bias and MAE. Stations (verify_log/sunstation_*.jsonl, against DWD's 10-minute sunshine
 duration SD_10): MAE of the sun share and the hit rate of "sunny or not".
 
-  python score_sun.py sat pers kpers model nwp [--hours 24 | --all] [--dir verify_log]
+  python score_sun.py sat pers kpers model nwp [--hours 24 | --all] [--dir verify_log] [--prefix eu]
+  (--prefix eu: the Europe instance's files eusungrid_* / eusunstation_*)
 """
 import glob
 import json
@@ -17,13 +18,14 @@ args = sys.argv[1:]
 opt = lambda name, default: args[args.index(name) + 1] if name in args else default
 hours = float(opt("--hours", 24))
 log_dir = opt("--dir", os.environ.get("VERIFY_LOG_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "verify_log")))
-names = [a for i, a in enumerate(args) if not a.startswith("--") and (i == 0 or args[i - 1] not in ("--hours", "--dir"))] or ["sat", "pers"]
+prefix = opt("--prefix", "")
+names = [a for i, a in enumerate(args) if not a.startswith("--") and (i == 0 or args[i - 1] not in ("--hours", "--dir", "--prefix"))] or ["sat", "pers"]
 since = (time.time() - hours * 3600) * 1000 if "--all" not in args else 0
 
 
 def load(kind):
     rows = defaultdict(dict)  # (ref, lead) -> variant -> row
-    for fp in glob.glob(os.path.join(log_dir, f"{kind}_*.jsonl")):
+    for fp in glob.glob(os.path.join(log_dir, f"{prefix}{kind}_*.jsonl")):
         for line in open(fp):
             r = json.loads(line)
             if r["valid"] >= since:

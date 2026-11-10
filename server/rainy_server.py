@@ -99,7 +99,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v0.87"
+VERSION = "server-v0.90"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -257,6 +257,10 @@ class ModelRain:
         col, row = (np.round(v).astype(np.int64) for v in self.region.to_pixels(x, y))
         ok = (col >= 0) & (col < nx) & (row >= 0) & (row < ny)
         ok[ok] = g[row[ok], col[ok]] >= 0
+        dom = getattr(self.region, "MODEL_DOMAIN", None)
+        if dom:  # one point outside the model's area fails the whole request (HTTP 400 "No data is available")
+            lat_all, lon_all = la.ravel(), lo.ravel()
+            ok &= (lat_all >= dom[0]) & (lat_all <= dom[1]) & (lon_all >= dom[2]) & (lon_all <= dom[3])
         self.points = np.flatnonzero(ok)
         # where each (reduced) radar pixel lies in the model grid
         sy, sx = ny // self.MAP_DOWN, nx // self.MAP_DOWN
@@ -402,7 +406,7 @@ def _coarse(g, down):
 SPROG_LOCK = threading.Lock()  # S-PROG needs a lot of memory: never run two regions at the same time
 
 
-def sprog_nowcast(seq, mot, steps, down, thr=0.1, probmatch="cdf", levels=6, ar_order=2):
+def sprog_nowcast(seq, mot, steps, down, thr=0.1, probmatch="cdf", levels=6, ar_order=2, motion_out=None):
     """pySTEPS S-PROG: like `nowcast`, but each spatial scale decays at its own observed rate (small showers fade
     fast, large rain areas persist). seq: frames 10/5/0 min old; mot: frames 30/15/0 min old (for the motion).
     Runs on a grid `down` times coarser and is scaled back up. Backtests: equal to `nowcast` for widespread rain,
@@ -413,6 +417,8 @@ def sprog_nowcast(seq, mot, steps, down, thr=0.1, probmatch="cdf", levels=6, ar_
     dbz = lambda gs: ps_transformation.dB_transform(np.stack(gs), threshold=thr, zerovalue=zero)[0]
     m = [_coarse(g, down) for g in mot]
     velocity = ps_motion.get_method("LK")(dbz([np.where(g < 0, np.nan, g) for g in m])) / 3.0  # per 15 min -> per 5 min
+    if motion_out is not None:  # coarse pixels per 5 min, for advect_blend
+        motion_out["velocity"], motion_out["down"] = velocity, down
     s = [_coarse(g, down) for g in seq]
     with SPROG_LOCK, contextlib.redirect_stdout(io.StringIO()):  # one region at a time; pySTEPS prints long tables
         fc = ps_nowcasts.get_method("sprog")(dbz([np.where(g < 0, 0, g) for g in s]), velocity, steps,
@@ -426,6 +432,42 @@ def sprog_nowcast(seq, mot, steps, down, thr=0.1, probmatch="cdf", levels=6, ar_
         g[g < 0.05] = 0
         g[last < 0] = NODATA
         out.append(g.astype(np.float16))  # compact right away: 24 full-size float32 frames would need ~1.6 GB
+    return out
+
+
+# The step from the last radar image to the first forecast step was a visible break (10.11., live data tiles):
+# S-PROG lets small cells decay at once (rainy: small cells 67 -> 40 -> 20 in the first 15 min; Europe on its 4 km
+# S-PROG grid: area -14 % and small cells 218 -> 69 -> 18 at +5 min) - while "nothing changes" scored better at +15
+# (Europe 0.98 vs 0.96). So in the first hour the last image itself is moved along S-PROG's motion (sharp, every cell
+# kept) and handed over to S-PROG gradually: weight 1 - lead / ADV_FADE_MIN. Pure S-PROG stays a scored shadow.
+ADV_FADE_MIN = 60
+
+
+def advect_blend(fc, last, motion, fade_min=ADV_FADE_MIN):
+    """fc: S-PROG steps (5 min apart, float16 grids, NODATA outside); last: the newest analysis (same grid); motion:
+    sprog_nowcast(motion_out=...). Returns the blended steps (float16)."""
+    vel, down = motion.get("velocity"), motion.get("down", 1)
+    if vel is None:
+        return fc
+    last = np.asarray(last, np.float32)
+    ny, nx = last.shape
+    u = cv2.resize(np.nan_to_num(vel[0]).astype(np.float32), (nx, ny), interpolation=cv2.INTER_LINEAR) * down
+    v = cv2.resize(np.nan_to_num(vel[1]).astype(np.float32), (nx, ny), interpolation=cv2.INTER_LINEAR) * down
+    gx, gy = np.meshgrid(np.arange(nx, dtype=np.float32), np.arange(ny, dtype=np.float32))
+    src = np.where(last < 0, 0, last).astype(np.float32)
+    out = []
+    for i, g in enumerate(fc):
+        lead = (i + 1) * STEP_MS / 60_000
+        w = max(0.0, 1.0 - lead / fade_min)
+        if w <= 0:
+            out.append(g)
+            continue
+        adv = cv2.remap(src, gx - u * (i + 1), gy - v * (i + 1), cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        gf = np.asarray(g, np.float32)
+        b = w * adv + (1.0 - w) * np.where(gf < 0, 0, gf)
+        b[b < 0.05] = 0
+        b[gf < 0] = NODATA
+        out.append(b.astype(np.float16))
     return out
 
 
@@ -482,9 +524,12 @@ class OwnNowcast:
         if any(g is None for g in seq + mot):
             return
         started = time.time()
-        fc = sprog_nowcast([g.astype(np.float32) for g in seq], [g.astype(np.float32) for g in mot], FC_STEPS, self.DOWN,
-                           thr=self.THR)
+        motion = {}
+        fc0 = sprog_nowcast([g.astype(np.float32) for g in seq], [g.astype(np.float32) for g in mot], FC_STEPS, self.DOWN,
+                            thr=self.THR, motion_out=motion)
+        fc = advect_blend(fc0, seq[-1], motion)  # no break at "now" (ADV_FADE_MIN)
         pure = {ref + (i + 1) * STEP_MS: g for i, g in enumerate(fc)}
+        sprog0 = {ref + (i + 1) * STEP_MS: g.astype(np.float16) for i, g in enumerate(fc0)}  # shadow: before 10.11.
         mixed = [g.astype(np.float32) for g in fc]
         mixed = blend_new_cells(self.model, self.model.blend(mixed, ref), ref, km_per_px=de.KM_PER_PX)
         model = {ref + (i + 1) * STEP_MS: g.astype(np.float16) for i, g in enumerate(mixed)}
@@ -500,7 +545,7 @@ class OwnNowcast:
             if de.ref == ref:
                 de.set_own(ref, grids)
                 # scored by fcverify only: pure S-PROG; DWD's own forecast plus the model's new showers in the 2nd hour
-                de.fc_shadow = {"model": model, "dwdnew": dwd_new, "cells": cells}
+                de.fc_shadow = {"model": model, "dwdnew": dwd_new, "cells": cells, "sprog0": sprog0}
         self.done = ref
         log(f"[{datetime.now():%H:%M:%S}] own nowcast: run {datetime.fromtimestamp(ref / 1000, timezone.utc):%H:%M}Z in {time.time() - started:.0f}s")
 
@@ -573,6 +618,7 @@ class Region:
         if prev_t == last_t:
             return len(new)
         fc = None
+        motion, pure = {}, None
         if HAVE_PYSTEPS and self.SPROG_DOWN:
             with self.lock:
                 near = lambda dt, tol: next((self.obs[t] for t in sorted(self.obs, key=lambda t: abs(last_t - dt - t))
@@ -581,7 +627,8 @@ class Region:
                 mot = [near(k * 60_000, 240_000) for k in (30, 15)] + [last]
             if all(g is not None for g in seq + mot):
                 try:
-                    fc = sprog_nowcast(seq, mot, FC_STEPS, self.SPROG_DOWN)
+                    pure = sprog_nowcast(seq, mot, FC_STEPS, self.SPROG_DOWN, motion_out=motion)
+                    fc = advect_blend(pure, last, motion)  # no break at "now" (ADV_FADE_MIN)
                 except Exception as e:  # never lose the forecast: fall back to the simple method
                     log(f"{self.name} S-PROG failed, using simple nowcast: {e}")
         if fc is None:
@@ -594,8 +641,13 @@ class Region:
                                                           interpolation=cv2.INTER_AREA).astype(np.float16)
                    for i, g in enumerate(fc)}
             fc = blend_new_cells(self.model, fc, last_t)
+        d = self.RAW_DOWN
+        pure_small = None if pure is None else {
+            last_t + (i + 1) * STEP_MS: cv2.resize(np.asarray(g, np.float32), (g.shape[1] // d, g.shape[0] // d),
+                                                   interpolation=cv2.INTER_AREA).astype(np.float16) for i, g in enumerate(pure)}
         with self.lock:
             self.fc_raw = raw
+            self.fc_pure = pure_small  # S-PROG as before 10.11. (no advection blend): verification shadow "sprog0"
             self.fc = {last_t + (i + 1) * STEP_MS: g.astype(np.float16) for i, g in enumerate(fc)}
             self.ref = last_t
         return len(new)
@@ -616,6 +668,8 @@ class EuropeOpera(Region):
     # Europe test instance: ICON-EU only - it is on the server's disk (openmeteo-sync); "best match" read AROME, HARMONIE,
     # MET Nordic ... from the remote mirror for ~60k points per refresh (took > 15 min locally)
     MODELS = os.environ.get("EU_MODELS") or None
+    # ICON-EU's area (lat0, lat1, lon0, lon1): until 10.11. the points north of 70.5 N made every refresh fail (400)
+    MODEL_DOMAIN = (29.6, 70.4, -23.4, 62.4) if MODELS == "icon_eu" else None
     # OPERA DBZH via Marshall-Palmer shows 1.94x the rain of ~300 German 10-min gauges (22 h, server/check_opera_gauges.py)
     # while DWD shows 0.65x; x0.5 matches the gauges, gives the best CSI and removes the step at the German border.
     GAIN = 0.5
@@ -1238,6 +1292,9 @@ elif __name__ == "__main__":
         threading.Thread(target=model_loop, args=(OWN.model,), daemon=True).start()
     if SUNNY_ON:
         threading.Thread(target=SUNNY.loop, daemon=True).start()
+    if EDITION == "de":  # the daily record of all forecast comparisons (both instances share verify_log)
+        import daily_report
+        daily_report.start(log)
     threading.Thread(target=mosaic.prerender_loop, args=(MOSAIC, log), daemon=True).start()
     threading.Thread(target=RECORDER.loop, daemon=True).start()
     threading.Thread(target=THUNDER.loop, daemon=True).start()
