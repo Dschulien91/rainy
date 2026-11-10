@@ -630,11 +630,34 @@ def prerender_loop(mosaic, log):
                                     n += 1
                     if mosaic.key() + "|" + mosaic.key("own") != key:  # newer run or own forecast: start over
                         break
+                if mosaic.key() + "|" + mosaic.key("own") == key:  # the WebGL map's data tiles too
+                    box = (lon0 - m * 1.6, lat0 - m, lon1 + m * 1.6, lat1 + m)
+                    n += prerender_data(mosaic, mosaic.key(), box, range(5, 9))
                 done = key
                 log(f"[{datetime.now():%H:%M:%S}] prerender: {n} tiles in {time.time() - started:.0f}s")
         except Exception as e:
             log(f"prerender failed: {e}")
         time.sleep(15)
+
+
+def prerender_data(mosaic, key, box, zooms, use_de=True, variant="dwd"):
+    """Warm the WebGL map's data tiles (rain_data_tile, all time steps per tile) for a lon/lat box: ~0.15 s per tile,
+    ~80 tiles for Germany at zoom 5-8. The URL names the timeline's first step, as the app computes it now."""
+    frames = mosaic.frames()
+    if not frames:
+        return 0
+    t0, n = frames[0]["ts"], min(len(frames), DATA_COLS * DATA_ROWS)
+    lon0, lat0, lon1, lat1 = box
+    (x0, x1), (y0, y1) = merc(np.array([lon0, lon1]), np.array([lat0, lat1]))
+    done = 0
+    for z in zooms:
+        k = (1 << z) / (2 * WORLD)
+        for x in range(int((x0 + WORLD) * k), int((x1 + WORLD) * k) + 1):
+            for y in range(int((WORLD - y1) * k), int((WORLD - y0) * k) + 1):
+                _yield_to_users(mosaic)
+                mosaic.rain_data_tile(key, t0, n, z, x, y, use_de=use_de, variant=variant)
+                done += 1
+    return done
 
 
 def prerender_box_loop(mosaic, log, box, zooms, use_de=False):
@@ -659,6 +682,8 @@ def prerender_box_loop(mosaic, log, box, zooms, use_de=False):
                                 n += 1
                     if mosaic.key() != key:  # newer run: start over
                         break
+                if mosaic.key() == key:
+                    n += prerender_data(mosaic, key, box, range(3, 7), use_de=use_de)
                 done = key
                 log(f"[{datetime.now():%H:%M:%S}] prerender: {n} tiles in {time.time() - started:.0f}s")
         except Exception as e:
