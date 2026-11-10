@@ -450,11 +450,11 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=0.86"></script>
-<script src="lang/en.js?v=0.86"></script>
+<script src="lang/de.js?v=0.87"></script>
+<script src="lang/en.js?v=0.87"></script>
 <script>
 "use strict";
-const VERSION = "v0.86";
+const VERSION = "v0.87";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -1717,7 +1717,8 @@ function buildViews() {
 }
 
 // ---------- Thunderstorms on the map ----------
-// DWD warning areas (thunderstorm: orange, heavy rain: blue outline) and satellite lightning of the last minutes.
+// DWD warning areas (thunderstorms, orange) and satellite lightning of the last minutes. The heavy-rain areas of the
+// same DWD product are not drawn: dozens of small overlapping blue dashed circles over the radar's own rain (10.11.).
 map.createPane("thunder").style.zIndex = 360;
 map.getPane("thunder").style.pointerEvents = "none";
 let warnLayer = null, lightningLayer = null;
@@ -1726,7 +1727,7 @@ async function loadThunderLayers() {
   try {
     const areas = await getJSON(`${API_BASE}/api/thunder/areas`);
     if (warnLayer) warnLayer.remove();
-    warnLayer = L.geoJSON(areas, { pane: "thunder", interactive: false, style: (f) => {
+    warnLayer = L.geoJSON(areas, { pane: "thunder", interactive: false, filter: (f) => f.properties.group === "Gewitter", style: (f) => {
       const t = f.properties.group === "Gewitter", strong = f.properties.severity !== "Minor";
       return { color: t ? (strong ? "#ff5a1f" : "#ff9f1a") : "#5aa9ff", weight: strong ? 2.5 : 1.8, dashArray: t ? null : "4 4",
         fillColor: t ? "#ff9f1a" : "#5aa9ff", fillOpacity: t ? 0.12 : 0.06 };

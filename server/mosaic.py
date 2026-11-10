@@ -61,6 +61,10 @@ FADE_KM = 30.0
 BORDER_KM = float(os.environ.get("BORDER_KM", "50"))
 COVER_ERODE_KM = 10.0  # stay clear of the ragged outer edge of the radar range
 GERMANY_BOX = (5.87, 47.27, 15.04, 55.06)  # lon0, lat0, lon1, lat1
+# Europe test instance (EDITION=eu): the OPERA area most people look at, pre-rendered at the overview zooms (~120 tiles
+# per time step); closer zooms are rendered on demand and cached like the rest
+EUROPE_BOX = (-11.0, 35.5, 32.0, 62.0)
+EU_PRERENDER_ZOOMS = range(3, 6)
 
 
 SPECKLE_PX = 10        # isolated echoes below ~10 km2 on the 1 km DWD grid ...
@@ -556,6 +560,35 @@ def prerender_loop(mosaic, log):
                                     mosaic.rain_tile(mosaic.key("own"), f["ts"], z, x, y, variant="own", prerender=True)
                                     n += 1
                     if mosaic.key() + "|" + mosaic.key("own") != key:  # newer run or own forecast: start over
+                        break
+                done = key
+                log(f"[{datetime.now():%H:%M:%S}] prerender: {n} tiles in {time.time() - started:.0f}s")
+        except Exception as e:
+            log(f"prerender failed: {e}")
+        time.sleep(15)
+
+
+def prerender_box_loop(mosaic, log, box, zooms, use_de=False):
+    """Like prerender_loop for any lon/lat box (the Europe test instance: OPERA only, use_de False = the app's
+    /tiles/raineu/ tiles): every time step of each new run, the steps near "now" first, pausing for user requests."""
+    done = None
+    while True:
+        try:
+            key = mosaic.key()
+            if key != done and mosaic.regions["eu"].ref:
+                started, n = time.time(), 0
+                lon0, lat0, lon1, lat1 = box
+                (x0, x1), (y0, y1) = merc(np.array([lon0, lon1]), np.array([lat0, lat1]))
+                now = time.time() * 1000
+                for f in sorted(mosaic.frames(), key=lambda f: abs(f["ts"] - now)):
+                    for z in zooms:
+                        k = (1 << z) / (2 * WORLD)
+                        for x in range(int((x0 + WORLD) * k), int((x1 + WORLD) * k) + 1):
+                            for y in range(int((WORLD - y1) * k), int((WORLD - y0) * k) + 1):
+                                _yield_to_users(mosaic)
+                                mosaic.rain_tile(key, f["ts"], z, x, y, use_de=use_de, prerender=True)
+                                n += 1
+                    if mosaic.key() != key:  # newer run: start over
                         break
                 done = key
                 log(f"[{datetime.now():%H:%M:%S}] prerender: {n} tiles in {time.time() - started:.0f}s")

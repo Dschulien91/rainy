@@ -58,6 +58,7 @@ Run:  python server/rainy_server.py   (port from env PORT, default 8771; env EDI
       Germany sunny source off)
 Requests to data sources carry a neutral User-Agent and no identifying information.
 """
+from collections import OrderedDict
 import contextlib
 import io
 import json
@@ -98,7 +99,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v0.80"
+VERSION = "server-v0.81"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -617,8 +618,11 @@ class EuropeOpera(Region):
     # while DWD shows 0.65x; x0.5 matches the gauges, gives the best CSI and removes the step at the German border.
     GAIN = 0.5
 
+    PX_CACHE = 400  # tile grids whose pixel positions are kept (~0.5 MB each)
+
     def __init__(self):
         super().__init__()
+        self.px_cache, self.px_lock = OrderedDict(), threading.Lock()
         self.tr = Transformer.from_crs("EPSG:3857", self.LAEA, always_xy=True)
         self.to_ll = Transformer.from_crs(self.LAEA, "EPSG:4326", always_xy=True)
 
@@ -656,8 +660,26 @@ class EuropeOpera(Region):
         return rate
 
     def to_pixels(self, x, y):
+        """Fractional pixel centres. Map tiles: the projection (pyproj, ~2/3 of a Europe tile's render time) is the
+        same for every time step of a tile, so the result is kept per tile grid (LRU, float32, ~0.5 MB each): the app
+        loads all 36 time steps of a view, the pre-render loop too - 1 transform instead of 36 (Europe tile 13 -> ~5 ms)."""
+        big = np.ndim(x) == 2 and np.size(x) >= 4096
+        if big:
+            key = (float(x[0, 0]), float(y[0, 0]), float(x[-1, -1]), float(y[-1, -1]), np.shape(x))
+            with self.px_lock:
+                hit = self.px_cache.get(key)
+                if hit is not None:
+                    self.px_cache.move_to_end(key)
+                    return hit
         gx, gy = self.tr.transform(x, y)
-        return np.asarray(gx) / self.CELL - 0.5, -np.asarray(gy) / self.CELL - 0.5  # fractional pixel centres
+        out = np.asarray(gx) / self.CELL - 0.5, -np.asarray(gy) / self.CELL - 0.5
+        if big:
+            out = tuple(a.astype(np.float32) for a in out)
+            with self.px_lock:
+                self.px_cache[key] = out
+                while len(self.px_cache) > self.PX_CACHE:
+                    self.px_cache.popitem(last=False)
+        return out
 
 
 class UsaNowcoast(Region):
@@ -1169,6 +1191,8 @@ def main_eu():
     eu.model = ModelRain(eu)
     threading.Thread(target=model_loop, args=(eu.model,), daemon=True).start()
     threading.Thread(target=EU_VERIFY.loop, daemon=True).start()
+    threading.Thread(target=mosaic.prerender_box_loop, args=(MOSAIC, log, mosaic.EUROPE_BOX, mosaic.EU_PRERENDER_ZOOMS),
+                     daemon=True).start()
     threading.Thread(target=memory_loop, daemon=True).start()
     log(f"nowcast: {'pySTEPS S-PROG' if HAVE_PYSTEPS else 'simple (pySTEPS not installed)'}, Europe grid {EU_KM} km")
     log(f"rainy {VERSION} (eu edition) on http://0.0.0.0:{PORT}")
