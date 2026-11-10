@@ -439,11 +439,11 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=0.87"></script>
-<script src="lang/en.js?v=0.87"></script>
+<script src="lang/de.js?v=0.88"></script>
+<script src="lang/en.js?v=0.88"></script>
 <script>
 "use strict";
-const VERSION = "v0.87";
+const VERSION = "v0.88";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -1864,15 +1864,21 @@ const CloudTiles = L.GridLayer.extend({
     return tile;
   },
 });
-function tileLayer(kind, ts) {
-  const id = `${kind}/${state.tileKey[kind]}/${ts}`;
+// Rain: every time step also as a coarse copy - the zoom the server pre-renders (Germany 4-8, Europe 3-6), enlarged.
+// Those arrive within a second or two for all 36 steps, so the timeline can be dragged right away; the sharp tiles
+// (zoom 9-10 are drawn on demand) replace them as they come in. Before (10.11.): the first rain after ~3.5 s, dragging
+// showed nothing new until the step had loaded, all steps after ~24 s.
+const RAIN_COARSE_Z = EU_AREA ? 6 : 8;
+const coarseUseful = (kind) => kind === "rain" && map.getZoom() > RAIN_COARSE_Z;
+function tileLayer(kind, ts, coarse = false) {
+  const id = `${kind}/${state.tileKey[kind]}/${ts}${coarse ? "/c" : ""}`;
   let layer = tileLayers.get(id);
   if (!layer) {
     const url = `${kind === "rain" ? RADAR_BASE : API_BASE}/tiles/${kind === "rain" && RAIN_EU ? "raineu" : kind === "rain" && FC_OWN ? "rainown" : kind}/${state.tileKey[kind]}/${ts}/{z}/{x}/{y}.png`;
     layer = kind === "rain"
       // the server paints smooth, rounded class outlines up to zoom 10 (~100 m pixels, pre-rendered 4-8, 9-10 on
       // demand); closer in the zoom-10 tiles are only enlarged
-      ? L.tileLayer(url, { pane: "weather", opacity: 0, maxNativeZoom: 10, className: "rain-tiles", crossOrigin: "anonymous" })
+      ? L.tileLayer(url, { pane: "weather", opacity: 0, maxNativeZoom: coarse ? RAIN_COARSE_Z : 10, className: "rain-tiles", crossOrigin: "anonymous" })
       // the sunny grid has ~2 km cells: zoom-8 tiles (~400 m pixels) hold all its detail, closer in they are only
       // enlarged - no new server tiles per zoom step for every time step of the timeline (empty squares while zooming)
       : new CloudTiles({ pane: "weather", opacity: 0, className: "cloud-tiles", url, ts, maxNativeZoom: 8 });
@@ -1883,16 +1889,22 @@ function tileLayer(kind, ts) {
   return layer;
 }
 // Show a time step; the previous one stays visible until the new tiles are in (no blank flashes while playing).
+// Not loaded yet: its coarse copy meanwhile (rain, zoomed in).
 function showTiles(kind, ts) {
   const layer = tileLayer(kind, ts);
-  const swap = () => {
-    if (showTiles.want !== layer) return;
-    layer.setOpacity(1);
-    if (shownTiles && shownTiles !== layer) shownTiles.setOpacity(0);
-    shownTiles = layer;
+  const show = (l) => {
+    l.setOpacity(1);
+    if (shownTiles && shownTiles !== l) shownTiles.setOpacity(0);
+    shownTiles = l;
   };
   showTiles.want = layer;
-  if (layer.isLoading()) layer.once("load", swap); else swap();
+  if (!layer.isLoading()) return show(layer);
+  layer.once("load", () => { if (showTiles.want === layer) show(layer); });
+  if (coarseUseful(kind)) {
+    const c = tileLayer(kind, ts, true);
+    const early = () => { if (showTiles.want === layer && shownTiles !== layer && layer.isLoading()) show(c); };
+    if (c.isLoading()) c.once("load", early); else early();
+  }
 }
 function hideTiles() {
   showTiles.want = null;
@@ -1902,20 +1914,22 @@ function hideTiles() {
 // Load all time steps of the open timeline one after another (from the selected one), drop the others.
 function preloadTiles(s) {
   if (placeLoading) return; // setLocation preloads once the place's data is in
-  const want = [...s.frames.slice(s.idx), ...s.frames.slice(0, s.idx).reverse()]
+  const ids = [...s.frames.slice(s.idx), ...s.frames.slice(0, s.idx).reverse()]
     .filter((f) => f.map.kind === "rtile" || f.map.kind === "ctile")
     .map((f) => `${f.map.kind === "rtile" ? "rain" : "cloud"}/${state.tileKey[f.map.kind === "rtile" ? "rain" : "cloud"]}/${f.map.ts}`);
+  // all coarse copies first (fast), then the sharp tiles
+  const want = [...ids.filter((id) => coarseUseful(id.split("/")[0])).map((id) => id + "/c"), ...ids];
   for (const [id, layer] of tileLayers) {
     if (!want.includes(id)) { layer.remove(); tileLayers.delete(id); if (shownTiles === layer) shownTiles = null; }
   }
   const token = preloadToken, queue = [...new Set(want)];
   const next = () => {
     if (token !== preloadToken || !queue.length) return;
-    const [kind, , ts] = queue.shift().split("/");
-    const layer = tileLayer(kind, +ts);
+    const [kind, , ts, c] = queue.shift().split("/");
+    const layer = tileLayer(kind, +ts, c === "c");
     if (layer.isLoading()) layer.once("load", next); else next();
   };
-  next(); next(); // two time steps in parallel
+  next(); next(); next(); // three time steps in parallel
 }
 
 // ---------- Rendering ----------
