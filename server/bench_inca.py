@@ -31,6 +31,7 @@ API = "https://dataset.api.hub.geosphere.at/v1"   # 5 requests/s and 240/h per a
 HALF_MS = 30 * 60_000
 LEADS = (30, 60, 90, 120)       # end of each half hour after T0, minutes
 TAKE_BEFORE_S = 120             # the forecasts are taken this long before T0
+RETRY_S = 90                    # a take that fails is tried again for this long (both forecasts are still taken before T0)
 CHUNK = 140                     # gauges per forecast request
 WAIT_MS = 25 * 60_000           # the gauges' last 10 min are there by then
 GIVE_UP_MS = 8 * 3600_000
@@ -68,8 +69,10 @@ class IncaBench:
         for i in range(0, len(self.stations), CHUNK):
             part = self.stations[i:i + CHUNK]
             q = "&".join(f"lat_lon={lat:.4f},{lon:.4f}" for _, lat, lon, _, _ in part)
+            # one short try: when the service hangs (11.11. 12:30-14 UTC it answered nothing for 120 s x 3 tries per
+            # chunk), the take is tried again by loop() until RETRY_UNTIL_S after T0 instead of blocking for minutes
             d = json.loads(self.fetch(f"{API}/timeseries/forecast/nowcast-v1-15min-1km?parameters=rr&output_format=geojson&{q}",
-                                      timeout=120))
+                                      timeout=40, tries=1))
             ref = _ms(d["reference_time"])
             ts = {_ms(t): k for k, t in enumerate(d["timestamps"])}
             for j, f in enumerate(d["features"]):  # in the order asked
@@ -176,9 +179,15 @@ class IncaBench:
         while True:
             try:
                 t0 = (int(time.time() * 1000) // HALF_MS + 1) * HALF_MS  # the next :00 / :30
-                if t0 != self.done and t0 / 1000 - time.time() <= TAKE_BEFORE_S:
-                    self.done = t0  # one try per half hour, also when the service does not answer
-                    self.take(t0)
+                left = t0 / 1000 - time.time()
+                if t0 != self.done and left <= TAKE_BEFORE_S:
+                    try:
+                        self.take(t0)
+                        self.done = t0
+                    except Exception:
+                        if left < TAKE_BEFORE_S - RETRY_S:  # no answer: give this half hour up
+                            self.done = t0
+                        raise
                 if time.time() - last_score > 600:
                     last_score = time.time()
                     n = self.score()
