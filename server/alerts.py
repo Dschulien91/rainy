@@ -1,7 +1,7 @@
 """Rain alerts ("Regenwarnung") for subscribed places, sent as Web Push notifications.
 
 Rules (agreed design):
-  - main alert about LEAD minutes (5-90, default 45) before rain starts at a place
+  - main alert about LEAD minutes (5-45, default 15; until server-v0.96: 5-90, default 45) before rain starts at a place
   - early alert ~60 min ahead only for heavy rain (>= 8 mm/h), only when the forecast is very certain and only with
     a main warning time below 45 min (otherwise it adds nothing)
   - only on the change from dry to wet: no alert while it rains, and after rain a cooldown of COOLDOWN_H dry hours
@@ -131,8 +131,8 @@ def shared_settings(d):
     places = []
     for p in (d.get("places") or [])[:MAX_PLACES]:
         places.append({"name": str(p.get("name") or "")[:60], "lat": round(float(p["lat"]), 2), "lon": round(float(p["lon"]), 2)})
-    lead = int(d.get("lead", 45))
-    cfg = {"lead": lead if 5 <= lead <= 90 and lead % 5 == 0 else 45, "early": bool(d.get("early", True)),
+    lead = min(int(d.get("lead", 15)), 45)  # settings saved before server-v0.97 went up to 90
+    cfg = {"lead": lead if 5 <= lead and lead % 5 == 0 else 15, "early": bool(d.get("early", True)),
            "quiet": bool(d.get("quiet", True)), "quietFrom": minutes(d.get("quietFrom"), QUIET_FROM),
            "quietTo": minutes(d.get("quietTo"), QUIET_TO), "thunder": bool(d.get("thunder", True)),
            "own": bool(d.get("own", False))}

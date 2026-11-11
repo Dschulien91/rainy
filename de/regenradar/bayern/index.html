@@ -441,11 +441,11 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=0.95"></script>
-<script src="lang/en.js?v=0.95"></script>
+<script src="lang/de.js?v=0.96"></script>
+<script src="lang/en.js?v=0.96"></script>
 <script>
 "use strict";
-const VERSION = "v0.95";
+const VERSION = "v0.96";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -2771,9 +2771,10 @@ function renderPlace() {
 const ALERTS_POSSIBLE = !!API_BASE && "serviceWorker" in navigator;
 const BELL = '<svg viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0-6 6v3.5L4.5 16h15L18 12.5V9a6 6 0 0 0-6-6zM10 19a2 2 0 0 0 4 0" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>';
 // own: warn for "Mein Standort" (the last position the app saw on each device); places: further places with a bell
-const ALERT_DEFAULTS = { places: [], own: false, lead: 45, early: true, quiet: true, quietFrom: "22:00", quietTo: "07:00", thunder: true };
+const ALERT_DEFAULTS = { places: [], own: false, lead: 15, early: true, quiet: true, quietFrom: "22:00", quietTo: "07:00", thunder: true };
 const ALERT_SHARED = Object.keys(ALERT_DEFAULTS);
-const LEAD_MIN = 5, LEAD_MAX = 90; // selectable warning time (minutes before the rain)
+const LEAD_MIN = 5, LEAD_MAX = 45; // selectable warning time (minutes before the rain); until v0.95 up to 90,
+// default 45 - measured 08.-11.11.: alerts are right most often up to 30 min ahead, user chose default 15 / max 45
 // Before v0.76 the settings lived in rainy.alerts (one device): copy them once into the account settings key.
 (() => {
   try {
@@ -2790,6 +2791,7 @@ function loadAlerts() {
   const a = { ...ALERT_DEFAULTS };
   for (const k of ALERT_SHARED) if (set[k] != null) a[k] = set[k];
   if (!Array.isArray(a.places)) a.places = [];
+  a.lead = Math.min(LEAD_MAX, Math.max(LEAD_MIN, +a.lead || ALERT_DEFAULTS.lead)); // older settings went up to 90
   return { ...a, id: dev.id, ownLoc: dev.ownLoc || null };
 }
 const sharedAlerts = (a) => Object.fromEntries(ALERT_SHARED.map((k) => [k, a[k]]));
