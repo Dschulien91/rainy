@@ -255,8 +255,9 @@ def wo_eu_box():
 class RegionVerify:
     """The same verification for a radar region without an official nowcast (the Europe test instance, OPERA):
     every run's forecasts against the region's later radar image, inside the radar coverage at both times, on a grid of
-    ~4 km (region grid / down). Variants: "own" (as served: S-PROG + the weather model's new showers in the 2nd hour),
-    "sprog" (S-PROG alone, Region.fc_raw), "sprog0" (S-PROG before the advection blend of 10.11., Region.fc_pure) and
+    ~4 km (region grid / down). Variants: "own" (as served: S-PROG with the advection blend; until server-v0.93 plus
+    the weather model's new showers in the 2nd hour, and "sprog" was the same without them), "cells" (since v0.94: own
+    plus those showers, Region.fc_cells), "sprog0" (S-PROG before the advection blend of 10.11., Region.fc_pure) and
     "pers" (the analysis at issue time: the baseline to beat).
     Rows as fcgrid (score_same.py --log eugrid): verify_log/eugrid_<YYYYMMDD>.jsonl. Every analysis is saved on that
     grid to verify_log/obs_eu/ (truth for tools/wo_verify_eu.py, kept OBS_KEEP_DAYS) with grid.json (the region's
@@ -290,7 +291,7 @@ class RegionVerify:
         r = self.region
         with r.lock:
             ref, obs = r.ref, dict(r.obs)
-            fc, raw = dict(r.fc), dict(getattr(r, "fc_raw", None) or {})
+            fc, raw = dict(r.fc), dict(getattr(r, "fc_cells", None) or {})
             pure = dict(getattr(r, "fc_pure", None) or {})
         if not ref or ref not in obs:
             return
@@ -303,7 +304,7 @@ class RegionVerify:
                 put(("pers", ref, lead), a0)
                 if t in fc:
                     put(("own", ref, lead), self._grid(fc[t])[0])
-                for name, src in (("sprog", raw), ("sprog0", pure)):
+                for name, src in (("cells", raw), ("sprog0", pure)):
                     if t in src:
                         g = np.asarray(src[t], np.float32)
                         if g.shape != a0.shape:

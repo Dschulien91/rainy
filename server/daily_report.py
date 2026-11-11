@@ -9,7 +9,7 @@ verify_log/daily/<that day YYYYMMDD>.txt:
   rain Germany    score_same.py  dwd own pers            against the later radar image (~9 km tolerance, and cell by cell)
                                  + the variants being tested, on the runs they share with dwd/own
                   score.py       the same forecasts against the rain gauges (what reached the ground)
-  rain Europe     score_same.py  own sprog pers --log eugrid   (whole OPERA area and WetterOnline's view)
+  rain Europe     score_same.py  own pers --log eugrid   (whole OPERA area and WetterOnline's view), variants
   rain alerts     verify_alerts.py  share of alerts that were right, by lead time and intensity
   sunny           score_sun.py   sat pers kpers nwp, the variants, and the analysis itself at the stations
   jumps           score_jumps.py what a user sees when moving the timeline: break at "now", jumps between images
@@ -37,10 +37,11 @@ JOBS = [
     ("Regen Deutschland: Varianten im Test (nur gemeinsame Läufe)", ["score_same.py", "dwd", "own", "sprog0", "model", "cells"]),
     ("Regen Deutschland an den Regenmessern (rainy = DWD-Vorhersage wie in der App, own = eigene; CSI POD FAR)", ["score.py", "--rain-only"]),
     ("Regen-Alarme: Anteil richtiger Alarme (Regen am Regenmesser innerhalb +-15 min um den vorhergesagten Beginn)", ["verify_alerts.py"]),
-    ("Regen Europa, ganzes OPERA-Gebiet", ["score_same.py", "own", "sprog", "pers", "--log", "eugrid"]),
-    ("Regen Europa, zellgenau", ["score_same.py", "own", "sprog", "pers", "--log", "eugrid", "--strict"]),
-    ("Regen Europa: Varianten im Test", ["score_same.py", "own", "sprog0", "--log", "eugrid"]),
-    ("Regen Europa, Ausschnitt wie WetterOnline", ["score_same.py", "own", "sprog", "pers", "--log", "eugrid", "--area", "wo"]),
+    ("Regen Europa, ganzes OPERA-Gebiet", ["score_same.py", "own", "pers", "--log", "eugrid"]),
+    ("Regen Europa, zellgenau", ["score_same.py", "own", "pers", "--log", "eugrid", "--strict"]),
+    ("Regen Europa: Varianten im Test (cells = mit Modell-Schauern, sprog0 = ohne Mitführen des letzten Bildes)",
+     ["score_same.py", "own", "cells", "sprog0", "--log", "eugrid"]),
+    ("Regen Europa, Ausschnitt wie WetterOnline", ["score_same.py", "own", "pers", "--log", "eugrid", "--area", "wo"]),
     ("sunny Deutschland", ["score_sun.py", "sat", "pers", "kpers", "nwp"]),
     ("sunny Deutschland: Varianten im Test", ["score_sun.py", "sat", "satold", "model"]),
     ("sunny Europa", ["score_sun.py", "sat", "pers", "kpers", "nwp", "--prefix", "eu"]),

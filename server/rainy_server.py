@@ -100,7 +100,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v0.93"
+VERSION = "server-v0.94"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -637,20 +637,27 @@ class Region:
                     log(f"{self.name} S-PROG failed, using simple nowcast: {e}")
         if fc is None:
             fc = nowcast(prev.astype(np.float32), last.astype(np.float32), last_t - prev_t, FC_STEPS, self.SMOOTH, self.FLOW_DOWN)
-        raw = None
-        if self.model:  # backtest (verify_blend.py, variant N): same skill as radar only, plus showers yet to form
-            # the forecast without the model's new cells is kept at 1/3 resolution for the gauge verification
+        raw = cells = None
+        if self.model:
+            # The weather model's new showers in the second hour (blend_new_cells) are no longer served, only scored
+            # as the shadow "cells" (like the Germany edition since 07.11.). Europe, 10./11.11., 175 runs with the
+            # model working: CSI >= 0.1 mm/h +90/+120 0.71/0.66 with them, 0.76/0.71 without (cell by cell 0.39/0.35
+            # vs 0.48/0.44), rain amount x1.15/x1.39 vs x0.94/x0.93. And they were visible: the model's wide rain
+            # areas were added everywhere except within NEW_RADIUS_KM of the radar rain, which left dry lanes of the
+            # same width between every rain band and the model rain around it (the user's "roads", 10.11.).
             d = self.RAW_DOWN
-            raw = {last_t + (i + 1) * STEP_MS: cv2.resize(np.asarray(g, np.float32), (g.shape[1] // d, g.shape[0] // d),
-                                                          interpolation=cv2.INTER_AREA).astype(np.float16)
-                   for i, g in enumerate(fc)}
-            fc = blend_new_cells(self.model, fc, last_t)
+            small = [cv2.resize(np.asarray(g, np.float32), (g.shape[1] // d, g.shape[0] // d), interpolation=cv2.INTER_AREA)
+                     for g in fc]
+            raw = {last_t + (i + 1) * STEP_MS: g.astype(np.float16) for i, g in enumerate(small)}  # = fc, at 1/d
+            cells = blend_new_cells(self.model, small, last_t, km_per_px=self.KM_PER_PX * d)  # changes `small` in place
+            cells = {last_t + (i + 1) * STEP_MS: g.astype(np.float16) for i, g in enumerate(cells)}
         d = self.RAW_DOWN
         pure_small = None if pure is None else {
             last_t + (i + 1) * STEP_MS: cv2.resize(np.asarray(g, np.float32), (g.shape[1] // d, g.shape[0] // d),
                                                    interpolation=cv2.INTER_AREA).astype(np.float16) for i, g in enumerate(pure)}
         with self.lock:
             self.fc_raw = raw
+            self.fc_cells = cells  # verification shadow "cells": with the model's new showers (served until 11.11.)
             self.fc_pure = pure_small  # S-PROG as before 10.11. (no advection blend): verification shadow "sprog0"
             self.fc = {last_t + (i + 1) * STEP_MS: g.astype(np.float16) for i, g in enumerate(fc)}
             self.ref = last_t

@@ -105,7 +105,7 @@ def rows():
 
 def main():
     rr = rows()
-    names = ("wo", "wo-self", "own", "sprog", "pers")
+    names = ("wo", "wo-self", "own", "pers", "sprog", "cells")  # sprog: rows until server-v0.93, cells: since
     tot = {k: defaultdict(lambda: [0, 0, 0, 0]) for k in names}
     l0_imgs = {v: p for v, lead, p in shots() if lead == 0}
     l0 = [0, 0, 0, 0, 0, 0]
@@ -131,9 +131,10 @@ def main():
         if abs(std - lead) > LEAD_SLACK:
             continue
         ref = int(round((valid.timestamp() * 1000 - lead * 60_000) / 300_000) * 300_000)
-        ours = {n: rr.get((n, ref, std)) for n in ("own", "sprog", "pers")}
-        if any(v is None for v in ours.values()):  # same cases only
+        ours = {n: rr.get((n, ref, std)) for n in ("own", "pers", "sprog", "cells")}
+        if ours["own"] is None or ours["pers"] is None:  # same cases only
             continue
+        ours = {n: v for n, v in ours.items() if v is not None}
         for name, t in [("wo", c)] + [(n, v["fc0.1"]) for n, v in ours.items()]:
             s = tot[name][std]
             s[0] += t[0]; s[1] += t[1]; s[2] += t[2]; s[3] += 1
