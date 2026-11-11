@@ -82,6 +82,7 @@ from pyproj import Transformer
 
 import alerts
 import auth
+import bench_inca
 import clouds
 import fcverify
 import gauges
@@ -100,7 +101,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v0.94"
+VERSION = "server-v0.95"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -1292,6 +1293,8 @@ def main_eu():
     eu.model = ModelRain(eu)
     threading.Thread(target=model_loop, args=(eu.model,), daemon=True).start()
     threading.Thread(target=EU_VERIFY.loop, daemon=True).start()
+    # second benchmark: GeoSphere Austria's INCA nowcast against ours at the Austrian rain gauges (bench_inca.py)
+    threading.Thread(target=bench_inca.IncaBench(fetch, log, eu, mosaic.merc).loop, daemon=True).start()
     if SUNNY_ON:
         threading.Thread(target=SUNNY.loop, daemon=True).start()
     threading.Thread(target=mosaic.prerender_box_loop, args=(MOSAIC, log, mosaic.EUROPE_BOX, mosaic.EU_PRERENDER_ZOOMS),

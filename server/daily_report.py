@@ -10,6 +10,7 @@ verify_log/daily/<that day YYYYMMDD>.txt:
                                  + the variants being tested, on the runs they share with dwd/own
                   score.py       the same forecasts against the rain gauges (what reached the ground)
   rain Europe     score_same.py  own pers --log eugrid   (whole OPERA area and WetterOnline's view), variants
+                  score_inca.py  ours against GeoSphere Austria's INCA nowcast at the Austrian gauges (bench_inca.py)
   rain alerts     verify_alerts.py  share of alerts that were right, by lead time and intensity
   sunny           score_sun.py   sat pers kpers nwp, the variants, and the analysis itself at the stations
   jumps           score_jumps.py what a user sees when moving the timeline: break at "now", jumps between images
@@ -42,6 +43,8 @@ JOBS = [
     ("Regen Europa: Varianten im Test (cells = mit Modell-Schauern, sprog0 = ohne Mitführen des letzten Bildes)",
      ["score_same.py", "own", "cells", "sprog0", "--log", "eugrid"]),
     ("Regen Europa, Ausschnitt wie WetterOnline", ["score_same.py", "own", "pers", "--log", "eugrid", "--area", "wo"]),
+    ("Regen Europa an den österreichischen Regenmessern: eigene (own) gegen den Nowcast des österreichischen Wetterdienstes (inca) und 'bleibt so' (pers)",
+     ["score_inca.py"]),
     ("sunny Deutschland", ["score_sun.py", "sat", "pers", "kpers", "nwp"]),
     ("sunny Deutschland: Varianten im Test", ["score_sun.py", "sat", "satold", "model"]),
     ("sunny Europa", ["score_sun.py", "sat", "pers", "kpers", "nwp", "--prefix", "eu"]),
