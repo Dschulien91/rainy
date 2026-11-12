@@ -446,7 +446,7 @@
 <script src="lang/en.js"></script>
 <script>
 "use strict";
-const VERSION = "v1.00";
+const VERSION = "v1.01";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -774,13 +774,12 @@ map.getPane("labels").style.pointerEvents = "none";
           "line-width": ["interpolate", ["linear"], ["zoom"], 3, 0.5, 8, 1, 13, 1.5] } },
     ];
     const top = part((l) => l.type === "symbol");
-    // Test (?roads=b|c|d, not a setting): roads drawn again above the weather - under rain they are hardly visible.
-    // b = big roads in the map's own colours, c = big roads as light lines, d = all roads in the map's own colours
-    const roadsTop = new URLSearchParams(location.search).get("roads");
-    const roadTop = !["b", "c", "d"].includes(roadsTop) ? [] : style.layers
-      .filter((l) => isRoad(l) && l.type === "line" && (roadsTop === "d" || bigRoad(l)) && !(roadsTop === "c" && /casing/.test(l.id)))
-      .map((l) => ({ ...l, id: l.id + "_top", paint: roadsTop === "c"
-        ? { ...l.paint, "line-color": mapDark ? "#dfe3ea" : "#3a4048", "line-opacity": 0.6 } : l.paint }));
+    // Big roads once more above the weather, as thin light lines: under rain the map's own roads are hardly visible
+    // (v1.01, user chose this of three variants 12.11.; ?roads=a shows the map without them)
+    const roadTop = new URLSearchParams(location.search).get("roads") === "a" ? [] : style.layers
+      .filter((l) => isRoad(l) && l.type === "line" && bigRoad(l) && !/casing/.test(l.id))
+      .map((l) => ({ ...l, id: l.id + "_top", paint: { ...l.paint, "line-color": mapDark ? "#dfe3ea" : "#3a4048",
+        "line-opacity": 0.45, "line-width": scale(l.paint["line-width"] ?? 1, 0.6) } }));
     basemapTop = L.maplibreGL({ style: { ...top, layers: [...sunWater, ...roadTop, ...borders, ...top.layers] }, interactive: false, pane: "labels" }).addTo(map);
     basemapTop.getMaplibreMap().on("load", applyBasemapMode);
   } catch (err) { console.warn("basemap failed", err); }
@@ -800,6 +799,9 @@ function applyBasemapMode() {
     m.setPaintProperty(id, "line-color", sun ? (id === "rainy_border_country" ? "#1b2027" : "#3a414c") : keep(id, "line-color"));
     m.setPaintProperty(id, "line-opacity", sun ? 1 : keep(id, "line-opacity"));
   }
+  // the roads above the weather: light lines vanish on white clouds, so dark ones in sun mode (like the borders)
+  for (const l of m.getStyle().layers) if (/^highway_.*_top$/.test(l.id))
+    m.setPaintProperty(l.id, "line-color", sun || !mapDark ? "#3a4048" : "#dfe3ea");
 }
 const BORDER_PAINT = {};
 const youAreHere = L.circleMarker([FALLBACK.lat, FALLBACK.lon], {
