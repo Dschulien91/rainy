@@ -446,7 +446,7 @@
 <script src="lang/en.js"></script>
 <script>
 "use strict";
-const VERSION = "v0.97";
+const VERSION = "v0.98";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -608,7 +608,7 @@ const MAP_STYLE = (() => {
   let st = {};
   try { st = JSON.parse(localStorage.getItem("rainy.style")) || {}; } catch {}
   return { sat: st.sat === "photo" ? "photo" : "clouds", theme: ["light", "dark", "auto"].includes(st.theme) ? st.theme : "dark", // dark by default (07.11.)
-    rain: st.rain === "eu" ? "eu" : "mix", area: st.area === "eu" ? "eu" : "de", render: st.render === "img" ? "img" : "gl", // WebGL by default (10.11.); pictures without WebGL
+    rain: st.rain === "eu" ? "eu" : "mix", area: st.area === "de" ? "de" : "eu", render: st.render === "img" ? "img" : "gl", // WebGL by default (10.11.); pictures without WebGL
     fc: (new URLSearchParams(location.search).get("fc") || st.fc) === "own" ? "own" : "dwd", design: ["liberty", "bright", "fiord", "earth"].includes(st.design) ? st.design : "plain" };
 })();
 // Edition: "de" = first public version (Germany: rain radar 2 h + 24 h / 3 days; sunny 2 h from the server's DWD satellite
@@ -620,7 +620,8 @@ const DE_ONLY = EDITION === "de";
 // Europe test server (EUMETNET OPERA + our own 2 h nowcast, server EDITION=eu behind /eu/ on the same domain; locally
 // port 8772). Everything else (sunny, alerts, weather model, place search) stays with the Germany edition. Chosen in
 // the settings ("Gebiet", marked beta like every feature still being verified; ?area=eu works too).
-const EU_AREA = DE_ONLY && (MAP_STYLE.area === "eu" || new URLSearchParams(location.search).get("area") === "eu");
+// Europe is the default area since v0.98 (12.11., user decision); "Deutschland" chosen in the settings stays, ?area=de / ?area=eu override
+const EU_AREA = DE_ONLY && (new URLSearchParams(location.search).get("area") || MAP_STYLE.area) === "eu";
 // the chart canvas sizes itself on window resize only; the wide layout changes its box without one
 window.addEventListener("load", () => setTimeout(() => window.dispatchEvent(new Event("resize")), 300));
 if (DE_ONLY) {
