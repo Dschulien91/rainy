@@ -101,7 +101,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v0.98"
+VERSION = "server-v0.99"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -667,7 +667,11 @@ class Region:
 
 class EuropeOpera(Region):
     name, credit = "eu", "EUMETNET OPERA"
-    BUCKET = "https://s3.waw3-1.cloudferro.com/openradar-24h"
+    # The provider's two open buckets with the same layout: the regular one, and the backup it moves to when its cloud
+    # provider has trouble (11.11.2026 20:10 UTC onwards the regular bucket got no new files for a day and the map was
+    # hatched; the backup had them all along). Each image is taken from the first bucket that lists it.
+    BUCKETS = ("https://s3.waw3-1.cloudferro.com/openradar-24h",
+               "https://object-store.os-api.cci1.ecmwf.int/openradar-24h-backup")
     LAEA = "+proj=laea +lat_0=55.0 +lon_0=10.0 +x_0=1950000.0 +y_0=-2100000.0 +units=m +ellps=WGS84"
     CELL, NY, NX = 1000.0 * EU_KM, 4400 // EU_KM, 3800 // EU_KM   # OPERA's 1 km grid, kept at EU_KM km
     KM_PER_PX = float(EU_KM)
@@ -701,15 +705,32 @@ class EuropeOpera(Region):
         now = datetime.now(timezone.utc)
         days = [now] + ([now - timedelta(days=1)] if now.hour == 0 else [])
         out = {}
-        for day in days:
-            xml = fetch(f"{self.BUCKET}/?prefix={day:%Y/%m/%d}/OPERA/COMP/&max-keys=1000").decode()
-            for key in re.findall(r"<Key>([^<]+@DBZH\.h5)</Key>", xml):
-                stamp = key.split("OPERA@")[1].split("@")[0]
-                out[int(datetime.strptime(stamp, "%Y%m%dT%H%M").replace(tzinfo=timezone.utc).timestamp() * 1000)] = key
+        failed = []
+        for bucket in self.BUCKETS:
+            for day in days:
+                try:
+                    xml = fetch(f"{bucket}/?prefix={day:%Y/%m/%d}/OPERA/COMP/&max-keys=1000").decode()
+                except Exception as e:
+                    failed.append(e)
+                    continue
+                for key in re.findall(r"<Key>([^<]+@DBZH\.h5)</Key>", xml):
+                    stamp = key.split("OPERA@")[1].split("@")[0]
+                    t = int(datetime.strptime(stamp, "%Y%m%dT%H%M").replace(tzinfo=timezone.utc).timestamp() * 1000)
+                    out.setdefault(t, f"{bucket}/{key}")
+        if not out and failed:
+            raise failed[0]
+        newest = max(out, default=0)
+        if time.time() * 1000 - newest > 25 * 60_000 and time.time() - self.warned > 1800:  # normally 5-10 min old
+            self.warned = time.time()
+            log(f"eu radar source failed: newest image {datetime.fromtimestamp(newest / 1000, timezone.utc):%d.%m. %H:%MZ}"
+                if newest else "eu radar source failed: no images listed in any bucket")
         return out
 
-    def load(self, key):
-        with h5py.File(io.BytesIO(fetch(f"{self.BUCKET}/{key}")), "r") as f:
+    warned = 0.0
+    BUCKET = BUCKETS[0]  # for check_opera_gauges.py
+
+    def load(self, url):
+        with h5py.File(io.BytesIO(fetch(url)), "r") as f:
             d = f["dataset1/data1/data"][:]
             w = f["dataset1/data1/what"].attrs
             gain, offset, nodata, undetect = (float(w[k]) for k in ("gain", "offset", "nodata", "undetect"))
