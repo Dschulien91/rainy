@@ -18,6 +18,8 @@ from datetime import datetime, timezone
 import cv2
 import numpy as np
 
+from alerts import RADIUS_KM, WET as ALERT_WET
+
 LOG_DIR = os.environ.get("VERIFY_LOG_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "verify_log"))
 KEEP_S = 21 * 86400
 CDC = "https://opendata.dwd.de/climate_environment/CDC/observations_germany/climate/10_minutes"
@@ -148,6 +150,15 @@ class Recorder:
         dx, dy = np.meshgrid(d, d)
         k = (1 / np.cos(np.radians(s["lat"])))[:, None]
         PX, PY = X[:, None] + dx.ravel()[None] * k, Y[:, None] + dy.ravel()[None] * k  # 3x3 like /api/rain/point
+        # Shadow for the alerts (12.11.): the share of the 5 km circle around the gauge that is wet - the quantity the
+        # real alert rule uses (alerts.series / evaluate: P_START of the circle >= WET for MIN_STEPS steps). Until now
+        # verify_alerts.py could only apply a point rule to "rate". Sampled every 1 km like the DWD grid; a point
+        # outside the radar area counts as dry. "share" = DWD's forecast, "share_own" = ours.
+        c = np.arange(-RADIUS_KM, RADIUS_KM + 0.5) * 1000.0
+        cx, cy = np.meshgrid(c, c)
+        disc = (cx ** 2 + cy ** 2 <= (RADIUS_KM * 1000.0) ** 2).ravel()
+        CX, CY = X[:, None] + cx.ravel()[disc][None] * k, Y[:, None] + cy.ravel()[disc][None] * k
+        share, share_own = [], []
         frames = self.mosaic.frames()
         ts, fc, rate, opera, noblend, own, maps = [], [], [], [], [], [], {}
         de = self.mosaic.de
@@ -163,6 +174,9 @@ class Recorder:
             # radar image, never against what reached the ground
             own.append(self.mosaic.rain(f["ts"], PX, PY, variant="own")[0].mean(axis=1) if have_own
                        else np.full(len(X), np.nan, np.float32))
+            share.append((self.mosaic.rain(f["ts"], CX, CY)[0] >= ALERT_WET).mean(axis=1))
+            share_own.append((self.mosaic.rain(f["ts"], CX, CY, variant="own")[0] >= ALERT_WET).mean(axis=1)
+                             if have_own else np.full(len(X), np.nan, np.float32))
             o, _ = self.mosaic.rain(f["ts"], PX, PY, use_de=False)  # shadow: Europe composite only
             opera.append(o.mean(axis=1))
             g = raw.get(f["ts"]) if f["fc"] else None  # shadow 2: OPERA nowcast without the model's new cells
@@ -174,6 +188,7 @@ class Recorder:
         np.savez_compressed(os.path.join(LOG_DIR, f"fc_rain_{ref}_{now}.npz"), issued=now, ref=ref, ts=np.array(ts),
                             ids=np.array(s["id"]), lat=s["lat"], lon=s["lon"],
                             fc=np.array(fc), rate=np.array(rate, np.float32), own=np.array(own, np.float32),
+                            share=np.array(share, np.float32), share_own=np.array(share_own, np.float32),
                             **({"opera": np.array(opera, np.float32), "noblend": np.array(noblend, np.float32)}
                                if eu.ref else {}),  # Germany edition: no Europe composite to compare with
                             **maps)

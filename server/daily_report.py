@@ -37,7 +37,7 @@ JOBS = [
     ("Regen Deutschland, dasselbe zellgenau (ohne Toleranz: wer trifft die Ränder)", ["score_same.py", "dwd", "own", "pers", "--strict"]),
     ("Regen Deutschland: Varianten im Test (nur gemeinsame Läufe)", ["score_same.py", "dwd", "own", "sprog0", "model", "cells"]),
     ("Regen Deutschland an den Regenmessern (rainy = DWD-Vorhersage wie in der App, own = eigene; CSI POD FAR)", ["score.py", "--rain-only"]),
-    ("Regen-Alarme: Anteil richtiger Alarme (Regen am Regenmesser innerhalb +-15 min um den vorhergesagten Beginn)", ["verify_alerts.py"]),
+    ("Regen-Alarme: Anteil richtiger Alarme (Regen am Regenmesser innerhalb +-15 min um den vorhergesagten Beginn); point = Regel am Punkt, circle = echte Alarmregel (5-km-Kreis); reliability = wie oft es je nach vorhergesagtem nassen Anteil des Kreises wirklich regnete", ["verify_alerts.py"]),
     ("Regen Europa, ganzes OPERA-Gebiet", ["score_same.py", "own", "pers", "--log", "eugrid"]),
     ("Regen Europa, zellgenau", ["score_same.py", "own", "pers", "--log", "eugrid", "--strict"]),
     ("Regen Europa: Varianten im Test (cells = mit Modell-Schauern, sprog0 = ohne Mitführen des letzten Bildes)",

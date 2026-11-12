@@ -6,7 +6,10 @@ and the single steps that stand out. Rain: share of the wet area that differs (o
 sun: mean change of the displayed value (0 = overcast .. 1 = clear).
   break at "now":   the step at "now" changes clearly more than the steps between measured images
   jump:             a measured step far above the usual one (sunset method switch, a bad satellite or radar image)
-  forecast step:    one lead whose step is always larger than the others (two methods handing over)
+  forecast step:    one lead whose step is always larger than the others (two methods handing over) AND larger
+                    than the usual change between two measured images (12.11.: our own forecast was flagged every
+                    day at +10 min with 0.30 against 0.31 measured -> measured - its first steps still carry the
+                    radar's detail, the later ones are smoother; nothing a user sees as a step)
 
   python score_jumps.py [--hours 24 | --day 20261110] [--dir verify_log]
 """
@@ -77,7 +80,8 @@ for (kind, product), rs in sorted(runs.items()):
         allm = median(med.values())
         top = max(med, key=med.get)
         print(f"  Vorhersage Schritt zu Schritt: median {allm:.3f}, größter bei +{top} min ({med[top]:.3f})"
-              + ("   <-- STUFE in der Vorhersage" if med[top] > 1.6 * allm and med[top] > 0.5 * FLOOR[kind] else ""))
+              + ("   <-- STUFE in der Vorhersage" if med[top] > 1.6 * allm and med[top] > 0.5 * FLOOR[kind]
+                 and med[top] > 1.2 * m else ""))  # a step no larger than measured -> measured is no visible step
     limit = max(3 * m, FLOOR[kind])
     odd = sorted(((c, t) for t, c in measured.items() if c > limit), reverse=True)
     if odd:
