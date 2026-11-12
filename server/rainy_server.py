@@ -101,7 +101,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v0.99"
+VERSION = "server-v1.00"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -1331,6 +1331,9 @@ if __name__ == "__main__" and EDITION == "eu":
 elif __name__ == "__main__":
     monitor.start(EDITION, VERSION, monitor_status)
     threading.Thread(target=ALERTS.loop, args=(ll_to_3857,), daemon=True).start()
+    if EDITION == "de" and not DEV:  # push message to the operator when an instance has no fresh images (opswatch.py)
+        import opswatch
+        threading.Thread(target=opswatch.OpsWatch(ALERTS, DATA_DIR, log).loop, daemon=True).start()
     threading.Thread(target=mosaic.de_loop, args=(DE, log, PTYPE), daemon=True).start()
     threading.Thread(target=DE.drizzle.loop, daemon=True).start()
     threading.Thread(target=GRID_VERIFY.loop, daemon=True).start()

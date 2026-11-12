@@ -118,6 +118,7 @@
   "source.nowcastMotion": "Satellit hochgerechnet (Zug: {source})",
   "source.plusModel": "+ Modell",
   "source.modelRain": "Modellvorhersage, ungenauer",
+  "source.radarOut": "Radar liefert gerade keine Daten",
   "source.modelCloud": "Wolken-Vorhersage (Modell)",
   "source.loading": "lade {ready}/{total}",
   "motion.satellite": "Satellit",

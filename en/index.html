@@ -451,11 +451,11 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=0.96"></script>
-<script src="lang/en.js?v=0.96"></script>
+<script src="lang/de.js?v=0.97"></script>
+<script src="lang/en.js?v=0.97"></script>
 <script>
 "use strict";
-const VERSION = "v0.96";
+const VERSION = "v0.97";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -1531,7 +1531,7 @@ async function countryOf(loc) {
 }
 async function loadRadarPoint(loc) {
   const now = Date.now(), iso = (t) => new Date(t).toISOString().slice(0, 19) + "Z";
-  state.radarPoint = []; state.rainMapOnly = false;
+  state.radarPoint = []; state.rainMapOnly = false; state.radarOut = false;
   // Germany edition with our server: the server itself says whether a place is inside the radar area ("covered"),
   // so skip the country lookup (an extra round trip to the geocoder of up to ~1 s before the radar could load)
   const cc = DE_ONLY && API_BASE ? "DE" : await countryOf(loc);
@@ -1551,7 +1551,10 @@ async function loadRadarPoint(loc) {
       state.rainMapOnly = DE_ONLY && d.covered === false;
       state.radarPoint = (d.series || []).map((r) => ({ ts: r.ts, mmh: r.mmh, ref: r.fc ? 1 : null, kind: r.kind }));
       state.radarSource = "rtile"; state.tileKey.rain = d.key;
-    } catch { state.radarPoint = []; }
+      // inside the radar area but no radar values: the source delivers nothing (12.11.: Europe hatched for 22 h
+      // with only "model forecast" as explanation) - the source line says so
+      state.radarOut = !state.radarPoint.length && d.covered !== false;
+    } catch { state.radarPoint = []; state.radarOut = navigator.onLine !== false; }
   }
   // Bright Sky only without our server: with it, places never go to third parties (privacy)
   if (!state.radarPoint.length && !API_BASE && (cc === "DE" || (cc ? false : inBox(DE_BOX, loc.lat, loc.lon)))) {
@@ -2237,7 +2240,7 @@ function updateSource() {
     : f.map.kind === "sat" ? t("source.sat", { provider: state.satRegion === "meteosat" ? "EUMETSAT" : "NOAA GOES / NASA", time: fmtTime(f.map.ts) })
     : f.map.kind === "nowcast" ? (nowcast.motion ? t("source.nowcastMotion", { source: nowcast.motion.source }) : t("source.nowcast")) +
       (f.map.w < 0.5 ? " " + t("source.plusModel") : "")
-    : state.mode === "rain" ? t("source.modelRain") : t("source.modelCloud");
+    : state.mode === "rain" ? (state.radarOut ? t("source.radarOut") + " · " : "") + t("source.modelRain") : t("source.modelCloud");
   const img = s.frames.map((x) => isImgKind(x.map.kind) && resolveMap(x.map)).filter(Boolean);
   const keys = [...new Set(img.map((m) => frameKey(m.kind, m.ts, m.ref)))];
   const ready = keys.filter((k) => imgFrames.has(k) && frameReady(imgFrames.get(k))).length;

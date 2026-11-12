@@ -119,6 +119,7 @@
   "source.nowcastMotion": "Satellite extrapolated (motion: {source})",
   "source.plusModel": "+ model",
   "source.modelRain": "Model forecast, less accurate",
+  "source.radarOut": "Radar is not delivering data right now",
   "source.modelCloud": "Cloud forecast (model)",
   "source.loading": "loading {ready}/{total}",
   "motion.satellite": "satellite",
