@@ -18,6 +18,7 @@ Every message is also written to verify_log/ops_<day>.jsonl (read by the daily r
 import glob
 import json
 import os
+import re
 import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -113,7 +114,7 @@ class OpsWatch:
                     self.sent[k] = now
             gone = [k for k in self.sent if k not in cur]
             if gone:
-                self.push("rainy: wieder in Ordnung", " · ".join(self.seen.get(k, k).split(" seit ")[0] for k in gone))
+                self.push("rainy: wieder in Ordnung", " · ".join(re.split(r" seit | hat keine | meldet sich | startet ", self.seen.get(k, k))[0] for k in gone))
                 for k in gone:
                     del self.sent[k]
         self.seen = {**{k: v for k, v in self.seen.items() if k in self.sent}, **cur}
