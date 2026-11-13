@@ -47,6 +47,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 LOG_DIR = os.environ.get("VERIFY_LOG_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "verify_log"))
 OBS_DIR = os.path.join(LOG_DIR, "natobs")
+FC_DIR = os.path.join(LOG_DIR, "fcgauge")   # forecasts at the gauges, per run (check_forecast_gauges.py)
+FC_LEADS = (30, 60, 90, 120)                # minutes
 KEEP_DAYS = 4
 TAWES = "https://dataset.api.hub.geosphere.at/v1"
 SWISS = "https://data.geo.admin.ch"
@@ -188,6 +190,16 @@ def record(ts, opera, nat, who=None, layers=(), each=None, shadow=()):
     np.savez_compressed(os.path.join(OBS_DIR, f"{int(ts)}.npz"), opera=opera.astype(np.float16), nat=nat.astype(np.float16), **extra)
     old = time.time() * 1000 - KEEP_DAYS * 86400_000
     for fp in glob.glob(os.path.join(OBS_DIR, "*.npz")):
+        if int(os.path.basename(fp)[:-4]) < old:
+            os.remove(fp)
+
+
+def record_fc(ref, values):
+    """values: (1 + len(FC_LEADS), gauges) - the picture at the run's time `ref`, then the forecast per lead."""
+    os.makedirs(FC_DIR, exist_ok=True)
+    np.savez_compressed(os.path.join(FC_DIR, f"{int(ref)}.npz"), fc=values.astype(np.float16))
+    old = time.time() * 1000 - 2 * KEEP_DAYS * 86400_000
+    for fp in glob.glob(os.path.join(FC_DIR, "*.npz")):
         if int(os.path.basename(fp)[:-4]) < old:
             os.remove(fp)
 

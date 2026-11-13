@@ -102,7 +102,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v1.19"
+VERSION = "server-v1.20"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -663,7 +663,11 @@ class Region:
             self.fc_pure = pure_small  # S-PROG as before 10.11. (no advection blend): verification shadow "sprog0"
             self.fc = {last_t + (i + 1) * STEP_MS: g.astype(np.float16) for i, g in enumerate(fc)}
             self.ref = last_t
+        self.after_forecast()
         return len(new)
+
+    def after_forecast(self):
+        """Called after every new forecast run (subclasses: verification notes)."""
 
 
 class EuropeOpera(Region):
@@ -696,6 +700,41 @@ class EuropeOpera(Region):
     # instance (the app's "European" source) since v1.19 (user, 13.11.2026: yes). check_spokes.py switches it off to
     # see the raw images.
     DESPOKE = True
+    gauge_px = None  # rain gauges of check_national_gauges.py on this grid: (col, row, on the grid)
+
+    def gauges(self):
+        """The gauges' pixels. The OPERA instance takes the list the own-picture instance keeps (same gauges, same
+        order: the two instances' forecasts are compared gauge by gauge, check_forecast_gauges.py)."""
+        if self.gauge_px is None:
+            import check_national_gauges as cng
+            shared = os.path.join(cng.LOG_DIR, "eun", "natobs", "stations.json")
+            if not EU_NATIONAL and os.path.exists(shared):
+                with open(shared) as f:
+                    st = [tuple(s) for s in json.load(f)]
+            else:
+                st = cng.station_list(fetch, log)
+            self.gauge_px = cng.pixels(self, st, mosaic.merc) if st else None
+        return self.gauge_px
+
+    def after_forecast(self):
+        """Every forecast run of a Europe instance is noted at the rain gauges: the picture at the run's time and
+        the forecast for +30 / +60 / +90 / +120 min (check_forecast_gauges.py scores both instances against the
+        gauges - the only comparison of the two that does not use either one's own radar picture as the truth)."""
+        if EDITION != "eu":
+            return
+        try:
+            import check_national_gauges as cng
+            px = self.gauges()
+            if px is None:
+                return
+            with self.lock:
+                ref = self.ref
+                grids = [self.obs.get(ref)] + [self.fc.get(ref + m * 60_000) for m in cng.FC_LEADS]
+            if ref % 600_000 or any(g is None for g in grids):  # the gauges report every 10 minutes
+                return
+            cng.record_fc(ref, np.stack([cng.at_gauges(g, px) for g in grids]))
+        except Exception as e:
+            log(f"fcgauge failed: {e}")
 
     def __init__(self):
         super().__init__()
@@ -825,10 +864,7 @@ class EuropeNational(EuropeOpera):
         opera = None
         try:
             import check_national_gauges as cng
-            if self.gauge_px is None:
-                st = cng.station_list(fetch, log)
-                self.gauge_px = cng.pixels(self, st, mosaic.merc) if st else None
-            if self.gauge_px is not None:
+            if self.gauges() is not None:
                 opera = cng.at_gauges(rate, self.gauge_px)
         except Exception as e:
             log(f"natobs failed: {e}")
