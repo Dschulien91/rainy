@@ -440,11 +440,11 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=1.02"></script>
-<script src="lang/en.js?v=1.02"></script>
+<script src="lang/de.js?v=1.03"></script>
+<script src="lang/en.js?v=1.03"></script>
 <script>
 "use strict";
-const VERSION = "v1.02";
+const VERSION = "v1.03";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -1536,7 +1536,7 @@ async function countryOf(loc) {
 }
 async function loadRadarPoint(loc) {
   const now = Date.now(), iso = (t) => new Date(t).toISOString().slice(0, 19) + "Z";
-  state.radarPoint = []; state.rainMapOnly = false; state.radarOut = false;
+  state.radarPoint = []; state.rainMapOnly = false; state.radarOut = false; state.radarEst = false;
   // Germany edition with our server: the server itself says whether a place is inside the radar area ("covered"),
   // so skip the country lookup (an extra round trip to the geocoder of up to ~1 s before the radar could load)
   const cc = DE_ONLY && API_BASE ? "DE" : await countryOf(loc);
@@ -1559,6 +1559,8 @@ async function loadRadarPoint(loc) {
       // inside the radar area but no radar values: the source delivers nothing (12.11.: Europe hatched for 22 h
       // with only "model forecast" as explanation) - the source line says so
       state.radarOut = !state.radarPoint.length && d.covered !== false;
+      // no radar at this place: the values are the satellite estimate (own Europe picture) - the source line says so
+      state.radarEst = !!(d.series || []).length && d.series.every((r) => r.est);
     } catch { state.radarPoint = []; state.radarOut = navigator.onLine !== false; }
   }
   // Bright Sky only without our server: with it, places never go to third parties (privacy)
@@ -2237,7 +2239,7 @@ function updateSource() {
     : k === "srvsat" ? t("source.satRain")
     : k === "ca" ? (fc ? t("source.caForecast") : t("source.caMeasured"))
     : k === "us" ? t("source.noaaMeasured")
-    : k === "rtile" ? (EU_NAT ? t(shown.ref ? "source.natForecast" : "source.natMeasured")
+    : k === "rtile" ? (EU_NAT ? t(state.radarEst ? "source.satRain" : shown.ref ? "source.natForecast" : "source.natMeasured")
       : RAIN_EU ? (shown.ref ? t("source.operaForecast") : t(EU_AREA ? "source.operaMeasured" : "source.operaNoaaMeasured"))
       : DE_ONLY ? (shown.ref ? (FC_OWN ? t("source.ownForecast") : t("source.dwdForecast")) : t("source.dwdMeasured"))
       : shown.ref ? t("source.mixForecast") : t("source.mixMeasured"))
