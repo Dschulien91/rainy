@@ -381,8 +381,8 @@ class SwissRzc(Layer):
     # the nearest Swiss radar (Veneto, 1703 pairs): gauges 0.153 mm/h, ch 0.021 (wet at 9 % of the gauge readings
     # >= 0.3 mm/h), Italy's layer 0.080 - and ch pulled the picture down there (x0.38 of the gauges where both
     # counted, x0.73 from Italy's layer alone). 140-180 km: dry that day, unmeasured. So: full weight up to
-    # RANGE_KM - FEATHER_KM, nothing beyond RANGE_KM (check: scratch table "km from the nearest Swiss radar" in
-    # EVALUATION.md 8b; widen only when gauges out there say so).
+    # RANGE_KM - FEATHER_KM, nothing beyond RANGE_KM (check_swiss_range.py; widen only when gauges out there
+    # say so).
     RADARS = [(47.284, 8.512), (46.425, 6.099), (46.041, 8.833), (46.371, 7.487), (46.835, 9.794)]
     RANGE_KM = 160.0
 
