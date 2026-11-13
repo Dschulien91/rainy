@@ -17,8 +17,8 @@ down is skipped (OPERA alone there) and logged.
 Layers:
   it  Italy - Dipartimento della Protezione Civile, Radar-DPC: SRI (surface rain intensity, mm/h), 1 km, every
       5 min, GeoTIFF, transverse Mercator (lat0 42, lon0 12.5, WGS84), no account. NOT gauge-adjusted (their hourly
-      product SRT1 is exactly the sum of the SRI images T-60 .. T-5, measured 13.11.) and much too wet in light rain:
-      see ItalyDpc.damp().
+      product SRT1 is exactly the sum of the SRI images T-60 .. T-5, measured 13.11.) and 1.4-2.8 x too wet at the
+      gauges, most of all in light rain: see ItalyDpc.damp().
       Licence CC BY-SA ("citare la fonte Radar-DPC", derived works under the same licence).
       Used only over Italy and the seas around it (ItalyDpc.AREA): far from the Italian radars the product is much too
       wet - 13.11.2026, 33 Austrian gauges in Carinthia over 2.5 h: gauges 0.07 mm/h, OPERA 0.32, SRI 2.71 (wet at
@@ -289,13 +289,21 @@ class ItalyDpc(Layer):
     # the file is written ~7 min after its stamp, and timing() against OPERA is best at +5 (0.444/0.454/0.449 at
     # 0/+5/+10, slow rain).
     SHIFT_MS = STEP_MS
-    # damp(): 13.11.2026, 103 ARPA Veneto gauges x 4 hours (411 pairs, widespread steady rain, gauge mean 0.59 mm/h),
-    # hourly sums: SRI raw = 2.5 x the gauges (wet at 64 % of the gauge-dry hours; CSI at 0.2/1/3 mm/h 0.47/0.64/0.40),
-    # OPERA as the Europe instance shows it = 0.27 x (CSI 0.49/0.18/0.04), SRI x min(1, 0.25 r^0.4) = 1.15 x, CSI
-    # 0.68/0.71/0.51, mean error 0.34 instead of 0.91 mm/h. A flat x0.4 has the amount right but loses the heavy
-    # rain (CSI 0.59/0.71/0.39). One day and one kind of weather: refit with check_italy_gain.py when the daily
-    # gauge table (check_national_gauges.py, Italy) drifts.
-    DAMP_A, DAMP_B = 0.25, 0.4
+    # damp(): SRI raw reads far more than the rain gauges everywhere it was measured - 13.11.2026, hourly sums, 8 h:
+    # 835 pairs at ARPA Veneto gauges (steady light rain, gauge mean 0.40 mm/h): raw = 2.8 x the gauges; 676 pairs at
+    # ARPAE Emilia-Romagna gauges (heavy rain at the Apennines, 2.24 mm/h): raw = 1.44 x (other radars, other
+    # calibration - one curve cannot be right for both). OPERA as the Europe instance shows it: 0.24 x / 0.10 x.
+    # r * min(DAMP_C, DAMP_A r^DAMP_B) with (0.2, 0.8, 0.7) is the best of ~1900 curves for both regions together
+    # (check_italy_gain.py; also with a taper above 6-24 mm/h, which changed nothing): amount x1.01 (Veneto x1.40,
+    # Emilia x0.92), CSI at 0.2/1/3/8 mm per hour 0.67/0.72/0.62/0.25 (Veneto 0.51/0.59/0.42, Emilia 0.79/0.77/0.67/
+    # 0.25); raw 0.63/0.69/0.61/0.17, OPERA 0.44/0.09/0.02/0.00. The first fit (Veneto alone, 4 h: 0.25, 0.4, no cap)
+    # read 1-12 mm/h too low in Emilia (CSI at 3 mm 0.54) and passed everything above 32 mm/h unchanged without
+    # one measurement up there. Still too wet at the top on that day: hours with raw 8-16 mm/h gave 5.7 mm at the
+    # gauges (shown now 7.3), raw 16-32 gave 6.3 (shown 14.1, 14 pairs) - a taper x (12 / r)^0.5 above 12 mm/h has
+    # the same CSI and a smaller mean error and is the candidate if that repeats. Never measured so far: showers /
+    # thunderstorms (raw 5-min values above 38 mm/h did not occur) - refit with check_italy_gain.py on such a day
+    # and when the daily Italy tables drift.
+    DAMP_A, DAMP_B, DAMP_C = 0.2, 0.8, 0.7
 
     def newest(self):
         d = json.loads(self._get(f"{self.API}/findLastProductByType?type={self.PRODUCT}", timeout=30))
@@ -311,8 +319,8 @@ class ItalyDpc(Layer):
 
     @classmethod
     def damp(cls, r):
-        """SRI (mm/h) -> rain rate: light rain strongly reduced, unchanged from 32 mm/h on."""
-        return r * np.minimum(1.0, cls.DAMP_A * np.maximum(r, 1e-6) ** cls.DAMP_B)
+        """SRI (mm/h) -> rain rate: light rain strongly reduced (1 -> 0.2, 2 -> 0.7), x DAMP_C from 4.8 mm/h on."""
+        return r * np.minimum(cls.DAMP_C, cls.DAMP_A * np.maximum(r, 1e-6) ** cls.DAMP_B)
 
 
 def odim_grid(f):
