@@ -49,6 +49,10 @@ www.{$DOMAIN} {
 	handle_path /eu/* {
 		reverse_proxy api-eu:8771
 	}
+	# third instance: our own Europe picture from national radar data (beta) -> api-eun
+	handle_path /eun/* {
+		reverse_proxy api-eun:8771
+	}
 
 	# Weather model API; responses may be cached briefly by a CDN in front of this server.
 	handle_path /om/* {

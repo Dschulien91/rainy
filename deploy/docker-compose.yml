@@ -7,6 +7,7 @@ volumes:
   push-data:
   verify-log:
   eu-data:
+  eun-data:
 
 services:
   api:
@@ -65,6 +66,34 @@ services:
       - verify-log:/app/verify_log         # eugrid_*.jsonl + obs_eu/ next to the Germany logs
       - eu-data:/app/data
     healthcheck:                           # unhealthy when the OPERA data is older than 20 min (/api/ready)
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8771/api/ready', timeout=10)"]
+      interval: 2m
+      timeout: 15s
+      retries: 3
+
+  # Third instance (13.11.2026): our own Europe picture - OPERA with national radar products on top (server/national.py),
+  # same nowcast and verification as api-eu, switchable in the app (settings, area Europe). Served under /eun/.
+  # Its verification files go to verify_log/eun/ (same names as api-eu's, so the same scripts score both).
+  # No sunny, no weather-model shadow, no tile pre-rendering, at most 1.5 cores: the two public instances come first.
+  api-eun:
+    build: ../server
+    restart: always
+    mem_limit: 2800m
+    cpus: 1.5
+    environment:
+      PORT: "8771"
+      EDITION: eu
+      EU_NATIONAL: "1"
+      EU_MODEL_BLEND: "0"
+      SUNNY_DE: "0"
+      PRERENDER: "0"
+      VERIFY_LOG_DIR: /app/verify_log/eun
+      DATA_DIR: /app/data
+      MALLOC_ARENA_MAX: "2"
+    volumes:
+      - verify-log:/app/verify_log
+      - eun-data:/app/data
+    healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8771/api/ready', timeout=10)"]
       interval: 2m
       timeout: 15s

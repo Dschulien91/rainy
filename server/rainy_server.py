@@ -88,6 +88,7 @@ import fcverify
 import gauges
 import monitor
 import mosaic
+import national
 import palette  # stepped rain colours and the rain tile look (same table as the app)
 import ptype
 import recorder
@@ -101,7 +102,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v1.01"
+VERSION = "server-v1.02"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -771,6 +772,36 @@ class EuropeOpera(Region):
         return out
 
 
+class EuropeNational(EuropeOpera):
+    """Our own Europe picture (EU_NATIONAL=1, the third instance behind /eun/): OPERA with national radar products
+    laid on top (national.py) - same grid, nowcast, tiles and verification as the OPERA instance."""
+    credit = "EUMETNET OPERA + national radar services"
+
+    def __init__(self):
+        super().__init__()
+        self.started = time.time()
+        self.layers = national.start(self, log, UA)
+        self.used = {}  # ts -> names of the layers in that image (health)
+
+    def list_times(self):
+        times = super().list_times()
+        now = time.time() * 1000
+        # the layers load their last hour first: without them the first images would be composed from OPERA alone
+        if time.time() - self.started < 120 and not all(l.first_poll_done for l in self.layers):
+            return {}
+        alive = [l for l in self.layers if l.alive()]
+        return {t: (t, url) for t, url in times.items()
+                if now - t > national.WAIT_MIN * 60_000 or all(l.has(t) for l in alive)}
+
+    def load(self, src):
+        ts, url = src
+        rate = super().load(url)
+        self.used[ts] = [l.name for l in self.layers if l.blend(rate, ts)]
+        for t in [t for t in self.used if t < ts - 3 * HISTORY_MS]:
+            del self.used[t]
+        return rate
+
+
 class UsaNowcoast(Region):
     name, credit = "us", "NOAA"
     WMS = "https://nowcoast.noaa.gov/geoserver/observations/weather_radar/ows"
@@ -876,7 +907,8 @@ class SatelliteRain(Region):
 
 
 ll_to_3857 = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
-REGIONS = {r.name: r for r in (EuropeOpera(), UsaNowcoast(), SatelliteRain())}
+EU_NATIONAL = EDITION == "eu" and os.environ.get("EU_NATIONAL") == "1"
+REGIONS = {r.name: r for r in (EuropeNational() if EU_NATIONAL else EuropeOpera(), UsaNowcoast(), SatelliteRain())}
 
 
 def update_loop(region):
@@ -1068,6 +1100,11 @@ class Handler(BaseHTTPRequestHandler):
                 info["clouds"] = {"frames": len(CLOUDS.frames()[0]), "ref": CLOUDS.ref}
                 info["sunny"] = SUNNY.health()  # Germany edition's sunny source (DWD satellite)
                 info["de"] = {"frames": len(DE.frames()[0]), "ref": DE.ref, "vetoed_px": getattr(DE, "vetoed", 0)}
+                if EU_NATIONAL:  # per layer: its newest image, and in how many of the map's images it is
+                    eu_r = REGIONS["eu"]
+                    info["layers"] = {l.name: {"newest": l.newest_ts(), "alive": l.alive(),
+                                               "in_frames": sum(l.name in v for t, v in eu_r.used.items() if t in eu_r.obs)}
+                                      for l in eu_r.layers}
                 info["ptype"] = {"frames": len(PTYPE.grids), "ref": max(PTYPE.grids) if PTYPE.grids else None}
                 body = {"version": VERSION, "edition": EDITION, "regions": info, "openmeteo": openmeteo_available(), "rss_mb": rss_mb(),
                         "auth": AUTH.providers(),  # sign-in methods the app may offer
@@ -1311,17 +1348,20 @@ def main_eu():
     monitor.start(EDITION, VERSION, monitor_status)
     eu = REGIONS["eu"]
     threading.Thread(target=update_loop, args=(eu,), daemon=True).start()
-    eu.model = ModelRain(eu)
-    threading.Thread(target=model_loop, args=(eu.model,), daemon=True).start()
+    if os.environ.get("EU_MODEL_BLEND", "1") != "0":  # only the verification shadow "cells" needs the weather model
+        eu.model = ModelRain(eu)
+        threading.Thread(target=model_loop, args=(eu.model,), daemon=True).start()
     threading.Thread(target=EU_VERIFY.loop, daemon=True).start()
     # second benchmark: GeoSphere Austria's INCA nowcast against ours at the Austrian rain gauges (bench_inca.py)
     threading.Thread(target=bench_inca.IncaBench(fetch, log, eu, mosaic.merc).loop, daemon=True).start()
     if SUNNY_ON:
         threading.Thread(target=SUNNY.loop, daemon=True).start()
-    threading.Thread(target=mosaic.prerender_box_loop, args=(MOSAIC, log, mosaic.EUROPE_BOX, mosaic.EU_PRERENDER_ZOOMS),
-                     daemon=True).start()
+    if os.environ.get("PRERENDER", "1") != "0":  # the third instance draws its tiles on demand (CPU for the other two)
+        threading.Thread(target=mosaic.prerender_box_loop, args=(MOSAIC, log, mosaic.EUROPE_BOX, mosaic.EU_PRERENDER_ZOOMS),
+                         daemon=True).start()
     threading.Thread(target=memory_loop, daemon=True).start()
-    log(f"nowcast: {'pySTEPS S-PROG' if HAVE_PYSTEPS else 'simple (pySTEPS not installed)'}, Europe grid {EU_KM} km")
+    log(f"nowcast: {'pySTEPS S-PROG' if HAVE_PYSTEPS else 'simple (pySTEPS not installed)'}, Europe grid {EU_KM} km"
+        f"{', national layers: ' + ', '.join(l.name for l in eu.layers) if EU_NATIONAL else ''}")
     log(f"rainy {VERSION} (eu edition) on http://0.0.0.0:{PORT}")
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
 
