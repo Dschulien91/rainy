@@ -218,6 +218,21 @@ def compose(grid, layers, ts):
     return used
 
 
+def cover_at(layers, ts, col, row):
+    """Per point (host pixel col, row): bit k set where layer k counts with at least half its weight in the image
+    for the step ts (the gauge check splits its tables by this)."""
+    out = np.zeros(len(col), np.uint8)
+    for k, l in enumerate(layers):
+        f = l.get(ts)
+        if f is None:
+            continue
+        w = f[1]
+        r, c = row - l.win[0].start, col - l.win[1].start
+        ok = (r >= 0) & (r < w.shape[0]) & (c >= 0) & (c < w.shape[1])
+        out[ok] |= (w[r[ok], c[ok]] >= 0.5).astype(np.uint8) << k
+    return out
+
+
 class ItalyDpc(Layer):
     name, credit = "it", "Radar-DPC (Dipartimento della Protezione Civile, CC BY-SA)"
     API = "https://radar-api.protezionecivile.it"

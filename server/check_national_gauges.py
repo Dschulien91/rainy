@@ -3,7 +3,9 @@
 The third instance (EU_NATIONAL=1) notes for every image it composes, at every gauge of the lists below, what OPERA
 alone showed there and what the composed picture shows (5 x 5 cells around the gauge, mm/h):
 verify_log/eun/natobs/<ts>.npz with "opera" and "nat" in the order of natobs/stations.json (record(), called by
-rainy_server.EuropeNational.load). This script reads the gauges for those times and prints both against them:
+rainy_server.EuropeNational.load), and "who": which layers count at the gauge in that image (bit k = layer k of
+"layers"). This script reads the gauges for those times and prints both against them - per country, and per country
+and layer (so a layer that hurts outside its own country shows up, as Italy's did in Carinthia on 13.11.2026):
 
   docker exec -w /app deploy-api-eun-1 python check_national_gauges.py [--hours 24]
 
@@ -126,9 +128,10 @@ def at_gauges(grid, px):
     return out
 
 
-def record(ts, opera, nat):
+def record(ts, opera, nat, who=None, layers=()):
     os.makedirs(OBS_DIR, exist_ok=True)
-    np.savez_compressed(os.path.join(OBS_DIR, f"{int(ts)}.npz"), opera=opera.astype(np.float16), nat=nat.astype(np.float16))
+    extra = {} if who is None else {"who": who.astype(np.uint8), "layers": np.array(list(layers))}
+    np.savez_compressed(os.path.join(OBS_DIR, f"{int(ts)}.npz"), opera=opera.astype(np.float16), nat=nat.astype(np.float16), **extra)
     old = time.time() * 1000 - KEEP_DAYS * 86400_000
     for fp in glob.glob(os.path.join(OBS_DIR, "*.npz")):
         if int(os.path.basename(fp)[:-4]) < old:
@@ -299,20 +302,32 @@ def main():
           f"{datetime.fromtimestamp(t1 / 1000, timezone.utc):%d.%m. %H:%M} UTC, {len(st)} gauges")
     truth = {c: fn([s[1] for s in st if s[0] == c], t0 - 1200_000, t1 + 1200_000) for c, fn in GAUGES.items()}
     pairs = {c: ([], [], []) for c in GAUGES}
+    by_layer = {}  # (country, layer or "no layer") -> pairs
     for fp in files:
         t = int(os.path.basename(fp)[:-4])
         z = np.load(fp)
         o, n = z["opera"].astype(np.float32), z["nat"].astype(np.float32)
+        who = z["who"] if "who" in z.files else None
+        layers = [str(x) for x in z["layers"]] if who is not None else []
         for k, (c, sid, _, _) in enumerate(st[:len(o)]):  # files from before a list was added are shorter
             g = truth[c].get(sid, {})
             v = [g.get(t), g.get(t + 600_000)]
             if None in v or not np.isfinite(o[k]) or not np.isfinite(n[k]):
                 continue
-            pairs[c][0].append(np.mean(v) * 6)
-            pairs[c][1].append(o[k])
-            pairs[c][2].append(n[k])
+            row = (np.mean(v) * 6, o[k], n[k])
+            keys = [pairs[c]]
+            if who is not None:
+                names = [l for b, l in enumerate(layers) if who[k] >> b & 1] or ["no layer"]
+                keys += [by_layer.setdefault((c, l), ([], [], [])) for l in names]
+            for p in keys:
+                for a, x in zip(p, row):
+                    a.append(x)
     for c in GAUGES:
         table(NAMES[c], *pairs[c])
+    print("\n--- by layer (only where a layer counts with at least half its weight; 50 pairs or more) ---")
+    for (c, l), p in sorted(by_layer.items()):
+        if len(p[0]) >= 50 and l != "no layer":
+            table(f"{NAMES[c]} - layer {l}", *p)
 
 
 if __name__ == "__main__":
