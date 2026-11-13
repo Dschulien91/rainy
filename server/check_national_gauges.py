@@ -12,8 +12,9 @@ Gauges (independent of all radar data), each list open data without an account:
   at  GeoSphere Austria TAWES 10-minute gauges (CC BY) - the Swiss and German layers reach into Austria
   ch  MeteoSwiss automatic stations and precipitation stations, 10-minute sums (CC BY). Only the file "t_now" is
       read (today since 00:00 UTC; the next one holds the whole year), so Swiss pairs exist for today's images only.
-  it  ARPA Lombardia rain gauges (dati.lombardia.it, 10-minute or 1-minute sums, times in UTC+1) - Lombardy only;
-      more Italian regions are on the list (EVALUATION.md 8b).
+  it  ARPA Lombardia rain gauges (dati.lombardia.it, 10-minute or 1-minute sums, times in UTC+1)
+  iv  ARPA Veneto rain gauges (api.arpa.veneto.it, 5-minute sums of the last ~2.5 days per gauge, times in UTC+1)
+      More Italian regions are on the list (EVALUATION.md 8b).
 New lists are appended to stations.json (the order of the older files stays valid; they are shorter).
 Compared per image time T: the radar value at T against the gauge's mean rate over T-10 .. T+10 min (two 10-minute
 sums, as in check_opera_gauges.py). Printed per country: the rain amount ratio radar/gauge and CSI / POD / FAR for
@@ -41,8 +42,9 @@ TAWES = "https://dataset.api.hub.geosphere.at/v1"
 SWISS = "https://data.geo.admin.ch"
 SWISS_SETS = {"smn": "ogd-smn", "pre": "ogd-smn-precip"}  # id prefix -> collection (ch.meteoschweiz.<...>)
 LOMBARDY = "https://www.dati.lombardia.it/resource"
+VENETO = "https://api.arpa.veneto.it/REST/v1"
 NAMES = {"de": "Germany (DWD gauges)", "at": "Austria (TAWES gauges)", "ch": "Switzerland (MeteoSwiss gauges)",
-         "it": "Italy (ARPA Lombardia gauges)"}
+         "it": "Italy, Lombardy (ARPA Lombardia gauges)", "iv": "Italy, Veneto (ARPAV gauges)"}
 
 
 # ---------- gauge lists ----------
@@ -75,7 +77,12 @@ def _list_it(fetch):
             for s in json.loads(fetch(f"{LOMBARDY}/nf78-nj6b.json?{q}", timeout=60)) if s.get("lat") and s.get("lng")]
 
 
-LISTS = {"de": _list_de, "at": _list_at, "ch": _list_ch, "it": _list_it}
+def _list_iv(fetch):
+    d = json.loads(fetch(f"{VENETO}/meteo_meteogrammi?rete=MGRAMMI&coordcd=23&orario=0", timeout=60))["data"]
+    return [("iv", str(s["codseqst"]), float(s["latitudine"]), float(s["longitudine"])) for s in d]
+
+
+LISTS = {"de": _list_de, "at": _list_at, "ch": _list_ch, "it": _list_it, "iv": _list_iv}
 
 
 # ---------- recording (inside the server) ----------
@@ -242,7 +249,24 @@ def gauges_it(ids, since, until):
     return out
 
 
-GAUGES = {"de": gauges_de, "at": gauges_at, "ch": gauges_ch, "it": gauges_it}
+def gauge_iv(sid, since):
+    try:
+        rows = json.loads(_get(f"{VENETO}/meteo_meteogrammi_tabella?codseqst={sid}", timeout=60))["data"]
+    except Exception:
+        return {}
+    five = {}
+    for r in rows:
+        if r["tipo"] == "PREC" and r["valore"] not in (None, ""):
+            five[_ms(r["dataora"][:19], "%Y-%m-%dT%H:%M:%S") - 3600_000] = float(r["valore"])
+    return {t: v + five[t - 300_000] for t, v in five.items() if t % 600_000 == 0 and t - 300_000 in five and t >= since}
+
+
+def gauges_iv(ids, since, until):
+    with ThreadPoolExecutor(4) as ex:
+        return dict(zip(ids, ex.map(lambda s: gauge_iv(s, since), ids)))
+
+
+GAUGES = {"de": gauges_de, "at": gauges_at, "ch": gauges_ch, "it": gauges_it, "iv": gauges_iv}
 
 
 def table(name, g, o, n):

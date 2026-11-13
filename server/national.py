@@ -15,8 +15,10 @@ image for that step (the sources publish 5-12 min after the measurement), at mos
 down is skipped (OPERA alone there) and logged.
 
 Layers:
-  it  Italy - Dipartimento della Protezione Civile, Radar-DPC: SRI (surface rain intensity, mm/h, gauge-adjusted),
-      1 km, every 5 min, GeoTIFF, transverse Mercator (lat0 42, lon0 12.5, WGS84), no account.
+  it  Italy - Dipartimento della Protezione Civile, Radar-DPC: SRI (surface rain intensity, mm/h), 1 km, every
+      5 min, GeoTIFF, transverse Mercator (lat0 42, lon0 12.5, WGS84), no account. NOT gauge-adjusted (their hourly
+      product SRT1 is exactly the sum of the SRI images T-60 .. T-5, measured 13.11.) and much too wet in light rain:
+      see ItalyDpc.damp().
       Licence CC BY-SA ("citare la fonte Radar-DPC", derived works under the same licence).
       Used only over Italy and the seas around it (ItalyDpc.AREA): far from the Italian radars the product is much too
       wet - 13.11.2026, 33 Austrian gauges in Carinthia over 2.5 h: gauges 0.07 mm/h, OPERA 0.32, SRI 2.71 (wet at
@@ -236,11 +238,18 @@ class ItalyDpc(Layer):
             (18.30, 41.20), (18.95, 40.30), (19.20, 39.40), (19.60, 34.50), (11.50, 34.50), (11.50, 37.30),
             (10.20, 37.90), (8.00, 38.20), (7.30, 38.40), (7.30, 41.20), (8.60, 41.33), (9.26, 41.31), (9.60, 41.36),
             (9.75, 41.60), (9.75, 42.90), (9.30, 43.35), (8.50, 43.50), (7.60, 43.60)]
-    # timing() on 13.11. (twice, slow rain, so a flat curve): CSI against OPERA 0.43/0.44 unshifted, 0.44/0.45 with the
-    # image stamped 5 min earlier, 0.44/0.45 with 10 - and the file is written ~7 min after its stamp, which fits a
-    # stamp at the START of the 5-min scan (DWD, MeteoSwiss and OPERA stamp the end). To be re-checked on a day with
-    # fast-moving rain over Italy.
+    # The image stamped T is the scan T .. T+5 (DWD, MeteoSwiss and OPERA stamp the end): DPC's own hourly sum SRT1 at T
+    # is exactly the sum of the SRI images T-60 .. T-5 (13.11.: ratio 1.00, correlation 1.00 over 93 000 wet cells),
+    # the file is written ~7 min after its stamp, and timing() against OPERA is best at +5 (0.444/0.454/0.449 at
+    # 0/+5/+10, slow rain).
     SHIFT_MS = STEP_MS
+    # damp(): 13.11.2026, 103 ARPA Veneto gauges x 4 hours (411 pairs, widespread steady rain, gauge mean 0.59 mm/h),
+    # hourly sums: SRI raw = 2.5 x the gauges (wet at 64 % of the gauge-dry hours; CSI at 0.2/1/3 mm/h 0.47/0.64/0.40),
+    # OPERA as the Europe instance shows it = 0.27 x (CSI 0.49/0.18/0.04), SRI x min(1, 0.25 r^0.4) = 1.15 x, CSI
+    # 0.68/0.71/0.51, mean error 0.34 instead of 0.91 mm/h. A flat x0.4 has the amount right but loses the heavy
+    # rain (CSI 0.59/0.71/0.39). One day and one kind of weather: refit with check_italy_gain.py when the daily
+    # gauge table (check_national_gauges.py, Italy) drifts.
+    DAMP_A, DAMP_B = 0.25, 0.4
 
     def newest(self):
         d = json.loads(self._get(f"{self.API}/findLastProductByType?type={self.PRODUCT}", timeout=30))
@@ -252,7 +261,12 @@ class ItalyDpc(Layer):
         a = np.asarray(Image.open(io.BytesIO(self._get(d["url"], timeout=60))), np.float32)
         if a.shape != (self.NY, self.NX):
             raise ValueError(f"unexpected grid {a.shape}")
-        return np.where(np.isfinite(a) & (a >= 0), np.minimum(a, 300.0), -1.0).astype(np.float32)
+        return np.where(np.isfinite(a) & (a >= 0), self.damp(np.minimum(a, 300.0)), -1.0).astype(np.float32)
+
+    @classmethod
+    def damp(cls, r):
+        """SRI (mm/h) -> rain rate: light rain strongly reduced, unchanged from 32 mm/h on."""
+        return r * np.minimum(1.0, cls.DAMP_A * np.maximum(r, 1e-6) ** cls.DAMP_B)
 
 
 def odim_grid(f):
