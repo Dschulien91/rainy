@@ -102,7 +102,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v1.21"
+VERSION = "server-v1.22"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -730,9 +730,16 @@ class EuropeOpera(Region):
             with self.lock:
                 ref = self.ref
                 grids = [self.obs.get(ref)] + [self.fc.get(ref + m * 60_000) for m in cng.FC_LEADS]
+                # the same run's other forecasts, kept at 1 / RAW_DOWN: S-PROG alone, and with the model's new showers
+                more = {name: [d.get(ref + m * 60_000) for m in cng.FC_LEADS]
+                        for name, d in (("pure", getattr(self, "fc_pure", None)), ("cells", getattr(self, "fc_cells", None))) if d}
             if ref % 600_000 or any(g is None for g in grids):  # the gauges report every 10 minutes
                 return
-            cng.record_fc(ref, np.stack([cng.at_gauges(g, px) for g in grids]))
+            d = self.RAW_DOWN
+            small = (px[0] // d, px[1] // d, px[2])
+            cng.record_fc(ref, np.stack([cng.at_gauges(g, px) for g in grids]),
+                          {name: np.stack([cng.at_gauges(g, small, 1) for g in gs])
+                           for name, gs in more.items() if all(g is not None for g in gs)})
         except Exception as e:
             log(f"fcgauge failed: {e}")
 
@@ -1426,6 +1433,38 @@ def monitor_status():
             "sun_age": round((now - sun) / 60_000, 1) if sun else None}
 
 
+def gauge_archive_loop():
+    """Hourly: the last hours of all rain gauge networks into verify_log/gaugetruth (check_national_gauges.py) - the
+    sources keep hours to days, the evaluation needs weeks."""
+    import check_national_gauges as cng
+    time.sleep(240)
+    while True:
+        try:
+            st = cng.stations()
+            if st:
+                t0 = time.time()
+                n = cng.archive_truth(st)
+                log(f"gauge archive: {n} values of {len(st)} gauges, {time.time() - t0:.0f} s")
+        except Exception as e:
+            log(f"gauge archive failed: {e}")
+        time.sleep(3600)
+
+
+def tile_gap_loop():
+    """Every 10 minutes: the rain data tiles of all instances as the app loads them, scanned for time steps that
+    drop out (check_tile_gaps.py) -> verify_log/tile_gaps.log."""
+    import check_tile_gaps
+    time.sleep(420)
+    while True:
+        try:
+            lines = check_tile_gaps.scan(brief=True)
+            with open(os.path.join(os.environ.get("VERIFY_LOG_DIR", "."), "tile_gaps.log"), "a") as f:
+                f.write("\n".join(lines) + "\n")
+        except Exception as e:
+            log(f"tile gap scan failed: {e}")
+        time.sleep(600)
+
+
 def main_eu():
     """Europe test instance: OPERA + own nowcast (+ the model's new showers), sunny for Europe, their verification."""
     monitor.start(EDITION, VERSION, monitor_status)
@@ -1435,6 +1474,9 @@ def main_eu():
         eu.model = ModelRain(eu)
         threading.Thread(target=model_loop, args=(eu.model,), daemon=True).start()
     threading.Thread(target=EU_VERIFY.loop, daemon=True).start()
+    if not EU_NATIONAL:  # measurements that are needed once, not per instance: in the OPERA instance
+        threading.Thread(target=gauge_archive_loop, daemon=True).start()
+        threading.Thread(target=tile_gap_loop, daemon=True).start()
     # Where no radar reaches (Greece, W Turkey, east of Poland ...) the own picture drew the satellite rain estimate
     # (H SAF, ~30 min old, from cloud tops) faintly into the hatched area. User, 13.11.2026: it shows rain inside
     # the "no data" hatching and does not fit the radar picture next to it -> off (SAT_FILL=1 brings it back).

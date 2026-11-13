@@ -49,7 +49,11 @@ LOG_DIR = os.environ.get("VERIFY_LOG_DIR", os.path.join(os.path.dirname(os.path.
 OBS_DIR = os.path.join(LOG_DIR, "natobs")
 FC_DIR = os.path.join(LOG_DIR, "fcgauge")   # forecasts at the gauges, per run (check_forecast_gauges.py)
 FC_LEADS = (30, 60, 90, 120)                # minutes
-KEEP_DAYS = 4
+KEEP_DAYS = 14
+# the volume's root (the own-picture instance logs into <root>/eun): what both Europe instances share lives here
+ROOT = os.path.dirname(LOG_DIR.rstrip("/")) if os.path.basename(LOG_DIR.rstrip("/")) == "eun" else LOG_DIR
+TRUTH_DIR = os.path.join(ROOT, "gaugetruth")  # the gauges' 10-minute sums, one file per UTC day (archive_truth)
+TRUTH_DAYS = 60
 TAWES = "https://dataset.api.hub.geosphere.at/v1"
 SWISS = "https://data.geo.admin.ch"
 SWISS_SETS = {"smn": "ogd-smn", "pre": "ogd-smn-precip"}  # id prefix -> collection (ch.meteoschweiz.<...>)
@@ -171,11 +175,11 @@ def pixels(region, stations, merc):
     return col, row, ok
 
 
-def at_gauges(grid, px):
+def at_gauges(grid, px, half=2):
     col, row, ok = px
     out = np.full(len(col), np.nan, np.float32)
     for k in np.flatnonzero(ok):
-        c = grid[row[k] - 2:row[k] + 3, col[k] - 2:col[k] + 3]
+        c = grid[row[k] - half:row[k] + half + 1, col[k] - half:col[k] + half + 1]
         if (c >= 0).all():
             out[k] = c.mean()
     return out
@@ -194,11 +198,14 @@ def record(ts, opera, nat, who=None, layers=(), each=None, shadow=()):
             os.remove(fp)
 
 
-def record_fc(ref, values):
-    """values: (1 + len(FC_LEADS), gauges) - the picture at the run's time `ref`, then the forecast per lead."""
+def record_fc(ref, values, more=None):
+    """values: (1 + len(FC_LEADS), gauges) - the picture at the run's time `ref`, then the forecast per lead.
+    more: {variant: (len(FC_LEADS), gauges)} - other forecasts of the same run ("pure" = S-PROG alone, "cells" = with
+    the weather model's new showers)."""
     os.makedirs(FC_DIR, exist_ok=True)
-    np.savez_compressed(os.path.join(FC_DIR, f"{int(ref)}.npz"), fc=values.astype(np.float16))
-    old = time.time() * 1000 - 2 * KEEP_DAYS * 86400_000
+    np.savez_compressed(os.path.join(FC_DIR, f"{int(ref)}.npz"), fc=values.astype(np.float16),
+                        **{k: v.astype(np.float16) for k, v in (more or {}).items()})
+    old = time.time() * 1000 - KEEP_DAYS * 86400_000
     for fp in glob.glob(os.path.join(FC_DIR, "*.npz")):
         if int(os.path.basename(fp)[:-4]) < old:
             os.remove(fp)
@@ -375,6 +382,87 @@ GAUGES = {"de": gauges_de, "at": gauges_at, "ch": gauges_ch, "it": gauges_it, "i
           "ie": gauges_ie}
 
 
+# ---------- the gauge archive: the sources keep hours to days, a model is built on weeks ----------
+def stations():
+    """The gauge list both Europe instances use (kept by the own-picture instance)."""
+    try:
+        with open(os.path.join(ROOT, "eun", "natobs", "stations.json")) as f:
+            return [tuple(s) for s in json.load(f)]
+    except (OSError, ValueError):
+        return []
+
+
+def _day_file(day):
+    return os.path.join(TRUTH_DIR, time.strftime("%Y%m%d", time.gmtime(day * 86400)) + ".npz")
+
+
+def _day_load(day):
+    """{"country:id": float32[144]} (mm in the 10 minutes ending at 00:00, 00:10, ... UTC; NaN = not known)."""
+    try:
+        z = np.load(_day_file(day))
+        return dict(zip((str(x) for x in z["ids"]), z["mm"].astype(np.float32)))
+    except (OSError, ValueError, KeyError):
+        return {}
+
+
+def archive_truth(st, hours=6.0):
+    """Read the last hours of every gauge network and keep them (server loop, hourly, OPERA instance). Returns the
+    number of values now known for that time. A network that fails is skipped - the next hours read it again."""
+    now = int(time.time() * 1000)
+    since = now - int(hours * 3600_000)
+    days, n = {}, 0
+    for c, fn in GAUGES.items():
+        try:
+            got = fn([s[1] for s in st if s[0] == c], since, now)
+        except Exception as e:
+            print(f"  (gauge archive {c}: {e})")
+            continue
+        for sid, series in got.items():
+            for t, v in series.items():
+                if t % 600_000 == 0 and since <= t <= now and v is not None and np.isfinite(v):
+                    day = t // 86400_000
+                    if day not in days:
+                        days[day] = _day_load(day)
+                    row = days[day].setdefault(f"{c}:{sid}", np.full(144, np.nan, np.float32))
+                    row[(t % 86400_000) // 600_000] = v
+                    n += 1
+    os.makedirs(TRUTH_DIR, exist_ok=True)
+    for day, d in days.items():
+        if d:
+            ids = sorted(d)
+            tmp = _day_file(day) + ".tmp.npz"
+            np.savez_compressed(tmp, ids=np.array(ids), mm=np.stack([d[i] for i in ids]).astype(np.float32))
+            os.replace(tmp, _day_file(day))
+    old = time.time() - TRUTH_DAYS * 86400
+    for fp in glob.glob(os.path.join(TRUTH_DIR, "*.npz")):
+        if os.path.getmtime(fp) < old:
+            os.remove(fp)
+    return n
+
+
+def truth(st, since, until, live=True):
+    """{country: {gauge id: {ts: mm in the 10 minutes ending at ts}}} for the scoring scripts: the archive, and on
+    top of it (live) what the sources have right now - so old days stay scorable after the sources dropped them."""
+    out = {c: {} for c in GAUGES}
+    for day in range(int(since // 86400_000), int(until // 86400_000) + 1):
+        for key, row in _day_load(day).items():
+            c, sid = key.split(":", 1)
+            ser = out.setdefault(c, {}).setdefault(sid, {})
+            for k in np.flatnonzero(np.isfinite(row)):
+                t = day * 86400_000 + int(k) * 600_000
+                if since <= t <= until:
+                    ser[t] = float(row[k])
+    if live:
+        for c, fn in GAUGES.items():
+            ids = [s[1] for s in st if s[0] == c]
+            try:
+                for sid, series in fn(ids, since, until).items():
+                    out[c].setdefault(sid, {}).update(series)
+            except Exception as e:
+                print(f"  ({c} gauges, live: {e})")
+    return out
+
+
 def table(name, g, cols, ths=(0.1, 0.3, 1.0), unit="mm/h"):
     """cols: {label: values on the same pairs as g}. A column with gaps (a layer without data there) is scored on
     its own pairs (their number is printed). "x" = rain amount against the gauges (not printed when they are dry)."""
@@ -432,7 +520,7 @@ def main():
     t0, t1 = int(os.path.basename(files[0])[:-4]), int(os.path.basename(files[-1])[:-4])
     print(f"{len(files)} images {datetime.fromtimestamp(t0 / 1000, timezone.utc):%d.%m. %H:%M} - "
           f"{datetime.fromtimestamp(t1 / 1000, timezone.utc):%d.%m. %H:%M} UTC, {len(st)} gauges")
-    truth = {c: fn([s[1] for s in st if s[0] == c], t0 - 1200_000, t1 + 1200_000) for c, fn in GAUGES.items()}
+    truth_all = truth(st, t0 - 1200_000, t1 + 1200_000, live="--archive" not in sys.argv)
     # (country, the layers that count at the gauge) -> rows (gauge, time, gauge mm/h, OPERA, own, each of those layers alone)
     rows = {}
     shadows = {}  # (country, shadow layer) -> rows (gauge, time, gauge mm/h, OPERA, own, the shadow alone)
@@ -445,7 +533,7 @@ def main():
         each = z["each"].astype(np.float32) if "each" in z.files else None  # since server-v1.13
         shadow = {layers.index(str(x)) for x in z["shadow"]} if "shadow" in z.files else set()  # since server-v1.14
         for k, (c, sid, _, _) in enumerate(st[:len(o)]):  # files from before a list was added are shorter
-            g = truth[c].get(sid, {})
+            g = truth_all.get(c, {}).get(sid, {})
             v = [g.get(t), g.get(t + 600_000)]
             if None in v or not np.isfinite(o[k]) or not np.isfinite(n[k]):
                 continue
