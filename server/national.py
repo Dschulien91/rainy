@@ -238,10 +238,10 @@ class GermanyRv(Layer):
 
     def load(self, ts):
         with self._analysis(ts) as f:
-            w = f["dataset1/data1/what"].attrs
+            w = {k: float(f["dataset1/data1/what"].attrs[k]) for k in ("gain", "offset", "nodata")}
             raw = f["dataset1/data1/data"][:]
         nod = raw == w["nodata"]
-        mm5 = mosaic.despeckle(np.where(nod, 0.0, np.maximum(raw * float(w["gain"]) + float(w["offset"]), 0.0)).astype(np.float32))
+        mm5 = mosaic.despeckle(np.where(nod, 0.0, np.maximum(raw * w["gain"] + w["offset"], 0.0)).astype(np.float32))
         return np.where(nod, -1.0, mm5 * 12.0 * self.GAIN).astype(np.float32)
 
 
