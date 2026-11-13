@@ -5,7 +5,7 @@ alone showed there and what the composed picture shows (5 x 5 cells around the g
 verify_log/eun/natobs/<ts>.npz with "opera" and "nat" in the order of natobs/stations.json (record(), called by
 rainy_server.EuropeNational.load). This script reads the gauges for those times and prints both against them:
 
-  docker exec -e VERIFY_LOG_DIR=/app/verify_log/eun deploy-api-1 python check_national_gauges.py [--hours 24]
+  docker exec -w /app deploy-api-eun-1 python check_national_gauges.py [--hours 24]
 
 Gauges (independent of all radar data):
   de  DWD 10-minute gauges (check_rain_gauges.stations(), one per ~25 km cell), open data
@@ -92,10 +92,39 @@ def _get(url, timeout=120):
         return r.read()
 
 
-def gauges_de(ids, since):
+def gauge_de(sid, since):
+    """{ts: mm in the 10 min ending at ts}. As check_rain_gauges.gauge, but reads only the rows since `since` (that one
+    parses ~500 days per gauge: 6 CPU-minutes for 300 gauges) and the "recent" file only when `since` is before today."""
+    import io
+    import zipfile
     import check_rain_gauges as crg
+    stamp = time.strftime("%Y%m%d%H%M", time.gmtime(since / 1000))
+    today = time.strftime("%Y%m%d", time.gmtime()) + "0000"
+    vals = {}
+    for kind, name in (("recent", "akt"), ("now", "now")):
+        if kind == "recent" and stamp >= today:
+            continue
+        try:
+            z = zipfile.ZipFile(io.BytesIO(crg.get(f"{crg.CDC}/{kind}/10minutenwerte_nieder_{sid}_{name}.zip")))
+        except Exception:
+            continue
+        rows = z.read(z.namelist()[0]).decode("latin-1").splitlines()
+        k = [h.strip() for h in rows[0].split(";")].index("RWS_10")
+        for r in reversed(rows[1:]):
+            q = r.split(";")
+            if len(q) <= k:
+                continue
+            d = q[1].strip()
+            if d < stamp:
+                break
+            if float(q[k]) > -999:
+                vals[int(datetime.strptime(d, "%Y%m%d%H%M").replace(tzinfo=timezone.utc).timestamp() * 1000)] = float(q[k])
+    return vals
+
+
+def gauges_de(ids, since):
     with ThreadPoolExecutor(8) as ex:
-        return dict(zip(ids, ex.map(lambda s: crg.gauge(s, since), ids)))
+        return dict(zip(ids, ex.map(lambda s: gauge_de(s, since), ids)))
 
 
 def gauges_at(ids, since, until):
