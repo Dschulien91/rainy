@@ -30,44 +30,51 @@ NO_ROW_S = 15 * 60
 RAIN_MAX_MIN, SUN_MAX_MIN = 25, 50
 STARTS_MAX, STARTS_WINDOW_S = 3, 30 * 60
 AGAIN_S = 6 * 3600
-NAMES = {"de": "Deutschland", "eu": "Europa"}
+NAMES = {"de": "Deutschland", "eu": "Europa", "eun": "Europa (eigenes Modell)"}
+SUBDIRS = {"eun": "eun"}  # the third instance writes its verify_log into this subfolder (edition "eu" in its rows)
 
 
-def _rows(name, days=2):
+def _rows(name, days=2, sub=None):
     out = []
-    for path in sorted(glob.glob(os.path.join(monitor.LOG_DIR, f"{name}_*.jsonl")))[-days:]:
+    for path in sorted(glob.glob(os.path.join(monitor.LOG_DIR, sub or "", f"{name}_*.jsonl")))[-days:]:
         try:
             with open(path) as f:
                 for line in f:
                     try:
-                        out.append(json.loads(line))
+                        r = json.loads(line)
                     except ValueError:
-                        pass
+                        continue
+                    if sub:
+                        r["edition"] = next(k for k, v in SUBDIRS.items() if v == sub)
+                    out.append(r)
         except OSError:
             pass
     return out
 
 
-def problems(now=None, editions=("de", "eu")):
+def problems(now=None, editions=("de", "eu", "eun")):
     """{key: German text} of what is wrong right now."""
     now = now or time.time()
     out = {}
     last = {}
-    for r in _rows("health"):
+    for r in _rows("health") + [r for sub in SUBDIRS.values() for r in _rows("health", sub=sub)]:
         last[r.get("edition")] = r
     for ed in editions:
         name, r = NAMES[ed], last.get(ed)
         if r is None or now - r["ts"] / 1000 > NO_ROW_S:
             out[f"{ed}:down"] = f"{name}: Server meldet sich nicht"
             continue
-        for key, label, limit in (("rain_age", "Regenradar", RAIN_MAX_MIN), ("sun_age", "sunny", SUN_MAX_MIN)):
+        for key, label, limit in (("rain_age", "Regenradar", RAIN_MAX_MIN + (10 if ed == "eun" else 0)),
+                                  ("sun_age", "sunny", SUN_MAX_MIN)):
+            if ed == "eun" and key == "sun_age":  # the third instance has no sunny
+                continue
             age = r.get(key)
             if age is None:
                 out[f"{ed}:{key}"] = f"{name}: {label} hat keine Bilder"
             elif age > limit:
                 out[f"{ed}:{key}"] = f"{name}: {label} seit {int(age)} Min. ohne neues Bild"
     starts = {}
-    for r in _rows("starts"):
+    for r in _rows("starts") + [r for sub in SUBDIRS.values() for r in _rows("starts", sub=sub)]:
         if now - r["ts"] / 1000 < STARTS_WINDOW_S:
             starts[r.get("edition")] = starts.get(r.get("edition"), 0) + 1
     for ed, n in starts.items():

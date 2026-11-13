@@ -18,18 +18,26 @@ Layers:
   it  Italy - Dipartimento della Protezione Civile, Radar-DPC: SRI (surface rain intensity, mm/h, gauge-adjusted),
       1 km, every 5 min, GeoTIFF, transverse Mercator (lat0 42, lon0 12.5, WGS84), no account.
       Licence CC BY-SA ("citare la fonte Radar-DPC", derived works under the same licence).
+  de  Germany - Deutscher Wetterdienst, open data RV composite: the analysis of each 5-min run (mm per 5 min, 1 km,
+      polar stereographic, ODIM HDF5 in a tar with the 24 forecast steps), x GAIN 1.5 as in the Germany edition
+      (measured against ~300 DWD gauges, mosaic.GermanyDwd.GAIN_RV). Published ~5 min after the measurement.
 """
 import io
 import json
+import re
+import tarfile
 import threading
 import time
 import urllib.request
 from datetime import datetime, timezone
 
 import cv2
+import h5py
 import numpy as np
 from PIL import Image
 from pyproj import Transformer
+
+import mosaic
 
 STEP_MS = 5 * 60_000
 KEEP_MS = 80 * 60_000
@@ -41,6 +49,7 @@ NEAR_MS = 10 * 60_000  # without the exact image: the nearest one within this di
 
 class Layer:
     name, credit = "", ""
+    SHIFT_MS = 0        # an image stamped T belongs to the host's time step T + SHIFT_MS (see timing())
     PROJ = ""           # proj string of the product's grid
     X0, Y1, CELL, NX, NY = 0.0, 0.0, 1000.0, 0, 0   # top-left corner, cell size (m), size
 
@@ -50,7 +59,11 @@ class Layer:
         self.frames = {}        # ts -> (rate on the host window, float16, < 0 = no data; weight float16)
         self.first_poll_done = False
         self.failed = 0.0
+        self.geometry()
         self._window()
+
+    def geometry(self):
+        """Products that describe their own grid set PROJ, X0, Y1, CELL, NX, NY here (from a first file)."""
 
     # ---------- geometry ----------
     def _window(self):
@@ -152,10 +165,11 @@ class Layer:
 
     def has(self, ts):
         with self.lock:
-            return self.frames.get(ts) is not None
+            return self.frames.get(ts - self.SHIFT_MS) is not None
 
     def get(self, ts):
         """(rate, weight) of the image at ts, else of the nearest one within NEAR_MS, else None."""
+        ts -= self.SHIFT_MS
         with self.lock:
             ok = [t for t, f in self.frames.items() if f is not None and abs(t - ts) <= NEAR_MS]
             return self.frames[min(ok, key=lambda t: abs(t - ts))] if ok else None
@@ -192,7 +206,70 @@ class ItalyDpc(Layer):
         return np.where(np.isfinite(a) & (a >= 0), np.minimum(a, 300.0), -1.0).astype(np.float32)
 
 
-LAYERS = (ItalyDpc,)
+def odim_grid(f):
+    """(proj string, x0, y1, cell, nx, ny) of an ODIM HDF5 composite from its /where group."""
+    w = f["where"].attrs
+    proj = w["projdef"].decode() if isinstance(w["projdef"], bytes) else str(w["projdef"])
+    x, y = Transformer.from_crs("EPSG:4326", proj, always_xy=True).transform(float(w["UL_lon"]), float(w["UL_lat"]))
+    return proj, float(x), float(y), float(w["xscale"]), int(w["xsize"]), int(w["ysize"])
+
+
+class GermanyRv(Layer):
+    name, credit = "de", "Deutscher Wetterdienst (open data)"
+    RV = "https://opendata.dwd.de/weather/radar/composite/rv/"
+    GAIN = 1.5
+
+    def _runs(self):
+        names = re.findall(r"composite_rv_(\d{8}_\d{4})\.tar", self._get(self.RV, timeout=60).decode("latin-1"))
+        return sorted({int(datetime.strptime(n, "%Y%m%d_%H%M").replace(tzinfo=timezone.utc).timestamp() * 1000) for n in names})
+
+    def _analysis(self, ts):
+        name = datetime.fromtimestamp(ts / 1000, timezone.utc).strftime("composite_rv_%Y%m%d_%H%M.tar")
+        with tarfile.open(fileobj=io.BytesIO(self._get(self.RV + name, timeout=120))) as tar:
+            m = next(m for m in tar.getmembers() if m.name.rsplit("_", 1)[1].startswith("000"))
+            return h5py.File(io.BytesIO(tar.extractfile(m).read()), "r")
+
+    def geometry(self):
+        with self._analysis(self._runs()[-1]) as f:
+            self.PROJ, self.X0, self.Y1, self.CELL, self.NX, self.NY = odim_grid(f)
+
+    def newest(self):
+        return self._runs()[-1]
+
+    def load(self, ts):
+        with self._analysis(ts) as f:
+            w = f["dataset1/data1/what"].attrs
+            raw = f["dataset1/data1/data"][:]
+        nod = raw == w["nodata"]
+        mm5 = mosaic.despeckle(np.where(nod, 0.0, np.maximum(raw * float(w["gain"]) + float(w["offset"]), 0.0)).astype(np.float32))
+        return np.where(nod, -1.0, mm5 * 12.0 * self.GAIN).astype(np.float32)
+
+
+LAYERS = (ItalyDpc, GermanyRv)
+
+
+def timing(host, layer, shifts=(-10, -5, 0, 5, 10)):
+    """How well the layer's wet area matches the host's own source (OPERA alone) for each time shift in minutes:
+    {shift: mean CSI of "wet >= 0.3 mm/h" over the host's images}. The best shift says which of the layer's time
+    stamps belongs to which host step (the services stamp the start or the end of the measurement)."""
+    base = super(type(host), host)
+    times = base.list_times()
+    out = {}
+    grids = {t: base.load(times[t])[layer.win] for t in sorted(times)[-8:]}
+    for sh in shifts:
+        scores = []
+        for t, g in grids.items():
+            with layer.lock:
+                f = layer.frames.get(t - sh * 60_000)
+            if f is None:
+                continue
+            rate, w = (a.astype(np.float32) for a in f)
+            both = (w >= 1) & (g >= 0)
+            a, b = (rate >= 0.3) & both, (g >= 0.3) & both
+            if (a | b).sum() > 200:
+                scores.append((a & b).sum() / (a | b).sum())
+        out[sh] = round(float(np.mean(scores)), 3) if scores else None
+    return out
 
 
 def start(host, log, ua):
