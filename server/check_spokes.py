@@ -8,8 +8,8 @@ spokes.py next to it:
   for f in spokes.py opera_radars.json check_spokes.py; do docker cp /opt/rainy/server/$f deploy-api-eu-1:/tmp/t/; done
   docker exec -e PYTHONPATH=/tmp/t:/app -w /app deploy-api-eu-1 python /tmp/t/check_spokes.py [images=13]
 
-The running third instance reports the lines of its newest image in /eun/api/health -> regions.spokes and logs
-"spoke removed: ..." (once an hour per radar)."""
+The running Europe instances (OPERA and own picture, both filter since server-v1.19) report the lines of their newest
+image in /eu/api/health and /eun/api/health -> regions.spokes and log "spoke removed: ..." (once an hour per radar)."""
 import sys
 import time
 
@@ -18,6 +18,7 @@ import numpy as np
 import rainy_server as rs
 import spokes
 
+rs.EuropeOpera.DESPOKE = False  # the raw images: the filter runs here by hand
 eu = rs.REGIONS["eu"]
 times = eu.list_times()
 n = int(sys.argv[1]) if len(sys.argv) > 1 else 13
