@@ -210,6 +210,11 @@ class ItalyDpc(Layer):
     PROJ = "+proj=tmerc +lat_0=42 +lon_0=12.5 +k=1 +x_0=0 +y_0=0 +ellps=WGS84 +units=m"
     X0, Y1, CELL, NX, NY = -600000.0, 650000.0, 1000.0, 1200, 1400
     PRODUCT = "SRI"
+    # timing() on 13.11. (twice, slow rain, so a flat curve): CSI against OPERA 0.43/0.44 unshifted, 0.44/0.45 with the
+    # image stamped 5 min earlier, 0.44/0.45 with 10 - and the file is written ~7 min after its stamp, which fits a
+    # stamp at the START of the 5-min scan (DWD, MeteoSwiss and OPERA stamp the end). To be re-checked on a day with
+    # fast-moving rain over Italy.
+    SHIFT_MS = STEP_MS
 
     def newest(self):
         d = json.loads(self._get(f"{self.API}/findLastProductByType?type={self.PRODUCT}", timeout=30))
