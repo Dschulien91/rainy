@@ -18,6 +18,9 @@ Layers:
   it  Italy - Dipartimento della Protezione Civile, Radar-DPC: SRI (surface rain intensity, mm/h, gauge-adjusted),
       1 km, every 5 min, GeoTIFF, transverse Mercator (lat0 42, lon0 12.5, WGS84), no account.
       Licence CC BY-SA ("citare la fonte Radar-DPC", derived works under the same licence).
+      Used only over Italy and the seas around it (ItalyDpc.AREA): far from the Italian radars the product is much too
+      wet - 13.11.2026, 33 Austrian gauges in Carinthia over 2.5 h: gauges 0.07 mm/h, OPERA 0.32, SRI 2.71 (wet at
+      460 of 475 gauge readings, the gauges at 35); Klagenfurt 3.9 mm/h at 20 dBZ maximum reflectivity.
   de  Germany - Deutscher Wetterdienst, open data RV composite: the analysis of each 5-min run (mm per 5 min, 1 km,
       polar stereographic, ODIM HDF5 in a tar with the 24 forecast steps), x GAIN 1.5 as in the Germany edition
       (measured against ~300 DWD gauges, mosaic.GermanyDwd.GAIN_RV). Published ~5 min after the measurement.
@@ -38,7 +41,7 @@ from datetime import datetime, timedelta, timezone
 import cv2
 import h5py
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw
 from pyproj import Transformer
 
 import mosaic
@@ -56,6 +59,7 @@ class Layer:
     SHIFT_MS = 0        # an image stamped T belongs to the host's time step T + SHIFT_MS (see timing())
     PROJ = ""           # proj string of the product's grid
     X0, Y1, CELL, NX, NY = 0.0, 0.0, 1000.0, 0, 0   # top-left corner, cell size (m), size
+    AREA = None         # [(lon, lat), ...]: the product is used only inside this polygon (None: everywhere it has data)
 
     def __init__(self, host, log, ua):
         self.host, self.log, self.ua = host, log, ua
@@ -88,10 +92,18 @@ class Layer:
         self.map_col = ((np.asarray(x) - self.X0) / self.CELL - 0.5).astype(np.float32)
         self.map_row = ((self.Y1 - np.asarray(y)) / self.CELL - 0.5).astype(np.float32)
         self.k = max(1, int(round(h.KM_PER_PX * 1000 / self.CELL)))  # product pixels per host pixel
+        self.area = None
+        if self.AREA:
+            x, y = Transformer.from_crs("EPSG:4326", self.PROJ, always_xy=True).transform(*zip(*self.AREA))
+            im = Image.new("L", (self.NX, self.NY), 0)
+            ImageDraw.Draw(im).polygon([((a - self.X0) / self.CELL, (self.Y1 - b) / self.CELL) for a, b in zip(x, y)], fill=1)
+            self.area = np.asarray(im).astype(bool)
 
     def to_host(self, rate):
         """Product grid (mm/h, < 0 = no data) -> (rate, weight) on the host window. Mean over the product pixels of a
         host cell (box filter before the bilinear lookup), no data where less than half of them have data."""
+        if self.area is not None:
+            rate = np.where(self.area, rate, -1.0)
         ok = (rate >= 0).astype(np.float32)
         val = np.where(rate >= 0, rate, 0).astype(np.float32)
         if self.k > 1:
@@ -210,6 +222,20 @@ class ItalyDpc(Layer):
     PROJ = "+proj=tmerc +lat_0=42 +lon_0=12.5 +k=1 +x_0=0 +y_0=0 +ellps=WGS84 +units=m"
     X0, Y1, CELL, NX, NY = -600000.0, 650000.0, 1000.0, 1200, 1400
     PRODUCT = "SRI"
+    # Italy's borders (to ~10 km, the layer fades out over FEATHER_KM inside them anyway) and the seas around it up to
+    # about the middle towards the neighbours; Corsica is left to OPERA (French radar).
+    AREA = [(7.53, 43.78), (7.70, 44.10), (7.20, 44.20), (6.90, 44.40), (6.98, 44.68), (6.72, 44.93), (6.63, 45.11),
+            (6.90, 45.22), (7.10, 45.45), (6.85, 45.68), (6.86, 45.83), (7.04, 45.92), (7.17, 45.87), (7.66, 45.98),
+            (7.87, 45.93), (8.12, 46.22), (8.38, 46.45), (8.45, 46.25), (8.60, 46.12), (8.85, 46.00), (8.95, 45.83),
+            (9.08, 45.90), (9.02, 46.05), (9.17, 46.17), (9.28, 46.50), (9.45, 46.50), (9.58, 46.29), (9.95, 46.38),
+            (10.10, 46.23), (10.17, 46.40), (10.08, 46.60), (10.45, 46.55), (10.47, 46.86), (10.75, 46.80),
+            (11.05, 46.80), (11.15, 46.95), (11.50, 47.00), (12.13, 47.09), (12.22, 46.88), (12.40, 46.70),
+            (12.75, 46.64), (13.20, 46.59), (13.72, 46.52), (13.66, 46.44), (13.40, 46.32), (13.48, 46.20),
+            (13.52, 46.05), (13.64, 45.95), (13.60, 45.80), (13.80, 45.73), (13.92, 45.63), (13.72, 45.60),
+            (13.40, 45.50), (13.05, 45.10), (13.30, 44.50), (14.30, 43.60), (15.40, 43.00), (17.00, 42.10),
+            (18.30, 41.20), (18.95, 40.30), (19.20, 39.40), (19.60, 34.50), (11.50, 34.50), (11.50, 37.30),
+            (10.20, 37.90), (8.00, 38.20), (7.30, 38.40), (7.30, 41.20), (8.60, 41.33), (9.26, 41.31), (9.60, 41.36),
+            (9.75, 41.60), (9.75, 42.90), (9.30, 43.35), (8.50, 43.50), (7.60, 43.60)]
     # timing() on 13.11. (twice, slow rain, so a flat curve): CSI against OPERA 0.43/0.44 unshifted, 0.44/0.45 with the
     # image stamped 5 min earlier, 0.44/0.45 with 10 - and the file is written ~7 min after its stamp, which fits a
     # stamp at the START of the 5-min scan (DWD, MeteoSwiss and OPERA stamp the end). To be re-checked on a day with
