@@ -15,10 +15,9 @@ import time
 import numpy as np
 
 import check_national_gauges as cng
-
-HOURS = int(sys.argv[1]) if len(sys.argv) > 1 else 12
 import national
 
+HOURS = int(sys.argv[1]) if len(sys.argv) > 1 else 12
 RADARS = national.SwissRzc.RADARS
 st = [tuple(s) for s in json.load(open(os.path.join(cng.OBS_DIR, "stations.json")))]
 since = time.time() * 1000 - HOURS * 3600_000
