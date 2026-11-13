@@ -29,7 +29,8 @@ Layers:
   ch  Switzerland - MeteoSwiss open data (CC BY), product RZC: rain rate (mm/h) from the five Swiss radars with
       MeteoSwiss' own corrections for the Alps, 1 km, every 5 min, ODIM HDF5, Swiss oblique Mercator; one STAC item
       per day (data.geo.admin.ch, collection ch.meteoschweiz.ogd-radar-precip), files rzcYYDDDHHMM??.001.h5 stamped
-      with the END of the 5 minutes, published ~4 min later.
+      with the END of the 5 minutes, published ~4 min later. Used only within 160 km of a Swiss radar
+      (SwissRzc.RANGE_KM): farther out it misses most of the rain.
 
 Shadow layers (Layer.SHADOW): a candidate that is loaded and noted at the rain gauges (check_national_gauges.py,
 tables "shadow <name>") but NOT laid into the picture. Every new country starts like this - Italy's product looked
@@ -71,6 +72,7 @@ class Layer:
     PROJ = ""           # proj string of the product's grid
     X0, Y1, CELL, NX, NY = 0.0, 0.0, 1000.0, 0, 0   # top-left corner, cell size (m), size
     AREA = None         # [(lon, lat), ...]: the product is used only inside this polygon (None: everywhere it has data)
+    RADARS, RANGE_KM = None, 0.0   # [(lat, lon), ...]: the product is used only within RANGE_KM of one of its radars
     SHADOW = False      # True: loaded and noted at the gauges, not laid into the picture (a candidate under test)
 
     def __init__(self, host, log, ua):
@@ -110,6 +112,15 @@ class Layer:
             im = Image.new("L", (self.NX, self.NY), 0)
             ImageDraw.Draw(im).polygon([((a - self.X0) / self.CELL, (self.Y1 - b) / self.CELL) for a, b in zip(x, y)], fill=1)
             self.area = np.asarray(im).astype(bool)
+        if self.RADARS:
+            x, y = Transformer.from_crs("EPSG:4326", self.PROJ, always_xy=True).transform(
+                [b for _, b in self.RADARS], [a for a, _ in self.RADARS])
+            xs = self.X0 + (np.arange(self.NX) + 0.5) * self.CELL
+            ys = self.Y1 - (np.arange(self.NY) + 0.5) * self.CELL
+            near = np.zeros((self.NY, self.NX), bool)
+            for a, b in zip(x, y):
+                near |= (xs[None, :] - a) ** 2 + (ys[:, None] - b) ** 2 <= (self.RANGE_KM * 1000.0) ** 2
+            self.area = near if self.area is None else self.area & near
 
     def to_host(self, rate):
         """Product grid (mm/h, < 0 = no data) -> (rate, weight) on the host window. Mean over the product pixels of a
@@ -365,6 +376,15 @@ class GermanyRv(Layer):
 class SwissRzc(Layer):
     name, credit = "ch", "MeteoSwiss (open data, CC BY)"
     STAC = "https://data.geo.admin.ch/api/stac/v1/collections/ch.meteoschweiz.ogd-radar-precip/items"
+    # The product reaches ~250 km beyond the radars (Albis, La Dole, Monte Lema, Plaine Morte, Weissfluhgipfel), but
+    # far out and behind the Alps the beams pass above the rain: 13.11.2026, 6.5 h, Italian gauges 180-220 km from
+    # the nearest Swiss radar (Veneto, 1703 pairs): gauges 0.153 mm/h, ch 0.021 (wet at 9 % of the gauge readings
+    # >= 0.3 mm/h), Italy's layer 0.080 - and ch pulled the picture down there (x0.38 of the gauges where both
+    # counted, x0.73 from Italy's layer alone). 140-180 km: dry that day, unmeasured. So: full weight up to
+    # RANGE_KM - FEATHER_KM, nothing beyond RANGE_KM (check: scratch table "km from the nearest Swiss radar" in
+    # EVALUATION.md 8b; widen only when gauges out there say so).
+    RADARS = [(47.284, 8.512), (46.425, 6.099), (46.041, 8.833), (46.371, 7.487), (46.835, 9.794)]
+    RANGE_KM = 160.0
 
     def __init__(self, *a):
         self.files, self.listed = {}, 0.0   # ts -> url
