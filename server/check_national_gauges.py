@@ -5,7 +5,8 @@ alone showed there and what the composed picture shows (5 x 5 cells around the g
 verify_log/eun/natobs/<ts>.npz with "opera" and "nat" in the order of natobs/stations.json (record(), called by
 rainy_server.EuropeNational.load), and "who": which layers count at the gauge in that image (bit k = layer k of
 "layers"). This script reads the gauges for those times and prints both against them - per country, and per country
-and layer (so a layer that hurts outside its own country shows up, as Italy's did in Carinthia on 13.11.2026):
+and combination of layers, e.g. "it" against "it+ch" (so a layer that hurts outside its own country shows up, as
+Italy's did in Carinthia on 13.11.2026):
 
   docker exec -w /app deploy-api-eun-1 python check_national_gauges.py [--hours 24]
 
@@ -317,17 +318,18 @@ def main():
             row = (np.mean(v) * 6, o[k], n[k])
             keys = [pairs[c]]
             if who is not None:
-                names = [l for b, l in enumerate(layers) if who[k] >> b & 1] or ["no layer"]
-                keys += [by_layer.setdefault((c, l), ([], [], [])) for l in names]
+                names = "+".join(l for b, l in enumerate(layers) if who[k] >> b & 1)
+                if names:
+                    keys.append(by_layer.setdefault((c, names), ([], [], [])))
             for p in keys:
                 for a, x in zip(p, row):
                     a.append(x)
     for c in GAUGES:
         table(NAMES[c], *pairs[c])
-    print("\n--- by layer (only where a layer counts with at least half its weight; 50 pairs or more) ---")
+    print("\n--- by the layers that count at the gauge (at least half their weight; 50 pairs or more) ---")
     for (c, l), p in sorted(by_layer.items()):
-        if len(p[0]) >= 50 and l != "no layer":
-            table(f"{NAMES[c]} - layer {l}", *p)
+        if len(p[0]) >= 50:
+            table(f"{NAMES[c]} - {l}", *p)
 
 
 if __name__ == "__main__":
