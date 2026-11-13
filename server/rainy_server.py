@@ -102,7 +102,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v1.14"
+VERSION = "server-v1.15"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -783,6 +783,10 @@ class EuropeNational(EuropeOpera):
         self.layers = national.start(self, log, UA)
         self.used = {}  # ts -> names of the layers in that image (health)
         self.gauge_px = None  # gauges at which OPERA alone and the composed picture are noted (check_national_gauges.py)
+        import spokes
+        self.spokes = spokes.SpokeFilter(self.KM_PER_PX, spokes.sites(self, mosaic.merc))
+        self.spoke_log = {}  # radar code -> when its line was last logged
+        self.spoke_last = None  # (time step, [(length km, radar code, (col, row))]) of the newest image
 
     def list_times(self):
         times = super().list_times()
@@ -807,6 +811,16 @@ class EuropeNational(EuropeOpera):
                 opera = cng.at_gauges(rate, self.gauge_px)
         except Exception as e:
             log(f"natobs failed: {e}")
+        try:  # interference spokes out of the base picture (spokes.py); "OPERA alone" above is noted with them
+            rate, lines = self.spokes.clean(ts, rate)
+            self.spoke_last = (ts, lines)
+            for length, code, (c, r) in lines:
+                if time.time() - self.spoke_log.get(code, 0) > 3600:
+                    self.spoke_log[code] = time.time()
+                    lon, lat = self.pixel_lonlat(c, r)
+                    log(f"spoke removed: {length} km towards radar {code}, middle {float(lat):.2f} N {float(lon):.2f} E")
+        except Exception as e:
+            log(f"spoke filter failed: {e}")
         self.used[ts] = national.compose(rate, self.layers, ts)
         if opera is not None:
             try:
@@ -1125,6 +1139,8 @@ class Handler(BaseHTTPRequestHandler):
                     info["layers"] = {l.name: {"newest": l.newest_ts(), "alive": l.alive(), "shadow": l.SHADOW,
                                                "in_frames": sum(l.name in v for t, v in eu_r.used.items() if t in eu_r.obs)}
                                       for l in eu_r.layers}
+                    if eu_r.spoke_last:  # interference lines removed from the newest image: (km, radar)
+                        info["spokes"] = {"ref": eu_r.spoke_last[0], "lines": [l[:2] for l in eu_r.spoke_last[1]]}
                 info["ptype"] = {"frames": len(PTYPE.grids), "ref": max(PTYPE.grids) if PTYPE.grids else None}
                 body = {"version": VERSION, "edition": EDITION, "regions": info, "openmeteo": openmeteo_available(), "rss_mb": rss_mb(),
                         "auth": AUTH.providers(),  # sign-in methods the app may offer
