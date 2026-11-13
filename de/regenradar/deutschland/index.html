@@ -440,11 +440,11 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=1.01"></script>
-<script src="lang/en.js?v=1.01"></script>
+<script src="lang/de.js?v=1.02"></script>
+<script src="lang/en.js?v=1.02"></script>
 <script>
 "use strict";
-const VERSION = "v1.01";
+const VERSION = "v1.02";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -606,7 +606,7 @@ const MAP_STYLE = (() => {
   let st = {};
   try { st = JSON.parse(localStorage.getItem("rainy.style")) || {}; } catch {}
   return { sat: st.sat === "photo" ? "photo" : "clouds", theme: ["light", "dark", "auto"].includes(st.theme) ? st.theme : "dark", // dark by default (07.11.)
-    rain: st.rain === "eu" ? "eu" : "mix", area: st.area === "de" ? "de" : "eu", render: st.render === "img" ? "img" : "gl", // WebGL by default (10.11.); pictures without WebGL
+    rain: st.rain === "eu" ? "eu" : "mix", area: st.area === "de" ? "de" : "eu", eusrc: st.eusrc === "nat" ? "nat" : "opera", render: st.render === "img" ? "img" : "gl", // WebGL by default (10.11.); pictures without WebGL
     fc: (new URLSearchParams(location.search).get("fc") || st.fc) === "own" ? "own" : "dwd", design: ["liberty", "bright", "fiord", "earth"].includes(st.design) ? st.design : "plain" };
 })();
 // Edition: "de" = first public version (Germany: rain radar 2 h + 24 h / 3 days; sunny 2 h from the server's DWD satellite
@@ -635,11 +635,15 @@ document.getElementById("aboutBtn").addEventListener("click", () => {
   document.getElementById("aboutCard").classList.toggle("show");
 });
 document.getElementById("aboutClose").addEventListener("click", () => document.getElementById("aboutCard").classList.remove("show"));
+// Europe area, radar source (settings "Radar", ?eusrc=nat|opera): "opera" = the European composite (EUMETNET OPERA),
+// "nat" = our own picture: OPERA with national radar products on top (third server instance behind /eun/, beta)
+const EU_NAT = EU_AREA && (new URLSearchParams(location.search).get("eusrc") || MAP_STYLE.eusrc) === "nat";
 const RAIN_EU = EU_AREA || (!DE_ONLY && MAP_STYLE.rain === "eu");
 // the server for the rain radar: the Europe test server in the Europe area, else the usual one
-const RADAR_BASE = EU_AREA && API_BASE ? (LOCAL_DEV ? `${location.protocol}//${location.hostname}:8772` : `${API_BASE}/eu`) : API_BASE;
-// sunny too: Europe area = the Europe instance's sunny for all of Europe
-const SUN_BASE = RADAR_BASE;
+const EU_BASE = EU_AREA && API_BASE ? (LOCAL_DEV ? `${location.protocol}//${location.hostname}:8772` : `${API_BASE}/eu`) : API_BASE;
+const RADAR_BASE = EU_NAT && API_BASE ? (LOCAL_DEV ? `${location.protocol}//${location.hostname}:8773` : `${API_BASE}/eun`) : EU_BASE;
+// sunny too: Europe area = the Europe instance's sunny for all of Europe (the third instance has no sunny)
+const SUN_BASE = EU_BASE;
 const FC_OWN = DE_ONLY && !EU_AREA && MAP_STYLE.fc === "own"; // our own forecast (server variant "own") instead of DWD's
 if (MAP_STYLE.theme !== "auto") document.documentElement.classList.add(`theme-${MAP_STYLE.theme}`);
 const dark = MAP_STYLE.theme === "auto" ? window.matchMedia("(prefers-color-scheme: dark)").matches : MAP_STYLE.theme === "dark";
@@ -2233,7 +2237,8 @@ function updateSource() {
     : k === "srvsat" ? t("source.satRain")
     : k === "ca" ? (fc ? t("source.caForecast") : t("source.caMeasured"))
     : k === "us" ? t("source.noaaMeasured")
-    : k === "rtile" ? (RAIN_EU ? (shown.ref ? t("source.operaForecast") : t(EU_AREA ? "source.operaMeasured" : "source.operaNoaaMeasured"))
+    : k === "rtile" ? (EU_NAT ? t(shown.ref ? "source.natForecast" : "source.natMeasured")
+      : RAIN_EU ? (shown.ref ? t("source.operaForecast") : t(EU_AREA ? "source.operaMeasured" : "source.operaNoaaMeasured"))
       : DE_ONLY ? (shown.ref ? (FC_OWN ? t("source.ownForecast") : t("source.dwdForecast")) : t("source.dwdMeasured"))
       : shown.ref ? t("source.mixForecast") : t("source.mixMeasured"))
     : k === "ctile" ? (DE_ONLY ? (shown.fc ? t("source.sunDwdNowcast", { time: fmtTime(state.cloudRef) }) : t("source.sunDwd", { time: fmtTime(f.map.ts) }))
@@ -3039,6 +3044,7 @@ function showSettings() {
     ${DE_ONLY ? "" : `<div class="row"><span>${t("settings.clouds")}</span>${seg("sat", [["clouds", t("settings.cloudsStandard")], ["photo", t("settings.cloudsPhoto")]])}</div>
     <div class="row"><span>${t("settings.rain")}</span>${seg("rain", [["mix", t("settings.rainMix")], ["eu", t("settings.rainEu")]])}</div>`}
     ${DE_ONLY && API_BASE ? `<div class="row"><span>${t("settings.area")}</span>${seg("area", [["de", t("settings.areaDe")], ["eu", t("settings.areaEu") + BETA_MARK]])}</div>` : ""}
+    ${EU_AREA && API_BASE ? `<div class="row"><span>${t("settings.euSource")}</span>${seg("eusrc", [["opera", t("settings.euSourceOpera")], ["nat", t("settings.euSourceNat") + BETA_MARK]])}</div>` : ""}
     ${API_BASE && GL_OK ? `<div class="row"><span>${t("settings.render")}</span>${seg("render", [["img", t("settings.renderImg")], ["gl", t("settings.renderGl") + BETA_MARK]])}</div>` : ""}
     ${DE_ONLY && API_BASE && !EU_AREA ? `<div class="row"><span>${t("settings.forecast")}</span>${seg("fc", [["dwd", t("settings.fcDwd")], ["own", t("settings.fcOwn") + BETA_MARK]])}</div>` : ""}
     <div class="actions"><span></span><button class="done">${t("common.done")}</button></div>`;
@@ -3053,8 +3059,8 @@ function showSettings() {
     a.places.splice(+b.dataset.rm, 1);
     update(); renderPlace(); showSettings();
   }));
-  card.querySelectorAll("[data-sat], [data-theme], [data-rain], [data-fc], [data-design], [data-area], [data-render]").forEach((b) => b.addEventListener("click", () => {
-    const key = ["sat", "theme", "rain", "fc", "design", "area", "render"].find((k) => b.dataset[k] != null), next = { ...MAP_STYLE, [key]: b.dataset[key] };
+  card.querySelectorAll("[data-sat], [data-theme], [data-rain], [data-fc], [data-design], [data-area], [data-render], [data-eusrc]").forEach((b) => b.addEventListener("click", () => {
+    const key = ["sat", "theme", "rain", "fc", "design", "area", "render", "eusrc"].find((k) => b.dataset[k] != null), next = { ...MAP_STYLE, [key]: b.dataset[key] };
     if (next[key] === MAP_STYLE[key]) return;
     try { localStorage.setItem("rainy.style", JSON.stringify(next)); } catch {}
     flushSync(true); // keepalive request: survives the reload
