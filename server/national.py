@@ -233,6 +233,24 @@ def cover_at(layers, ts, col, row):
     return out
 
 
+def values_at(layers, ts, col, row):
+    """Per layer and point (host pixel col, row): what that layer alone shows there in the image for the step ts
+    (mean of the 5 x 5 cells around the point, as check_national_gauges.at_gauges); NaN without an image or data.
+    The gauge check scores every layer on its own with this - inside and outside its country."""
+    out = np.full((len(layers), len(col)), np.nan, np.float32)
+    for k, l in enumerate(layers):
+        f = l.get(ts)
+        if f is None:
+            continue
+        rate = f[0]
+        r, c = row - l.win[0].start, col - l.win[1].start
+        for i in np.flatnonzero((r >= 2) & (r < rate.shape[0] - 2) & (c >= 2) & (c < rate.shape[1] - 2)):
+            box = rate[r[i] - 2:r[i] + 3, c[i] - 2:c[i] + 3]
+            if (box >= 0).all():
+                out[k, i] = box.astype(np.float32).mean()
+    return out
+
+
 class ItalyDpc(Layer):
     name, credit = "it", "Radar-DPC (Dipartimento della Protezione Civile, CC BY-SA)"
     API = "https://radar-api.protezionecivile.it"

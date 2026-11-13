@@ -4,9 +4,10 @@ The third instance (EU_NATIONAL=1) notes for every image it composes, at every g
 alone showed there and what the composed picture shows (5 x 5 cells around the gauge, mm/h):
 verify_log/eun/natobs/<ts>.npz with "opera" and "nat" in the order of natobs/stations.json (record(), called by
 rainy_server.EuropeNational.load), and "who": which layers count at the gauge in that image (bit k = layer k of
-"layers"). This script reads the gauges for those times and prints both against them - per country, and per country
-and combination of layers, e.g. "it" against "it+ch" (so a layer that hurts outside its own country shows up, as
-Italy's did in Carinthia on 13.11.2026):
+"layers"), and "each": what every layer alone shows at the gauge. This script reads the gauges for those times and
+prints both pictures against them - per country (10-minute pairs and sums over full hours), and per country and
+combination of layers, e.g. "it" against "it+ch", there with every layer on its own ("only ch") - so a layer that
+hurts outside its own country shows up, as Italy's did in Carinthia on 13.11.2026:
 
   docker exec -w /app deploy-api-eun-1 python check_national_gauges.py [--hours 24]
 
@@ -20,8 +21,8 @@ Gauges (independent of all radar data), each list open data without an account:
       More Italian regions are on the list (EVALUATION.md 8b).
 New lists are appended to stations.json (the order of the older files stays valid; they are shorter).
 Compared per image time T: the radar value at T against the gauge's mean rate over T-10 .. T+10 min (two 10-minute
-sums, as in check_opera_gauges.py). Printed per country: the rain amount ratio radar/gauge and CSI / POD / FAR for
-"wet" at 0.1, 0.3 and 1 mm/h - for OPERA alone and for the composed picture, on the same pairs.
+sums, as in check_opera_gauges.py). Printed: the mean, the rain amount ratio radar/gauge and CSI / POD / FAR for
+"wet" at 0.1, 0.3 and 1 mm/h (hours: 0.2, 1, 3 mm) - for OPERA alone and for the composed picture, on the same pairs.
 """
 import glob
 import io
@@ -129,9 +130,11 @@ def at_gauges(grid, px):
     return out
 
 
-def record(ts, opera, nat, who=None, layers=()):
+def record(ts, opera, nat, who=None, layers=(), each=None):
     os.makedirs(OBS_DIR, exist_ok=True)
     extra = {} if who is None else {"who": who.astype(np.uint8), "layers": np.array(list(layers))}
+    if each is not None:
+        extra["each"] = each.astype(np.float16)
     np.savez_compressed(os.path.join(OBS_DIR, f"{int(ts)}.npz"), opera=opera.astype(np.float16), nat=nat.astype(np.float16), **extra)
     old = time.time() * 1000 - KEEP_DAYS * 86400_000
     for fp in glob.glob(os.path.join(OBS_DIR, "*.npz")):
@@ -273,18 +276,47 @@ def gauges_iv(ids, since, until):
 GAUGES = {"de": gauges_de, "at": gauges_at, "ch": gauges_ch, "it": gauges_it, "iv": gauges_iv}
 
 
-def table(name, g, o, n):
-    g, o, n = (np.array(a, np.float32) for a in (g, o, n))
-    print(f"\n{name}: {len(g)} pairs, gauge mean {g.mean():.3f} mm/h" if len(g) else f"\n{name}: no pairs")
+def table(name, g, cols, ths=(0.1, 0.3, 1.0), unit="mm/h"):
+    """cols: {label: values on the same pairs as g}. A column with gaps (a layer without data there) is scored on
+    its own pairs (their number is printed). "x" = rain amount against the gauges (not printed when they are dry)."""
+    g = np.asarray(g, np.float32)
     if not len(g):
+        print(f"\n{name}: no pairs")
         return
-    for label, q in (("OPERA alone", o), ("own picture", n)):
+    print(f"\n{name}: {len(g)} pairs, gauge mean {g.mean():.3f} {unit}")
+    for label, q in cols.items():
+        q = np.asarray(q, np.float32)
+        ok = np.isfinite(q)
+        if not ok.any():
+            continue
+        gg, qq = g[ok], q[ok]
         cells = []
-        for th in (0.1, 0.3, 1.0):
-            wo, wf = g >= th, q >= th
+        for th in ths:
+            wo, wf = gg >= th, qq >= th
             h, m, f = (wo & wf).sum(), (wo & ~wf).sum(), (~wo & wf).sum()
-            cells.append(f"{th}: CSI {h / max(1, h + m + f):.2f} POD {h / max(1, h + m):.2f} FAR {f / max(1, h + f):.2f}")
-        print(f"  {label:12s} amount x{q.sum() / max(g.sum(), 1e-9):.2f}   " + "   ".join(cells))
+            cells.append(f"{th}: CSI {h / (h + m + f):.2f} POD {h / max(1, h + m):.2f} FAR {f / max(1, h + f):.2f}"
+                         if h + m + f else f"{th}: nothing wet           ")
+        ratio = f"x{qq.sum() / gg.sum():5.2f}" if gg.mean() >= 0.005 else "x   - "
+        print(f"  {label:12s} mean {qq.mean():.3f} {ratio}   " + "   ".join(cells) + ("" if ok.all() else f"   ({ok.sum()} pairs)"))
+
+
+def hourly(a):
+    """Rows (gauge, time, values ...) -> one row per gauge and clock hour: the mean of its six 10-minute rows (hours
+    with fewer are left out). A tipping gauge resolves 0.1-0.2 mm, so light rain can only be judged on such sums."""
+    key = a[:, 0] * 1e7 + a[:, 1] // 3600_000
+    order = np.argsort(key, kind="stable")
+    a, key = a[order], key[order]
+    _, start, count = np.unique(key, return_index=True, return_counts=True)
+    s = start[count == 6]
+    return a[s[:, None] + np.arange(6)].mean(axis=1)
+
+
+def columns(a, combo=""):
+    cols = {"OPERA alone": a[:, 3], "own picture": a[:, 4]}
+    names = combo.split("+")
+    if len(names) > 1:  # where layers overlap: each of them on its own
+        cols.update({f"only {l}": a[:, 5 + i] for i, l in enumerate(names)})
+    return cols
 
 
 def main():
@@ -302,34 +334,40 @@ def main():
     print(f"{len(files)} images {datetime.fromtimestamp(t0 / 1000, timezone.utc):%d.%m. %H:%M} - "
           f"{datetime.fromtimestamp(t1 / 1000, timezone.utc):%d.%m. %H:%M} UTC, {len(st)} gauges")
     truth = {c: fn([s[1] for s in st if s[0] == c], t0 - 1200_000, t1 + 1200_000) for c, fn in GAUGES.items()}
-    pairs = {c: ([], [], []) for c in GAUGES}
-    by_layer = {}  # (country, layer or "no layer") -> pairs
+    # (country, the layers that count at the gauge) -> rows (gauge, time, gauge mm/h, OPERA, own, each of those layers alone)
+    rows = {}
     for fp in files:
         t = int(os.path.basename(fp)[:-4])
         z = np.load(fp)
         o, n = z["opera"].astype(np.float32), z["nat"].astype(np.float32)
-        who = z["who"] if "who" in z.files else None
+        who = z["who"] if "who" in z.files else None  # files from before server-v1.12 have none
         layers = [str(x) for x in z["layers"]] if who is not None else []
+        each = z["each"].astype(np.float32) if "each" in z.files else None  # since server-v1.13
         for k, (c, sid, _, _) in enumerate(st[:len(o)]):  # files from before a list was added are shorter
             g = truth[c].get(sid, {})
             v = [g.get(t), g.get(t + 600_000)]
             if None in v or not np.isfinite(o[k]) or not np.isfinite(n[k]):
                 continue
-            row = (np.mean(v) * 6, o[k], n[k])
-            keys = [pairs[c]]
-            if who is not None:
-                names = "+".join(l for b, l in enumerate(layers) if who[k] >> b & 1)
-                if names:
-                    keys.append(by_layer.setdefault((c, names), ([], [], [])))
-            for p in keys:
-                for a, x in zip(p, row):
-                    a.append(x)
+            idx = [b for b in range(len(layers)) if who[k] >> b & 1]
+            combo = "?" if who is None else "+".join(layers[b] for b in idx) or "no layer"
+            alone = [each[b, k] if each is not None else np.nan for b in idx]
+            rows.setdefault((c, combo), []).append((k, t, np.mean(v) * 6, o[k], n[k], *alone))
+    rows = {key: np.array(r, np.float64) for key, r in rows.items()}
+    country = {c: np.concatenate([r[:, :5] for (cc, _), r in rows.items() if cc == c] or [np.zeros((0, 5))]) for c in GAUGES}
     for c in GAUGES:
-        table(NAMES[c], *pairs[c])
-    print("\n--- by the layers that count at the gauge (at least half their weight; 50 pairs or more) ---")
-    for (c, l), p in sorted(by_layer.items()):
-        if len(p[0]) >= 50:
-            table(f"{NAMES[c]} - {l}", *p)
+        table(NAMES[c], country[c][:, 2], columns(country[c]))
+    print("\n--- sums over full hours (thresholds in mm; light rain is judged here, a gauge tips at 0.1-0.2 mm) ---")
+    for c in GAUGES:
+        h = hourly(country[c])
+        table(NAMES[c] + ", hours", h[:, 2], columns(h), (0.2, 1.0, 3.0), "mm")
+    print("\n--- by the layers that count at the gauge (at least half their weight; 50 pairs or more); "
+          "\"only x\" = that layer on its own ---")
+    for (c, combo), r in sorted(rows.items()):
+        if len(r) >= 50 and combo != "?":
+            table(f"{NAMES[c]} - {combo}", r[:, 2], columns(r, combo))
+            h = hourly(r)
+            if len(h) >= 20:
+                table(f"{NAMES[c]} - {combo}, hours", h[:, 2], columns(h, combo), (0.2, 1.0, 3.0), "mm")
 
 
 if __name__ == "__main__":

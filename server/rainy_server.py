@@ -102,7 +102,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v1.12"
+VERSION = "server-v1.13"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -812,7 +812,8 @@ class EuropeNational(EuropeOpera):
             try:
                 col, row, ok = self.gauge_px
                 who = national.cover_at(self.layers, ts, np.where(ok, col, -1), np.where(ok, row, -1))
-                cng.record(ts, opera, cng.at_gauges(rate, self.gauge_px), who, [l.name for l in self.layers])
+                each = national.values_at(self.layers, ts, np.where(ok, col, -1), np.where(ok, row, -1))
+                cng.record(ts, opera, cng.at_gauges(rate, self.gauge_px), who, [l.name for l in self.layers], each)
             except Exception as e:
                 log(f"natobs failed: {e}")
         for t in [t for t in self.used if t < ts - 3 * HISTORY_MS]:
