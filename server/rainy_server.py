@@ -102,7 +102,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v1.20"
+VERSION = "server-v1.21"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -1435,7 +1435,10 @@ def main_eu():
         eu.model = ModelRain(eu)
         threading.Thread(target=model_loop, args=(eu.model,), daemon=True).start()
     threading.Thread(target=EU_VERIFY.loop, daemon=True).start()
-    if EU_NATIONAL:  # where no radar reaches (Greece, Albania, W Turkey ...): the satellite rain estimate, drawn faint
+    # Where no radar reaches (Greece, W Turkey, east of Poland ...) the own picture drew the satellite rain estimate
+    # (H SAF, ~30 min old, from cloud tops) faintly into the hatched area. User, 13.11.2026: it shows rain inside
+    # the "no data" hatching and does not fit the radar picture next to it -> off (SAT_FILL=1 brings it back).
+    if EU_NATIONAL and os.environ.get("SAT_FILL") == "1":
         threading.Thread(target=update_loop, args=(REGIONS["sat"],), daemon=True).start()
     # second benchmark: GeoSphere Austria's INCA nowcast against ours at the Austrian rain gauges (bench_inca.py)
     threading.Thread(target=bench_inca.IncaBench(fetch, log, eu, mosaic.merc).loop, daemon=True).start()
