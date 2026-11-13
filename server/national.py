@@ -21,6 +21,10 @@ Layers:
   de  Germany - Deutscher Wetterdienst, open data RV composite: the analysis of each 5-min run (mm per 5 min, 1 km,
       polar stereographic, ODIM HDF5 in a tar with the 24 forecast steps), x GAIN 1.5 as in the Germany edition
       (measured against ~300 DWD gauges, mosaic.GermanyDwd.GAIN_RV). Published ~5 min after the measurement.
+  ch  Switzerland - MeteoSwiss open data (CC BY), product RZC: rain rate (mm/h) from the five Swiss radars with
+      MeteoSwiss' own corrections for the Alps, 1 km, every 5 min, ODIM HDF5, Swiss oblique Mercator; one STAC item
+      per day (data.geo.admin.ch, collection ch.meteoschweiz.ogd-radar-precip), files rzcYYDDDHHMM??.001.h5 stamped
+      with the END of the 5 minutes, published ~4 min later.
 """
 import io
 import json
@@ -29,7 +33,7 @@ import tarfile
 import threading
 import time
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import cv2
 import h5py
@@ -174,16 +178,30 @@ class Layer:
             ok = [t for t, f in self.frames.items() if f is not None and abs(t - ts) <= NEAR_MS]
             return self.frames[min(ok, key=lambda t: abs(t - ts))] if ok else None
 
-    def blend(self, grid, ts):
-        """Lay this layer's image over `grid` (host grid, float32, < 0 = no data), in place. True when it was there."""
-        f = self.get(ts)
+
+
+def compose(grid, layers, ts):
+    """Lay the layers' images for the step ts over `grid` (host grid, float32, < 0 = no data), in place; returns the
+    names of the layers that had an image. Where layers overlap each counts with its weight (the one whose coverage
+    edge is farther away counts more); what is left of the weight (1 - sum, near the edges) goes to OPERA, and where
+    OPERA has nothing the layers count alone."""
+    num = np.zeros(grid.shape, np.float32)
+    den = np.zeros(grid.shape, np.float32)
+    used = []
+    for l in layers:
+        f = l.get(ts)
         if f is None:
-            return False
+            continue
         rate, w = (a.astype(np.float32) for a in f)
-        g = grid[self.win]
-        have, base = w > 0, g >= 0
-        g[...] = np.where(have & base, w * np.maximum(rate, 0) + (1 - w) * g, np.where(have, np.maximum(rate, 0), g))
-        return True
+        num[l.win] += w * np.maximum(rate, 0)
+        den[l.win] += w
+        used.append(l.name)
+    if used:
+        have, base = den > 0, grid >= 0
+        mean = num / np.maximum(den, 1e-6)
+        rest = np.clip(1 - den, 0, 1)
+        grid[...] = np.where(have & base, (1 - rest) * mean + rest * grid, np.where(have, mean, grid))
+    return used
 
 
 class ItalyDpc(Layer):
@@ -245,7 +263,46 @@ class GermanyRv(Layer):
         return np.where(nod, -1.0, mm5 * 12.0 * self.GAIN).astype(np.float32)
 
 
-LAYERS = (ItalyDpc, GermanyRv)
+class SwissRzc(Layer):
+    name, credit = "ch", "MeteoSwiss (open data, CC BY)"
+    STAC = "https://data.geo.admin.ch/api/stac/v1/collections/ch.meteoschweiz.ogd-radar-precip/items"
+
+    def __init__(self, *a):
+        self.files, self.listed = {}, 0.0   # ts -> url
+        super().__init__(*a)
+
+    def _list(self):
+        if time.time() - self.listed < 45:
+            return
+        now = datetime.now(timezone.utc)
+        days = [now] + ([now - timedelta(days=1)] if now.hour < 2 else [])
+        for day in days:
+            d = json.loads(self._get(f"{self.STAC}/{day:%Y%m%d}-ch", timeout=60))
+            for k, a in d.get("assets", {}).items():
+                m = re.match(r"rzc(\d{2})(\d{3})(\d{4})..\.001\.h5$", k)
+                if m:
+                    t = datetime.strptime(f"20{m.group(1)}{m.group(2)}{m.group(3)}", "%Y%j%H%M").replace(tzinfo=timezone.utc)
+                    self.files[int(t.timestamp() * 1000)] = a["href"]
+        old = time.time() * 1000 - 3 * KEEP_MS
+        self.files = {t: u for t, u in self.files.items() if t > old}
+        self.listed = time.time()
+
+    def geometry(self):
+        self._list()
+        with h5py.File(io.BytesIO(self._get(self.files[max(self.files)], timeout=60)), "r") as f:
+            self.PROJ, self.X0, self.Y1, self.CELL, self.NX, self.NY = odim_grid(f)
+
+    def newest(self):
+        self._list()
+        return max(self.files)
+
+    def load(self, ts):
+        with h5py.File(io.BytesIO(self._get(self.files[ts], timeout=60)), "r") as f:
+            a = np.asarray(f["dataset1/data1/data"][:], np.float32)
+        return np.where(np.isfinite(a) & (a >= 0), np.minimum(a, 300.0), -1.0).astype(np.float32)
+
+
+LAYERS = (ItalyDpc, GermanyRv, SwissRzc)
 
 
 def timing(host, layer, shifts=(-10, -5, 0, 5, 10)):
