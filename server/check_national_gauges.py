@@ -18,6 +18,9 @@ Gauges (independent of all radar data), each list open data without an account:
       read (today since 00:00 UTC; the next one holds the whole year), so Swiss pairs exist for today's images only.
   it  ARPA Lombardia rain gauges (dati.lombardia.it, 10-minute or 1-minute sums, times in UTC+1)
   iv  ARPA Veneto rain gauges (api.arpa.veneto.it, 5-minute sums of the last ~2.5 days per gauge, times in UTC+1)
+  ie  ARPAE Emilia-Romagna (dati-simc.arpae.it, one file with the last hours of all stations, CC BY), 15-MINUTE
+      sums: spread evenly over their three 5-minute bins and summed into the 10 minutes ending at :00, :10, ...
+      (exact over full hours, slightly smoothed in the 10-minute pairs)
       More Italian regions are on the list (EVALUATION.md 8b).
   cz  CHMI open data, 10-minute sums (element SRA10M) of the automatic stations, one file per station and day
 "Shadow" layers (national.Layer.SHADOW: loaded, noted here, not in the picture) get their own tables: where such a
@@ -51,9 +54,10 @@ SWISS_SETS = {"smn": "ogd-smn", "pre": "ogd-smn-precip"}  # id prefix -> collect
 LOMBARDY = "https://www.dati.lombardia.it/resource"
 VENETO = "https://api.arpa.veneto.it/REST/v1"
 CZECH = "https://opendata.chmi.cz/meteorology/climate/now"
+EMILIA = "https://dati-simc.arpae.it/opendata/osservati/meteo/realtime/realtime.jsonl"
 NAMES = {"de": "Germany (DWD gauges)", "at": "Austria (TAWES gauges)", "ch": "Switzerland (MeteoSwiss gauges)",
          "it": "Italy, Lombardy (ARPA Lombardia gauges)", "iv": "Italy, Veneto (ARPAV gauges)",
-         "cz": "Czechia (CHMI gauges)"}
+         "cz": "Czechia (CHMI gauges)", "ie": "Italy, Emilia-Romagna (ARPAE gauges)"}
 
 
 # ---------- gauge lists ----------
@@ -108,7 +112,30 @@ def _list_cz(fetch):
     return [("cz", sid, lat, lon) for sid, (lat, lon) in sorted(pos.items())]
 
 
-LISTS = {"de": _list_de, "at": _list_at, "ch": _list_ch, "it": _list_it, "iv": _list_iv, "cz": _list_cz}
+def _emilia_rows(raw):
+    """(id, lat, lon, end of the 15 minutes in ms, mm) for every 15-minute precipitation value in ARPAE's file
+    (one JSON object per line and station time; B13011 with timerange [1, 0, 900] = sum of the 900 s before)."""
+    for line in raw.splitlines():
+        if b'"B13011"' not in line:
+            continue
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        for part in d.get("data", []):
+            if part.get("timerange") == [1, 0, 900] and "B13011" in part.get("vars", {}):
+                v = part["vars"]["B13011"].get("v")
+                if v is not None and v >= 0:
+                    yield (f"{d['lon']}_{d['lat']}", d["lat"] / 1e5, d["lon"] / 1e5,
+                           _ms(d["date"][:19], "%Y-%m-%dT%H:%M:%S"), float(v))
+
+
+def _list_ie(fetch):
+    pos = {sid: (lat, lon) for sid, lat, lon, _, _ in _emilia_rows(fetch(EMILIA, timeout=180))}
+    return [("ie", sid, lat, lon) for sid, (lat, lon) in sorted(pos.items())]
+
+
+LISTS = {"de": _list_de, "at": _list_at, "ch": _list_ch, "it": _list_it, "iv": _list_iv, "cz": _list_cz, "ie": _list_ie}
 
 
 # ---------- recording (inside the server) ----------
@@ -317,7 +344,23 @@ def gauges_cz(ids, since, until):
         return dict(zip(ids, ex.map(lambda s: gauge_cz(s, since), ids)))
 
 
-GAUGES = {"de": gauges_de, "at": gauges_at, "ch": gauges_ch, "it": gauges_it, "iv": gauges_iv, "cz": gauges_cz}
+def gauges_ie(ids, since, until):
+    try:
+        raw = _get(EMILIA, timeout=180)
+    except Exception as e:
+        print(f"  (Emilia-Romagna gauges: {e})")
+        return {}
+    want, five = set(ids), {}
+    for sid, _, _, t, v in _emilia_rows(raw):
+        if sid in want and since - 900_000 <= t <= until + 900_000:
+            for k in range(3):
+                five.setdefault(sid, {})[t - k * 300_000] = v / 3
+    return {sid: {t: v + f[t - 300_000] for t, v in f.items() if t % 600_000 == 0 and t - 300_000 in f}
+            for sid, f in five.items()}
+
+
+GAUGES = {"de": gauges_de, "at": gauges_at, "ch": gauges_ch, "it": gauges_it, "iv": gauges_iv, "cz": gauges_cz,
+          "ie": gauges_ie}
 
 
 def table(name, g, cols, ths=(0.1, 0.3, 1.0), unit="mm/h"):
