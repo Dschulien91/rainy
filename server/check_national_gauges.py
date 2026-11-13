@@ -7,18 +7,26 @@ rainy_server.EuropeNational.load). This script reads the gauges for those times 
 
   docker exec -w /app deploy-api-eun-1 python check_national_gauges.py [--hours 24]
 
-Gauges (independent of all radar data):
-  de  DWD 10-minute gauges (check_rain_gauges.stations(), one per ~25 km cell), open data
-  at  GeoSphere Austria TAWES 10-minute gauges, open data (CC BY) - the Italy and Switzerland layers reach into Austria
+Gauges (independent of all radar data), each list open data without an account:
+  de  DWD 10-minute gauges (check_rain_gauges.stations(), one per ~25 km cell)
+  at  GeoSphere Austria TAWES 10-minute gauges (CC BY) - the Swiss and German layers reach into Austria
+  ch  MeteoSwiss automatic stations and precipitation stations, 10-minute sums (CC BY). Only the file "t_now" is
+      read (today since 00:00 UTC; the next one holds the whole year), so Swiss pairs exist for today's images only.
+  it  ARPA Lombardia rain gauges (dati.lombardia.it, 10-minute or 1-minute sums, times in UTC+1) - Lombardy only;
+      more Italian regions are on the list (EVALUATION.md 8b).
+New lists are appended to stations.json (the order of the older files stays valid; they are shorter).
 Compared per image time T: the radar value at T against the gauge's mean rate over T-10 .. T+10 min (two 10-minute
 sums, as in check_opera_gauges.py). Printed per country: the rain amount ratio radar/gauge and CSI / POD / FAR for
 "wet" at 0.1, 0.3 and 1 mm/h - for OPERA alone and for the composed picture, on the same pairs.
 """
 import glob
+import io
 import json
 import os
 import sys
 import time
+import urllib.parse
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
@@ -30,29 +38,64 @@ LOG_DIR = os.environ.get("VERIFY_LOG_DIR", os.path.join(os.path.dirname(os.path.
 OBS_DIR = os.path.join(LOG_DIR, "natobs")
 KEEP_DAYS = 4
 TAWES = "https://dataset.api.hub.geosphere.at/v1"
+SWISS = "https://data.geo.admin.ch"
+SWISS_SETS = {"smn": "ogd-smn", "pre": "ogd-smn-precip"}  # id prefix -> collection (ch.meteoschweiz.<...>)
+LOMBARDY = "https://www.dati.lombardia.it/resource"
+NAMES = {"de": "Germany (DWD gauges)", "at": "Austria (TAWES gauges)", "ch": "Switzerland (MeteoSwiss gauges)",
+         "it": "Italy (ARPA Lombardia gauges)"}
+
+
+# ---------- gauge lists ----------
+def _list_de(fetch):
+    import check_rain_gauges as crg
+    return [("de", sid, lat, lon) for sid, lat, lon in crg.stations()]
+
+
+def _list_at(fetch):
+    meta = json.loads(fetch(f"{TAWES}/station/current/tawes-v1-10min/metadata", timeout=60))
+    return [("at", str(s["id"]), float(s["lat"]), float(s["lon"])) for s in meta.get("stations", []) if s.get("is_active")]
+
+
+def _list_ch(fetch):
+    out = []
+    for prefix, coll in SWISS_SETS.items():
+        url = f"{SWISS}/api/stac/v1/collections/ch.meteoschweiz.{coll}/items?limit=100"
+        while url:
+            d = json.loads(fetch(url, timeout=60))
+            for f in d["features"]:
+                lon, lat = f["geometry"]["coordinates"][:2]
+                out.append(("ch", f"{prefix}:{f['id']}", float(lat), float(lon)))
+            url = next((l["href"] for l in d.get("links", []) if l.get("rel") == "next"), None)
+    return out
+
+
+def _list_it(fetch):
+    q = urllib.parse.urlencode({"tipologia": "Precipitazione", "storico": "N", "$limit": 5000, "$select": "idsensore,lat,lng"})
+    return [("it", str(s["idsensore"]), float(s["lat"]), float(s["lng"]))
+            for s in json.loads(fetch(f"{LOMBARDY}/nf78-nj6b.json?{q}", timeout=60)) if s.get("lat") and s.get("lng")]
+
+
+LISTS = {"de": _list_de, "at": _list_at, "ch": _list_ch, "it": _list_it}
 
 
 # ---------- recording (inside the server) ----------
 def station_list(fetch, log):
-    """[(country, id, lat, lon)]; kept in natobs/stations.json so every file refers to the same order."""
+    """[(country, id, lat, lon)]; kept in natobs/stations.json so every file refers to the same order. A country
+    that is not in the file yet is appended (at the next server start when its list could not be read)."""
     path = os.path.join(OBS_DIR, "stations.json")
     try:
         with open(path) as f:
-            return [tuple(s) for s in json.load(f)]
+            out = [tuple(s) for s in json.load(f)]
     except (OSError, ValueError):
-        pass
-    out = []
-    try:
-        import check_rain_gauges as crg
-        out += [("de", sid, lat, lon) for sid, lat, lon in crg.stations()]
-    except Exception as e:
-        log(f"natobs: German gauge list failed: {e}")
-    try:
-        meta = json.loads(fetch(f"{TAWES}/station/current/tawes-v1-10min/metadata", timeout=60))
-        out += [("at", str(s["id"]), float(s["lat"]), float(s["lon"])) for s in meta.get("stations", []) if s.get("is_active")]
-    except Exception as e:
-        log(f"natobs: Austrian gauge list failed: {e}")
-    if len({c for c, *_ in out}) == 2:  # only a complete list is kept
+        out = []
+    have, n = {s[0] for s in out}, len(out)
+    for c, fn in LISTS.items():
+        if c not in have:
+            try:
+                out += fn(fetch)
+            except Exception as e:
+                log(f"natobs: gauge list {c} failed: {e}")
+    if len(out) > n:
         os.makedirs(OBS_DIR, exist_ok=True)
         with open(path, "w") as f:
             json.dump(out, f)
@@ -85,18 +128,20 @@ def record(ts, opera, nat):
             os.remove(fp)
 
 
-# ---------- scoring ----------
+# ---------- scoring: {gauge id: {ts: mm in the 10 min ending at ts}} per country ----------
 def _get(url, timeout=120):
     import urllib.request
     with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"}), timeout=timeout) as r:
         return r.read()
 
 
+def _ms(text, fmt):
+    return int(datetime.strptime(text, fmt).replace(tzinfo=timezone.utc).timestamp() * 1000)
+
+
 def gauge_de(sid, since):
-    """{ts: mm in the 10 min ending at ts}. As check_rain_gauges.gauge, but reads only the rows since `since` (that one
-    parses ~500 days per gauge: 6 CPU-minutes for 300 gauges) and the "recent" file only when `since` is before today."""
-    import io
-    import zipfile
+    """As check_rain_gauges.gauge, but reads only the rows since `since` (that one parses ~500 days per gauge:
+    6 CPU-minutes for 300 gauges) and the "recent" file only when `since` is before today."""
     import check_rain_gauges as crg
     stamp = time.strftime("%Y%m%d%H%M", time.gmtime(since / 1000))
     today = time.strftime("%Y%m%d", time.gmtime()) + "0000"
@@ -118,11 +163,11 @@ def gauge_de(sid, since):
             if d < stamp:
                 break
             if float(q[k]) > -999:
-                vals[int(datetime.strptime(d, "%Y%m%d%H%M").replace(tzinfo=timezone.utc).timestamp() * 1000)] = float(q[k])
+                vals[_ms(d, "%Y%m%d%H%M")] = float(q[k])
     return vals
 
 
-def gauges_de(ids, since):
+def gauges_de(ids, since, until):
     with ThreadPoolExecutor(8) as ex:
         return dict(zip(ids, ex.map(lambda s: gauge_de(s, since), ids)))
 
@@ -144,6 +189,60 @@ def gauges_at(ids, since, until):
             out[str(f["properties"]["station"])] = {t: x for t, x in zip(ts, v) if x is not None and x >= 0}
         time.sleep(1)
     return out
+
+
+def gauge_ch(sid, since):
+    prefix, stn = sid.split(":")
+    coll = SWISS_SETS[prefix]
+    try:
+        rows = _get(f"{SWISS}/ch.meteoschweiz.{coll}/{stn}/{coll}_{stn}_t_now.csv", timeout=60).decode("latin-1").splitlines()
+        k = rows[0].split(";").index("rre150z0")
+    except Exception:
+        return {}
+    vals = {}
+    for r in rows[1:]:
+        q = r.split(";")
+        if len(q) > k and q[k] not in ("", "-"):
+            try:
+                vals[_ms(q[1], "%d.%m.%Y %H:%M")] = float(q[k])
+            except ValueError:
+                pass
+    return vals
+
+
+def gauges_ch(ids, since, until):
+    with ThreadPoolExecutor(8) as ex:
+        return dict(zip(ids, ex.map(lambda s: gauge_ch(s, since), ids)))
+
+
+def gauges_it(ids, since, until):
+    """ARPA Lombardia: rows (sensor, time in UTC+1, mm since the previous row, state "VA" = valid); the 1-minute
+    gauges are summed into the 10 minutes ending at :00, :10, ..."""
+    local = lambda ms: datetime.fromtimestamp(ms / 1000 + 3600, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+    out = {}
+    for i in range(0, len(ids), 40):
+        part = ids[i:i + 40]
+        where = (f"data > '{local(since)}' AND data <= '{local(until)}' AND idsensore in("
+                 + ",".join(f"'{s}'" for s in part) + ")")
+        q = urllib.parse.urlencode({"$where": where, "$limit": 50000, "$select": "idsensore,data,valore,stato"})
+        try:
+            rows = json.loads(_get(f"{LOMBARDY}/647i-nhxk.json?{q}"))
+        except Exception as e:
+            print(f"  (Lombardy gauges {i}-{i + len(part)}: {e})")
+            continue
+        for r in rows:
+            v = float(r["valore"])
+            if r.get("stato") != "VA" or v < 0:
+                continue
+            t = _ms(r["data"][:19], "%Y-%m-%dT%H:%M:%S") - 3600_000
+            t = -(-t // 600_000) * 600_000  # the end of its 10 minutes
+            g = out.setdefault(str(r["idsensore"]), {})
+            g[t] = g.get(t, 0.0) + v
+        time.sleep(1)
+    return out
+
+
+GAUGES = {"de": gauges_de, "at": gauges_at, "ch": gauges_ch, "it": gauges_it}
 
 
 def table(name, g, o, n):
@@ -174,14 +273,13 @@ def main():
     t0, t1 = int(os.path.basename(files[0])[:-4]), int(os.path.basename(files[-1])[:-4])
     print(f"{len(files)} images {datetime.fromtimestamp(t0 / 1000, timezone.utc):%d.%m. %H:%M} - "
           f"{datetime.fromtimestamp(t1 / 1000, timezone.utc):%d.%m. %H:%M} UTC, {len(st)} gauges")
-    truth = {"de": gauges_de([s[1] for s in st if s[0] == "de"], t0 - 3600_000),
-             "at": gauges_at([s[1] for s in st if s[0] == "at"], t0 - 1200_000, t1 + 1200_000)}
-    pairs = {"de": ([], [], []), "at": ([], [], [])}
+    truth = {c: fn([s[1] for s in st if s[0] == c], t0 - 1200_000, t1 + 1200_000) for c, fn in GAUGES.items()}
+    pairs = {c: ([], [], []) for c in GAUGES}
     for fp in files:
         t = int(os.path.basename(fp)[:-4])
         z = np.load(fp)
         o, n = z["opera"].astype(np.float32), z["nat"].astype(np.float32)
-        for k, (c, sid, _, _) in enumerate(st):
+        for k, (c, sid, _, _) in enumerate(st[:len(o)]):  # files from before a list was added are shorter
             g = truth[c].get(sid, {})
             v = [g.get(t), g.get(t + 600_000)]
             if None in v or not np.isfinite(o[k]) or not np.isfinite(n[k]):
@@ -189,8 +287,8 @@ def main():
             pairs[c][0].append(np.mean(v) * 6)
             pairs[c][1].append(o[k])
             pairs[c][2].append(n[k])
-    table("Germany (DWD gauges)", *pairs["de"])
-    table("Austria (TAWES gauges)", *pairs["at"])
+    for c in GAUGES:
+        table(NAMES[c], *pairs[c])
 
 
 if __name__ == "__main__":
