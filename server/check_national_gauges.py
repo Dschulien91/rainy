@@ -19,6 +19,9 @@ Gauges (independent of all radar data), each list open data without an account:
   it  ARPA Lombardia rain gauges (dati.lombardia.it, 10-minute or 1-minute sums, times in UTC+1)
   iv  ARPA Veneto rain gauges (api.arpa.veneto.it, 5-minute sums of the last ~2.5 days per gauge, times in UTC+1)
       More Italian regions are on the list (EVALUATION.md 8b).
+  cz  CHMI open data, 10-minute sums (element SRA10M) of the automatic stations, one file per station and day
+"Shadow" layers (national.Layer.SHADOW: loaded, noted here, not in the picture) get their own tables: where such a
+candidate has data, OPERA alone and the own picture against "only <shadow>" - the evidence for promoting it.
 New lists are appended to stations.json (the order of the older files stays valid; they are shorter).
 Compared per image time T: the radar value at T against the gauge's mean rate over T-10 .. T+10 min (two 10-minute
 sums, as in check_opera_gauges.py). Printed: the mean, the rain amount ratio radar/gauge and CSI / POD / FAR for
@@ -47,8 +50,10 @@ SWISS = "https://data.geo.admin.ch"
 SWISS_SETS = {"smn": "ogd-smn", "pre": "ogd-smn-precip"}  # id prefix -> collection (ch.meteoschweiz.<...>)
 LOMBARDY = "https://www.dati.lombardia.it/resource"
 VENETO = "https://api.arpa.veneto.it/REST/v1"
+CZECH = "https://opendata.chmi.cz/meteorology/climate/now"
 NAMES = {"de": "Germany (DWD gauges)", "at": "Austria (TAWES gauges)", "ch": "Switzerland (MeteoSwiss gauges)",
-         "it": "Italy, Lombardy (ARPA Lombardia gauges)", "iv": "Italy, Veneto (ARPAV gauges)"}
+         "it": "Italy, Lombardy (ARPA Lombardia gauges)", "iv": "Italy, Veneto (ARPAV gauges)",
+         "cz": "Czechia (CHMI gauges)"}
 
 
 # ---------- gauge lists ----------
@@ -86,7 +91,24 @@ def _list_iv(fetch):
     return [("iv", str(s["codseqst"]), float(s["latitudine"]), float(s["longitudine"])) for s in d]
 
 
-LISTS = {"de": _list_de, "at": _list_at, "ch": _list_ch, "it": _list_it, "iv": _list_iv}
+def _czech_day(fetch, folder):
+    import re
+    return max(re.findall(r"-(\d{8})\.json", fetch(f"{CZECH}/{folder}/", timeout=60).decode("utf-8", "replace")))
+
+
+def _list_cz(fetch):
+    """Stations that measure SRA10M (meta2) and have a file today, with their position (meta1: WSI, .., lon, lat)."""
+    import re
+    day = _czech_day(fetch, "metadata")
+    rows = lambda name: json.loads(fetch(f"{CZECH}/metadata/{name}-{day}.json", timeout=60))["data"]["data"]["values"]
+    rain = {r[1] for r in rows("meta2") if r[2] == "SRA10M"}
+    today = set(re.findall(r"10m-([0-9-]+)-\d{8}\.json", fetch(f"{CZECH}/data/", timeout=60).decode("utf-8", "replace")))
+    pos = {r[0]: (float(r[4]), float(r[3])) for r in rows("meta1")  # the list also holds foreign SYNOP stations
+           if r[0] in rain and r[0] in today and 12.0 < r[3] < 19.0 and 48.5 < r[4] < 51.1}
+    return [("cz", sid, lat, lon) for sid, (lat, lon) in sorted(pos.items())]
+
+
+LISTS = {"de": _list_de, "at": _list_at, "ch": _list_ch, "it": _list_it, "iv": _list_iv, "cz": _list_cz}
 
 
 # ---------- recording (inside the server) ----------
@@ -130,11 +152,12 @@ def at_gauges(grid, px):
     return out
 
 
-def record(ts, opera, nat, who=None, layers=(), each=None):
+def record(ts, opera, nat, who=None, layers=(), each=None, shadow=()):
     os.makedirs(OBS_DIR, exist_ok=True)
     extra = {} if who is None else {"who": who.astype(np.uint8), "layers": np.array(list(layers))}
     if each is not None:
         extra["each"] = each.astype(np.float16)
+        extra["shadow"] = np.array(list(shadow), dtype="U8")
     np.savez_compressed(os.path.join(OBS_DIR, f"{int(ts)}.npz"), opera=opera.astype(np.float16), nat=nat.astype(np.float16), **extra)
     old = time.time() * 1000 - KEEP_DAYS * 86400_000
     for fp in glob.glob(os.path.join(OBS_DIR, "*.npz")):
@@ -273,7 +296,28 @@ def gauges_iv(ids, since, until):
         return dict(zip(ids, ex.map(lambda s: gauge_iv(s, since), ids)))
 
 
-GAUGES = {"de": gauges_de, "at": gauges_at, "ch": gauges_ch, "it": gauges_it, "iv": gauges_iv}
+def gauge_cz(sid, since):
+    vals = {}
+    day = datetime.fromtimestamp(since / 1000, timezone.utc).date()
+    while day <= datetime.now(timezone.utc).date():
+        try:
+            d = json.loads(_get(f"{CZECH}/data/10m-{sid}-{day:%Y%m%d}.json", timeout=60))["data"]["data"]
+            k = {h: i for i, h in enumerate(d["header"].split(","))}
+            for r in d["values"]:
+                if r[k["ELEMENT"]] == "SRA10M" and r[k["VAL"]] is not None and r[k["VAL"]] >= 0:
+                    vals[_ms(r[k["DT"]][:19], "%Y-%m-%dT%H:%M:%S")] = float(r[k["VAL"]])
+        except Exception:
+            pass
+        day = datetime.fromordinal(day.toordinal() + 1).date()
+    return vals
+
+
+def gauges_cz(ids, since, until):
+    with ThreadPoolExecutor(8) as ex:
+        return dict(zip(ids, ex.map(lambda s: gauge_cz(s, since), ids)))
+
+
+GAUGES = {"de": gauges_de, "at": gauges_at, "ch": gauges_ch, "it": gauges_it, "iv": gauges_iv, "cz": gauges_cz}
 
 
 def table(name, g, cols, ths=(0.1, 0.3, 1.0), unit="mm/h"):
@@ -336,6 +380,7 @@ def main():
     truth = {c: fn([s[1] for s in st if s[0] == c], t0 - 1200_000, t1 + 1200_000) for c, fn in GAUGES.items()}
     # (country, the layers that count at the gauge) -> rows (gauge, time, gauge mm/h, OPERA, own, each of those layers alone)
     rows = {}
+    shadows = {}  # (country, shadow layer) -> rows (gauge, time, gauge mm/h, OPERA, own, the shadow alone)
     for fp in files:
         t = int(os.path.basename(fp)[:-4])
         z = np.load(fp)
@@ -343,12 +388,16 @@ def main():
         who = z["who"] if "who" in z.files else None  # files from before server-v1.12 have none
         layers = [str(x) for x in z["layers"]] if who is not None else []
         each = z["each"].astype(np.float32) if "each" in z.files else None  # since server-v1.13
+        shadow = {layers.index(str(x)) for x in z["shadow"]} if "shadow" in z.files else set()  # since server-v1.14
         for k, (c, sid, _, _) in enumerate(st[:len(o)]):  # files from before a list was added are shorter
             g = truth[c].get(sid, {})
             v = [g.get(t), g.get(t + 600_000)]
             if None in v or not np.isfinite(o[k]) or not np.isfinite(n[k]):
                 continue
-            idx = [b for b in range(len(layers)) if who[k] >> b & 1]
+            for b in shadow:
+                if np.isfinite(each[b, k]):
+                    shadows.setdefault((c, layers[b]), []).append((k, t, np.mean(v) * 6, o[k], n[k], each[b, k]))
+            idx = [b for b in range(len(layers)) if who[k] >> b & 1 and b not in shadow]
             combo = "?" if who is None else "+".join(layers[b] for b in idx) or "no layer"
             alone = [each[b, k] if each is not None else np.nan for b in idx]
             rows.setdefault((c, combo), []).append((k, t, np.mean(v) * 6, o[k], n[k], *alone))
@@ -368,6 +417,15 @@ def main():
             h = hourly(r)
             if len(h) >= 20:
                 table(f"{NAMES[c]} - {combo}, hours", h[:, 2], columns(h, combo), (0.2, 1.0, 3.0), "mm")
+
+
+    print("\n--- shadow layers (candidates, not in the picture): where they have data, 50 pairs or more ---")
+    for (c, l), r in sorted(shadows.items(), key=lambda x: (x[0][1], x[0][0])):
+        r = np.array(r, np.float64)
+        if len(r) >= 50:
+            for a, ths, unit, tag in ((r, (0.1, 0.3, 1.0), "mm/h", ""), (hourly(r), (0.2, 1.0, 3.0), "mm", ", hours")):
+                if len(a) >= 20:
+                    table(f"shadow {l} - {NAMES[c]}{tag}", a[:, 2], {**columns(a), f"only {l}": a[:, 5]}, ths, unit)
 
 
 if __name__ == "__main__":

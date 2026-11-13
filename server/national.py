@@ -30,6 +30,14 @@ Layers:
       MeteoSwiss' own corrections for the Alps, 1 km, every 5 min, ODIM HDF5, Swiss oblique Mercator; one STAC item
       per day (data.geo.admin.ch, collection ch.meteoschweiz.ogd-radar-precip), files rzcYYDDDHHMM??.001.h5 stamped
       with the END of the 5 minutes, published ~4 min later.
+
+Shadow layers (Layer.SHADOW): a candidate that is loaded and noted at the rain gauges (check_national_gauges.py,
+tables "shadow <name>") but NOT laid into the picture. Every new country starts like this - Italy's product looked
+plausible on the map and was 2.5x too wet at the gauges. A shadow is promoted (SHADOW = False, credit into both
+impressum pages) when it beats OPERA at the gauges on several rainy days.
+  cz  Czechia - CHMI open data (CC BY 4.0): composite of the two Czech radars, reflectivity at 2 km height (dBZ),
+      ~1 km, every 5 min, ODIM HDF5, stamped with the end of the scan and published ~3 min later (much earlier than
+      OPERA). Rain rate by Z = 200 R^1.6. OPERA has these radars too: what a national copy gains is open.
 """
 import io
 import json
@@ -37,6 +45,7 @@ import re
 import tarfile
 import threading
 import time
+import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
 
@@ -62,6 +71,7 @@ class Layer:
     PROJ = ""           # proj string of the product's grid
     X0, Y1, CELL, NX, NY = 0.0, 0.0, 1000.0, 0, 0   # top-left corner, cell size (m), size
     AREA = None         # [(lon, lat), ...]: the product is used only inside this polygon (None: everywhere it has data)
+    SHADOW = False      # True: loaded and noted at the gauges, not laid into the picture (a candidate under test)
 
     def __init__(self, host, log, ua):
         self.host, self.log, self.ua = host, log, ua
@@ -186,9 +196,12 @@ class Layer:
             return self.frames.get(ts - self.SHIFT_MS) is not None
 
     def get(self, ts):
-        """(rate, weight) of the image at ts, else of the nearest one within NEAR_MS, else None."""
+        """(rate, weight) of the image at ts, else of the nearest one within NEAR_MS, else None. A shadow layer is
+        not waited for, so it answers only with the exact image (an older one would be scored unfairly)."""
         ts -= self.SHIFT_MS
         with self.lock:
+            if self.SHADOW:
+                return self.frames.get(ts)
             ok = [t for t, f in self.frames.items() if f is not None and abs(t - ts) <= NEAR_MS]
             return self.frames[min(ok, key=lambda t: abs(t - ts))] if ok else None
 
@@ -203,7 +216,7 @@ def compose(grid, layers, ts):
     den = np.zeros(grid.shape, np.float32)
     used = []
     for l in layers:
-        f = l.get(ts)
+        f = None if l.SHADOW else l.get(ts)
         if f is None:
             continue
         rate, w = (a.astype(np.float32) for a in f)
@@ -380,7 +393,58 @@ class SwissRzc(Layer):
         return np.where(np.isfinite(a) & (a >= 0), np.minimum(a, 300.0), -1.0).astype(np.float32)
 
 
-LAYERS = (ItalyDpc, GermanyRv, SwissRzc)
+class CzechChmi(Layer):
+    name, credit = "cz", "CHMI (open data, CC BY 4.0)"
+    SHADOW = True
+    BASE = "https://opendata.chmi.cz/meteorology/weather/radar/composite/pseudocappi2km/hdf5/"
+    ZR_A, ZR_B = 200.0, 1.6
+
+    def __init__(self, *a):
+        self.latest, self.raw = None, {}
+        super().__init__(*a)
+
+    def _url(self, ts):
+        return self.BASE + datetime.fromtimestamp(ts / 1000, timezone.utc).strftime("T_PANV23_C_OKPR_%Y%m%d%H%M00.hdf")
+
+    def geometry(self):
+        t = self.newest()
+        with h5py.File(io.BytesIO(self.raw[t]), "r") as f:
+            self.PROJ, self.X0, self.Y1, self.CELL, self.NX, self.NY = odim_grid(f)
+
+    def _window(self):
+        super()._window()
+        # the grid is Mercator: its 1556 m cells are ~1 km on the ground at 50 N
+        self.k = max(1, int(round(self.host.KM_PER_PX * 1000 / (self.CELL * 0.64))))
+
+    def newest(self):
+        """The folder lists a week of files (2000 names), so the last steps are asked for by name instead."""
+        t = int(time.time() * 1000) // STEP_MS * STEP_MS
+        stop = max(self.latest or 0, t - 6 * STEP_MS)
+        while t > stop:
+            try:
+                self.raw = {t: self._get(self._url(t), timeout=30)}
+                self.latest = t
+                break
+            except urllib.error.HTTPError as e:
+                if e.code != 404:
+                    raise
+            t -= STEP_MS
+        if self.latest is None:
+            raise ValueError("no file in the last 30 min")
+        return self.latest
+
+    def load(self, ts):
+        with h5py.File(io.BytesIO(self.raw.get(ts) or self._get(self._url(ts), timeout=30)), "r") as f:
+            w = {k: float(f["dataset1/data1/what"].attrs[k]) for k in ("gain", "offset", "nodata", "undetect")}
+            raw = f["dataset1/data1/data"][:]
+        if raw.shape != (self.NY, self.NX):
+            raise ValueError(f"unexpected grid {raw.shape}")
+        rate = (10.0 ** ((raw * w["gain"] + w["offset"]) / 10.0) / self.ZR_A) ** (1.0 / self.ZR_B)
+        rate = np.where(raw == w["undetect"], 0.0, np.minimum(rate, 300.0))
+        return np.where(raw == w["nodata"], -1.0, rate).astype(np.float32)
+
+
+LAYERS = (ItalyDpc, GermanyRv, SwissRzc, CzechChmi)
 
 
 def timing(host, layer, shifts=(-10, -5, 0, 5, 10)):

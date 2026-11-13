@@ -102,7 +102,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v1.13"
+VERSION = "server-v1.14"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -790,7 +790,7 @@ class EuropeNational(EuropeOpera):
         # the layers load their last hour first: without them the first images would be composed from OPERA alone
         if time.time() - self.started < 120 and not all(l.first_poll_done for l in self.layers):
             return {}
-        alive = [l for l in self.layers if l.alive()]
+        alive = [l for l in self.layers if l.alive() and not l.SHADOW]  # a shadow is not waited for
         return {t: (t, url) for t, url in times.items()
                 if now - t > national.WAIT_MIN * 60_000 or all(l.has(t) for l in alive)}
 
@@ -813,7 +813,8 @@ class EuropeNational(EuropeOpera):
                 col, row, ok = self.gauge_px
                 who = national.cover_at(self.layers, ts, np.where(ok, col, -1), np.where(ok, row, -1))
                 each = national.values_at(self.layers, ts, np.where(ok, col, -1), np.where(ok, row, -1))
-                cng.record(ts, opera, cng.at_gauges(rate, self.gauge_px), who, [l.name for l in self.layers], each)
+                cng.record(ts, opera, cng.at_gauges(rate, self.gauge_px), who, [l.name for l in self.layers], each,
+                           [l.name for l in self.layers if l.SHADOW])
             except Exception as e:
                 log(f"natobs failed: {e}")
         for t in [t for t in self.used if t < ts - 3 * HISTORY_MS]:
@@ -1121,7 +1122,7 @@ class Handler(BaseHTTPRequestHandler):
                 info["de"] = {"frames": len(DE.frames()[0]), "ref": DE.ref, "vetoed_px": getattr(DE, "vetoed", 0)}
                 if EU_NATIONAL:  # per layer: its newest image, and in how many of the map's images it is
                     eu_r = REGIONS["eu"]
-                    info["layers"] = {l.name: {"newest": l.newest_ts(), "alive": l.alive(),
+                    info["layers"] = {l.name: {"newest": l.newest_ts(), "alive": l.alive(), "shadow": l.SHADOW,
                                                "in_frames": sum(l.name in v for t, v in eu_r.used.items() if t in eu_r.obs)}
                                       for l in eu_r.layers}
                 info["ptype"] = {"frames": len(PTYPE.grids), "ref": max(PTYPE.grids) if PTYPE.grids else None}
