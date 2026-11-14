@@ -446,11 +446,11 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=1.07"></script>
-<script src="lang/en.js?v=1.07"></script>
+<script src="lang/de.js?v=1.08"></script>
+<script src="lang/en.js?v=1.08"></script>
 <script>
 "use strict";
-const VERSION = "v1.07";
+const VERSION = "v1.08";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -1708,7 +1708,9 @@ function buildViews() {
   // timelines: last hour + 2 h ahead; the cursor always starts at "now" (newest observation)
   const finish = (frames) => {
     const nowIdx = Math.max(0, frames.findLastIndex((f) => f.ts <= now));
-    const split = frames.findIndex((f, i) => i > 0 && f.map.kind !== frames[i - 1].map.kind);
+    // where the forecast of the weather model takes over (the "Model" / "Prognose" mark in the chart) - only a switch
+    // INTO the model counts: a single model step inside the satellite series put "Prognose" in the middle (14.11.)
+    const split = frames.findIndex((f, i) => i > 0 && f.map.kind !== frames[i - 1].map.kind && (f.map.kind === "model" || f.map.kind === "nowcast"));
     return { frames, nowIdx, idx: nowIdx, split };
   };
   const old = { ...state.views };
@@ -1723,10 +1725,14 @@ function buildViews() {
   // sun: satellite up to now, model forecast afterwards
   {
     const C = state.cloudPoint; // our server's clouds (observed + nowcast), where available
+    // Inside the server's series a step takes the nearest image up to 20 min away: when the satellite skips a slot or
+    // two (14.11. 16:50 and 17:00 UTC) the step fell back to the coarse weather-model map - the clouds changed
+    // completely for one step and "Prognose" appeared in the middle of the timeline (user, 14.11.2026).
+    const near = (L, ts) => (L.length && ts >= L[0].ts - 7.5 * 60e3 && ts <= L[L.length - 1].ts + 7.5 * 60e3 ? 20 : 7.5) * 60e3;
     state.views["sun-short"] = finish(steps(2).map((ts) => {
       const isDay = isDayAt(ts) ? 1 : 0;
       const e = C.length ? C.reduce((a, b) => (Math.abs(b.ts - ts) < Math.abs(a.ts - ts) ? b : a)) : null;
-      if (e && Math.abs(e.ts - ts) <= 7.5 * 60e3) {
+      if (e && Math.abs(e.ts - ts) <= near(C, ts)) {
         // the Germany server sends the sun share itself ("sun", from DWD's direct radiation); else from the cloudiness
         const sun = isDay ? (e.sun != null ? e.sun : sunShare(e.cloud)) : 0;
         return { ts, value: sun, model: sun, isDay, temp: temp(ts), map: { kind: "ctile", ts: e.ts, fc: e.fc } };
@@ -1736,7 +1742,7 @@ function buildViews() {
       const sun = isDay ? clamp(1 - interp(p.t, p.cover, ts) / 100, 0, 1) : 0;
       const F = state.cloudFrames || [];
       const g = F.length ? F.reduce((a, b) => (Math.abs(b.ts - ts) < Math.abs(a.ts - ts) ? b : a)) : null;
-      if (g && Math.abs(g.ts - ts) <= 7.5 * 60e3) // place outside the sunny area: its map, the model's values
+      if (g && Math.abs(g.ts - ts) <= near(F, ts)) // place outside the sunny area: its map, the model's values
         return { ts, value: sun, model: sun, isDay, temp: temp(ts), map: { kind: "ctile", ts: g.ts, fc: g.fc } };
       const S = state.satLatest;
       let map = { kind: "model" };
