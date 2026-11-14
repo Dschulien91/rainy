@@ -451,7 +451,7 @@
 <script src="lang/en.js"></script>
 <script>
 "use strict";
-const VERSION = "v1.06";
+const VERSION = "v1.07";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -898,7 +898,9 @@ function rainColor(mmh, kind) {
 }
 const rgba = (c, alphaScale = 1) => `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${c[3] * alphaScale})`;
 // Clouds: light on the dark map, slate on the light map. Clear sky by day gets a warm sun tint.
-const CLOUD_RGB = dark ? [236, 240, 247] : [128, 128, 128];
+// Follows the MAP (design), not the app theme: white clouds on the light designs "Klassisch" / "Bunt" were almost
+// invisible (user, 14.11.2026); on a light map they are a dark slate grey.
+const CLOUD_RGB = mapDark ? [236, 240, 247] : [96, 104, 118];
 // Clear sky by day: a warm yellow-to-red glow (pick a variant for testing with ?sun=1..4)
 const SUN_VARIANTS = { 1: [[255, 150, 20], 0.34], 2: [[255, 95, 35], 0.34], 3: [[255, 200, 40], 0.3], 4: [[240, 60, 70], 0.3] };
 const [SUN_RGB, SUN_ALPHA_LOOK] = SUN_VARIANTS[new URLSearchParams(location.search).get("sun")] || SUN_VARIANTS[1];

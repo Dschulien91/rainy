@@ -17,6 +17,14 @@ What is removed - all of it must hold, so that no real rain goes:
 Small stationary cores (a thunderstorm anchored at a mountain, also ground clutter) are NOT touched. The removed cells
 get the level of their surroundings (the opening), not zero.
 
+Single-image spokes (since server-v1.26, 14.11.2026): the user saw thin straight streaks over Bosnia and Slovakia that
+"disappear and come back" when scrolling back - an 80 km line of 10-30 mm/h in ONE image (12:15 UTC) over dry Bosnia,
+and 40-70 km lines of 0.1-0.5 mm/h over Slovakia in every second or third image at changing angles. They are
+interference too, but they never stay, so the "unmoved" test let them through (and showing them in some images and
+not in others is what flickers). Second pass on each image alone, stricter instead of persistent: thin against a
+much lower level (SINGLE_MIN_RES - light streaks too), at least SINGLE_MIN_LEN_KM long, SINGLE_DENSITY of the
+segment filled with gaps of at most SINGLE_GAP_KM, and passing a radar site within SINGLE_NEAR_KM (+ SLOPE).
+
 Test on the live images: spoke_test.py in EVALUATION.md 8b (lists every removed line with its radar).
 """
 import json
@@ -36,6 +44,17 @@ MAX_RANGE_KM = 250.0   # a radar's range: the site may be this far from the segm
 NEAR_KM = 3.0          # how near the line must pass the site ... plus SLOPE km per km between the segment and the site
 SLOPE = 0.02           # (the direction of a 30 km segment of 2 km cells is known to ~1 degree)
 KEEP_MS = 3 * 3600_000
+SINGLE_MIN_RES = 0.05     # mm/h above the surroundings (and above their own level)
+SINGLE_MIN_LEN_KM = 40.0
+SINGLE_DENSITY = 0.5
+SINGLE_GAP_KM = 8.0       # the single-image streaks are dotted: beads of 2-6 km with gaps (14.11.: 4 km split them up)
+SINGLE_EXTEND_KM = 20.0   # removed this far beyond the found segment along its line (the rest of a dotted streak)
+SINGLE_NEAR_KM = 3.0
+SINGLE_WIDTH = 3.0        # cells either side of the line that go with it (dotted streaks wobble more than spokes that stay)
+SINGLE_SLOPE = 0.01
+SINGLE_DISC_KM = DISC_KM  # 30 km (to catch the wider beads near the radar) removed 11-16k cells per image = real rain
+SINGLE_DRY = 0.05         # mm/h: the surroundings (the opening) must be about dry - inside real rain fields the
+                          # small-scale structure of the rain itself forms dozens of "lines" per image (14.11. test)
 # Radars of the composite that the public list does not hold (positions to ~1 km): Austria
 EXTRA_SITES = [("atrau", 48.074, 16.536), ("atfel", 48.065, 13.062), ("atzir", 47.072, 14.560),
                ("atpat", 47.209, 11.461), ("atval", 47.158, 10.213)]
@@ -49,12 +68,12 @@ def sites(host, merc):
     return [(r[0], float(c), float(q)) for r, c, q in zip(rows, col, row) if 0 <= c < host.NX and 0 <= q < host.NY]
 
 
-def thin(rate, km):
+def thin(rate, km, min_res=MIN_RES, disc_km=DISC_KM):
     """(mask of the cells that stand out as a thin structure, the field's level without them)."""
     r = np.maximum(rate, 0).astype(np.float32)
-    k = max(3, int(round(DISC_KM / km)) | 1)
+    k = max(3, int(round(disc_km / km)) | 1)
     bg = cv2.morphologyEx(r, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
-    return r - bg > np.maximum(MIN_RES, bg), bg
+    return r - bg > np.maximum(min_res, bg), bg
 
 
 class SpokeFilter:
@@ -72,22 +91,37 @@ class SpokeFilter:
         self.seen[ts] = np.flatnonzero(cv2.dilate(cand.astype(np.uint8), np.ones((3, 3), np.uint8))).astype(np.int32)
         for t in [t for t in self.seen if t < max(self.seen) - KEEP_MS]:
             del self.seen[t]
+        found = []
         near = [m for t, m in self.seen.items() if abs(t - ts) <= WINDOW_MS]
-        if len(near) < MIN_IMAGES:
-            return rate, []
-        count = np.zeros(rate.size, np.uint8)
-        for m in near:
-            count[m] += 1
-        stay = (cand & (count.reshape(rate.shape) >= SHARE * len(near))).astype(np.uint8)
+        if len(near) >= MIN_IMAGES:   # lines that stay
+            count = np.zeros(rate.size, np.uint8)
+            for m in near:
+                count[m] += 1
+            stay = (cand & (count.reshape(rate.shape) >= SHARE * len(near))).astype(np.uint8)
+            rate, found = self._remove(rate, bg, stay, MIN_LEN_KM, MAX_GAP_KM, 0.5, NEAR_KM)
+        # lines in this image alone (interference that comes and goes)
+        one, bg1 = thin(rate, km, SINGLE_MIN_RES, SINGLE_DISC_KM)
+        dry = cv2.erode((bg1 < SINGLE_DRY).astype(np.uint8), np.ones((5, 5), np.uint8)).astype(bool)
+        rate, more = self._remove(rate, bg1, (one & (rate >= 0.05) & dry).astype(np.uint8), SINGLE_MIN_LEN_KM,
+                                  SINGLE_GAP_KM, SINGLE_DENSITY, SINGLE_NEAR_KM, beads=True, extend_km=SINGLE_EXTEND_KM,
+                                  slope=SINGLE_SLOPE, width=SINGLE_WIDTH, take=rate >= 0.05)
+        return rate, found + [(length, code + "*", mid) for length, code, mid in more]   # "*": found in one image
+
+    def _remove(self, rate, bg, stay, min_len, max_gap, density, near_km, beads=False, extend_km=0.0, slope=SLOPE,
+                width=2.0, take=None):
+        km = self.km
         three = np.ones((3, 3), np.uint8)
-        line = stay & ~cv2.dilate(cv2.erode(stay, three), three)   # without the patches of 3 x 3 cells and more
-        segs = cv2.HoughLinesP(line * 255, 1, np.pi / 360, threshold=int(MIN_LEN_KM / km * 0.5),
-                               minLineLength=MIN_LEN_KM / km, maxLineGap=MAX_GAP_KM / km)
+        # without the patches of 3 x 3 cells and more - except for dotted single-image streaks, which are made of them
+        line = stay if beads else stay & ~cv2.dilate(cv2.erode(stay, three), three)
+        segs = cv2.HoughLinesP(line * 255, 1, np.pi / 360, threshold=int(min_len / km * density),
+                               minLineLength=min_len / km, maxLineGap=max_gap / km)
         if segs is None:
             return rate, []
         ys, xs = np.nonzero(line)
         pts = np.stack([xs, ys], 1).astype(np.float64)
-        ays, axs = np.nonzero(stay)   # removed along a found line: every thin unmoved cell, patches too
+        # removed along a found line: every thin unmoved cell, patches too - for a single-image streak every wet cell
+        # on it (its thicker beads near the radar are no longer "thin" against the opening and were left standing)
+        ays, axs = np.nonzero(stay if take is None else take)
         apts = np.stack([axs, ays], 1).astype(np.float64)
         remove = np.zeros(rate.shape, np.uint8)
         found = []
@@ -97,7 +131,7 @@ class SpokeFilter:
             u /= length
             rel = pts - (x1, y1)
             on = (np.abs(rel @ (-u[1], u[0])) <= 2.0) & (rel @ u >= -3) & (rel @ u <= length + 3)
-            if on.sum() < length * 0.5:
+            if on.sum() < length * density:
                 continue
             # the line through those cells (least squares), then: does it pass a radar?
             vx, vy, x0, y0 = cv2.fitLine(pts[on].astype(np.float32), cv2.DIST_L2, 0, 0.01, 0.01).ravel()
@@ -105,14 +139,15 @@ class SpokeFilter:
             along, across = d @ (vx, vy), np.abs(d @ (-vy, vx))
             a = (pts[on] - (x0, y0)) @ (vx, vy)
             gap = np.maximum(0, np.maximum(a.min() - along, along - a.max()))  # site to the segment, along the line
-            hit = (gap * km <= MAX_RANGE_KM) & (across * km <= NEAR_KM + SLOPE * gap * km)
+            hit = (gap * km <= MAX_RANGE_KM) & (across * km <= near_km + slope * gap * km)
             if not hit.any():
                 continue
             k = int(np.argmin(np.where(hit, across, np.inf)))
             if not remove[ys[on], xs[on]].all():
                 found.append((round((a.max() - a.min()) * km), self.codes[k], (int(xs[on].mean()), int(ys[on].mean()))))
             d = apts - (x0, y0)
-            sel = (np.abs(d @ (-vy, vx)) <= 2.0) & (d @ (vx, vy) >= a.min() - 3) & (d @ (vx, vy) <= a.max() + 3)
+            ext = 3 + extend_km / km
+            sel = (np.abs(d @ (-vy, vx)) <= width) & (d @ (vx, vy) >= a.min() - ext) & (d @ (vx, vy) <= a.max() + ext)
             remove[ays[sel], axs[sel]] = 1
         if not found:
             return rate, []
