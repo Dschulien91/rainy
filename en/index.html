@@ -456,11 +456,11 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=1.05"></script>
-<script src="lang/en.js?v=1.05"></script>
+<script src="lang/de.js?v=1.06"></script>
+<script src="lang/en.js?v=1.06"></script>
 <script>
 "use strict";
-const VERSION = "v1.05";
+const VERSION = "v1.06";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -622,7 +622,7 @@ const MAP_STYLE = (() => {
   let st = {};
   try { st = JSON.parse(localStorage.getItem("rainy.style")) || {}; } catch {}
   return { sat: st.sat === "photo" ? "photo" : "clouds", theme: ["light", "dark", "auto"].includes(st.theme) ? st.theme : "dark", // dark by default (07.11.)
-    rain: st.rain === "eu" ? "eu" : "mix", area: st.area === "de" ? "de" : "eu", eusrc: st.eusrc === "opera" ? "opera" : "nat", // own Europe picture by default (user, 14.11.2026) render: st.render === "img" ? "img" : "gl", // WebGL by default (10.11.); pictures without WebGL
+    rain: st.rain === "eu" ? "eu" : "mix", area: st.area === "de" ? "de" : "eu", eusrc: st.eusrc === "opera" ? "opera" : "nat" /* own Europe picture by default (user, 14.11.2026) */, render: st.render === "img" ? "img" : "gl", // WebGL by default (10.11.); pictures without WebGL
     fc: (new URLSearchParams(location.search).get("fc") || st.fc) === "own" ? "own" : "dwd", design: ["liberty", "bright", "fiord", "earth"].includes(st.design) ? st.design : "plain" };
 })();
 // Edition: "de" = first public version (Germany: rain radar 2 h + 24 h / 3 days; sunny 2 h from the server's DWD satellite
