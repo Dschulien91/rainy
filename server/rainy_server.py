@@ -102,7 +102,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v1.22"
+VERSION = "server-v1.23"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -581,10 +581,18 @@ class Region:
     SPROG_DOWN = 0    # S-PROG runs at grid resolution / SPROG_DOWN (0: simple nowcast only)
     RAW_DOWN = 3      # the forecast without the model's new cells (fc_raw) is kept at grid resolution / RAW_DOWN
     MODELS = None     # Open-Meteo "models" for the blend (None: best match per place)
+    # A 5-minute step the source skipped is filled with the previous run's forecast for it (regions whose source
+    # delivers every 5 minutes). 14.11.2026 02:40 UTC: OPERA skipped one image - for an hour one step of the
+    # timeline was empty all over Europe (found by check_tile_gaps: "wet 0 between 620 and 617") and three runs fell
+    # back to the simple nowcast (S-PROG wants the images 5, 10, 15 and 30 min back; the simple one showed +40 %
+    # rain area, a jump at "now"). The own picture has such holes more often: a step waits up to 20 min for a
+    # national layer while the next one is already there. The real image replaces the fill when it arrives.
+    FILL_GAPS = False
 
     def __init__(self):
         self.lock = threading.Lock()
         self.obs, self.fc, self.ref = {}, {}, None
+        self.filled = set()  # steps in obs that are a forecast standing in for a missing image
         self.model = None
 
     def latest(self):
@@ -605,19 +613,32 @@ class Region:
         now = int(time.time() * 1000)
         # 15 min more than the hour the timeline shows: its first step (Mosaic.frames, now - 60 min rounded down) must
         # still have its image when it is asked for a few minutes later (10.11.: the first Europe step was empty)
-        avail = {t: s for t, s in self.list_times().items() if t > now - HISTORY_MS - 15 * 60_000}
-        new = [t for t in sorted(avail) if t not in self.obs]
+        cutoff = now - HISTORY_MS - 15 * 60_000
+        avail = {t: s for t, s in self.list_times().items() if t > cutoff}
+        new = [t for t in sorted(avail) if t not in self.obs or t in self.filled]
         for t in new:
             g = self.load(avail[t]).astype(np.float16)  # half the memory; plenty precise for rain rates
             with self.lock:
                 self.obs[t] = g
+                self.filled.discard(t)
         if not new:
             return 0
         with self.lock:
             for t in list(self.obs):
-                if t not in avail:
+                if t not in avail and not (t in self.filled and t > cutoff):
                     del self.obs[t]
+                    self.filled.discard(t)
             times = sorted(self.obs)
+            if self.FILL_GAPS:
+                for a, b in zip(times, times[1:]):
+                    if STEP_MS < b - a <= 3 * STEP_MS:  # one or two images missing; longer holes stay visible
+                        for t in range(a + STEP_MS, b, STEP_MS):
+                            if self.fc.get(t) is not None:
+                                self.obs[t] = self.fc[t]
+                                self.filled.add(t)
+                                log(f"{self.name}: no image for {datetime.fromtimestamp(t / 1000, timezone.utc):%H:%MZ} "
+                                    f"- filled with the previous run's forecast")
+                times = sorted(self.obs)
             last_t = times[-1]
             prev_t = next((t for t in reversed(times) if last_t - t >= 29 * 60_000), times[0])
             prev, last = self.obs[prev_t], self.obs[last_t]
@@ -700,6 +721,7 @@ class EuropeOpera(Region):
     # instance (the app's "European" source) since v1.19 (user, 13.11.2026: yes). check_spokes.py switches it off to
     # see the raw images.
     DESPOKE = True
+    FILL_GAPS = True
     gauge_px = None  # rain gauges of check_national_gauges.py on this grid: (col, row, on the grid)
 
     def gauges(self):
