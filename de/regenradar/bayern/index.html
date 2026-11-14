@@ -446,11 +446,11 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=1.04"></script>
-<script src="lang/en.js?v=1.04"></script>
+<script src="lang/de.js?v=1.05"></script>
+<script src="lang/en.js?v=1.05"></script>
 <script>
 "use strict";
-const VERSION = "v1.04";
+const VERSION = "v1.05";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -2538,8 +2538,23 @@ function stripHTML(all, three, rain, tz = PLACE_TZ) {
       `<span class="tp">${Math.round(h.temp)}°</span><span class="bar">${bar}</span></button>`;
   }).join("");
 }
+// The hours the radar timeline covers (measured + 2 h forecast) take their rain from it instead of from the weather
+// model: before, the 24 h strip could show a dry hour while the 2 h timeline right above it showed rain, and the
+// other way round (user, 14.11.2026: "ob sich die 24 Stunden und die 120 Minuten Vorhersage widersprechen können").
+// An hour counts when the radar has at least 9 of its 12 five-minute steps; its icon then follows the radar too.
+function hoursWithRadar(list) {
+  const r = state.radarPoint;
+  if (!list || !r || r.length < 9) return list;
+  return list.map((h) => {
+    const v = r.filter((q) => q.ts >= h.ts && q.ts < h.ts + 3600e3 && Number.isFinite(q.mmh));
+    if (v.length < 9) return h;
+    const mm = v.reduce((a, q) => a + q.mmh, 0) / v.length;
+    const wetCode = (h.code >= 51 && h.code <= 67) || (h.code >= 71 && h.code <= 86) || h.code >= 95;
+    return { ...h, precip: mm, code: mm < 0.1 && wetCode ? (h.cover >= 80 ? 3 : 2) : h.code, radar: true };
+  });
+}
 function renderHours() {
-  document.getElementById("hours").innerHTML = stripHTML(state.hours, state.hoursRange === "3d", state.mode === "rain");
+  document.getElementById("hours").innerHTML = stripHTML(hoursWithRadar(state.hours), state.hoursRange === "3d", state.mode === "rain");
 }
 // Short message over the map; it stays until hideToast().
 function toast(text) {
