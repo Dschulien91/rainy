@@ -23,6 +23,19 @@ Gauges (independent of all radar data), each list open data without an account:
       (exact over full hours, slightly smoothed in the 10-minute pairs)
       More Italian regions are on the list (EVALUATION.md 8b).
   cz  CHMI open data, 10-minute sums (element SRA10M) of the automatic stations, one file per station and day
+  se  SMHI metobs (opendata-download-metobs.smhi.se, CC BY 4.0), parameter 14 = 15-MINUTE sums (spread as "ie"),
+      ~125 stations; published hourly, so 30-90 min behind. One bulk file for the last hour, else per station
+      "latest-day" (4 workers).
+  fi  FMI open WFS (opendata.fmi.fi, CC BY 4.0), ri_10min = mean precipitation intensity of the 10 minutes ending at
+      the time (mm/h, / 6 = mm), ~115 weather stations in one request, a few minutes behind.
+  en  England, Environment Agency flood-monitoring API (environment.data.gov.uk, Open Government Licence v3), ~950
+      tipping-bucket gauges, 15-MINUTE totals (spread as "ie"), 15-60 min behind (many gauges send hourly). Read
+      newest first, 10000 readings per page (~2.7 h of all gauges), pages in parallel (4 at most).
+  hu  HungaroMet open data (odp.met.hu, free with the source named: HungaroMet ODP terms of use), automatic
+      stations, 10-minute sums (r), one small zipped CSV per 10 minutes (the last ~24 h kept), ~260 gauges, ~20 min
+      behind.
+  Not used: Poland (IMGW's open API holds only the newest 10-minute value, no history), Slovakia (SHMU's open server
+  has 1-minute gauge data but no station positions), Norway, Denmark, the Netherlands (identifying header or key).
 "Shadow" layers (national.Layer.SHADOW: loaded, noted here, not in the picture) get their own tables: where such a
 candidate has data, OPERA alone and the own picture against "only <shadow>" - the evidence for promoting it.
 New lists are appended to stations.json (the order of the older files stays valid; they are shorter).
@@ -61,9 +74,18 @@ LOMBARDY = "https://www.dati.lombardia.it/resource"
 VENETO = "https://api.arpa.veneto.it/REST/v1"
 CZECH = "https://opendata.chmi.cz/meteorology/climate/now"
 EMILIA = "https://dati-simc.arpae.it/opendata/osservati/meteo/realtime/realtime.jsonl"
+SWEDEN = "https://opendata-download-metobs.smhi.se/api/version/1.0/parameter/14"
+FINLAND = ("https://opendata.fmi.fi/wfs?service=WFS&version=2.0.0&request=getFeature"
+           "&storedquery_id=fmi::observations::weather::multipointcoverage&bbox=19,59,32,71"
+           "&parameters=ri_10min&timestep=10&maxlocations=1000")
+ENGLAND = "https://environment.data.gov.uk/flood-monitoring"
+ENGLAND_MEASURE = "-rainfall-tipping_bucket_raingauge-t-15_min-mm"
+HUNGARY = "https://odp.met.hu/weather/weather_reports/synoptic/hungary/10_minutes/csv"
 NAMES = {"de": "Germany (DWD gauges)", "at": "Austria (TAWES gauges)", "ch": "Switzerland (MeteoSwiss gauges)",
          "it": "Italy, Lombardy (ARPA Lombardia gauges)", "iv": "Italy, Veneto (ARPAV gauges)",
-         "cz": "Czechia (CHMI gauges)", "ie": "Italy, Emilia-Romagna (ARPAE gauges)"}
+         "cz": "Czechia (CHMI gauges)", "ie": "Italy, Emilia-Romagna (ARPAE gauges)",
+         "se": "Sweden (SMHI gauges)", "fi": "Finland (FMI gauges)", "en": "England (Environment Agency gauges)",
+         "hu": "Hungary (HungaroMet gauges)"}
 
 
 # ---------- gauge lists ----------
@@ -141,7 +163,95 @@ def _list_ie(fetch):
     return [("ie", sid, lat, lon) for sid, (lat, lon) in sorted(pos.items())]
 
 
-LISTS = {"de": _list_de, "at": _list_at, "ch": _list_ch, "it": _list_it, "iv": _list_iv, "cz": _list_cz, "ie": _list_ie}
+def _list_se(fetch):
+    """The stations of SMHI's bulk file that reported in the last week."""
+    d = json.loads(fetch(f"{SWEDEN}/station-set/all/period/latest-hour/data.json", timeout=60))
+    week = time.time() * 1000 - 7 * 86400_000
+    return [("se", str(s["key"]), float(s["latitude"]), float(s["longitude"])) for s in d.get("station", [])
+            if (s.get("to") or 0) > week and s.get("latitude") is not None]
+
+
+def _fmi_rows(raw):
+    """(fmisid, lat, lon, end of the 10 minutes in ms, mm) from FMI's multipointcoverage answer (positions
+    "lat lon epoch" and values in the same order; the station points carry the fmisid)."""
+    import re
+    x = raw.decode("utf-8", "replace")
+    sid = {(a, b): i for i, a, b in re.findall(r'gml:id="point-(\d+)".*?<gml:pos>\s*(\S+)\s+(\S+)\s*</gml:pos>', x, re.S)}
+    pos = re.search(r"<gmlcov:positions>(.*?)</gmlcov:positions>", x, re.S)
+    val = re.search(r"<gml:doubleOrNilReasonTupleList>(.*?)</gml:doubleOrNilReasonTupleList>", x, re.S)
+    if not pos or not val:
+        return
+    pos, val = pos.group(1).split(), val.group(1).split()
+    for i in range(min(len(pos) // 3, len(val))):
+        lat, lon, t = pos[3 * i:3 * i + 3]
+        try:
+            v = float(val[i])
+        except ValueError:
+            continue
+        if v == v and v >= 0 and (lat, lon) in sid:  # NaN = no value
+            yield sid[(lat, lon)], float(lat), float(lon), int(t) * 1000, v / 6
+
+
+def _fmi_get(since, until, fetch=None):
+    iso = lambda ms: datetime.fromtimestamp(ms / 1000, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    since = max(since, until - 160 * 3600_000)  # FMI answers at most 168 hours of 10-minute data
+    return (fetch or _get)(f"{FINLAND}&starttime={iso(since)}&endtime={iso(until)}", timeout=120)
+
+
+def _list_fi(fetch):
+    now = int(time.time() * 1000)
+    pos = {sid: (lat, lon) for sid, lat, lon, _, _ in _fmi_rows(_fmi_get(now - 3 * 3600_000, now, fetch))}
+    return [("fi", sid, lat, lon) for sid, (lat, lon) in sorted(pos.items())]
+
+
+def _list_en(fetch):
+    """Environment Agency rainfall stations with a 15-minute tipping-bucket total (id = station reference)."""
+    d = json.loads(fetch(f"{ENGLAND}/id/stations?parameter=rainfall&_limit=10000", timeout=120))
+    out = {}
+    for s in d.get("items", []):
+        ms = s.get("measures") or []
+        ms = ms if isinstance(ms, list) else [ms]
+        ref = s.get("stationReference") or s.get("notation")
+        if (ref and ref not in out and isinstance(s.get("lat"), float) and isinstance(s.get("long"), float)
+                and any(str(m.get("@id", "")).endswith(f"/{ref}{ENGLAND_MEASURE}") for m in ms if isinstance(m, dict))):
+            out[ref] = (s["lat"], s["long"])
+    return [("en", ref, lat, lon) for ref, (lat, lon) in sorted(out.items())]
+
+
+def _hungary_rows(raw):
+    """(station, lat, lon, end of the 10 minutes in ms, mm) of one HungaroMet file (a zipped ";" CSV; Time = the
+    end of the 10 minutes in UTC, r = 10-minute sum, -999 = no value)."""
+    z = zipfile.ZipFile(io.BytesIO(raw))
+    lines = z.read(z.namelist()[0]).decode("utf-8", "replace").splitlines()
+    k = {h.strip(): i for i, h in enumerate(lines[0].split(";"))}
+    for line in lines[1:]:
+        q = [x.strip() for x in line.split(";")]
+        try:
+            v = float(q[k["r"]])
+            if v >= 0:
+                yield q[k["StationNumber"]], float(q[k["Latitude"]]), float(q[k["Longitude"]]), _ms(q[k["Time"]], "%Y%m%d%H%M"), v
+        except (ValueError, IndexError, KeyError):
+            continue
+
+
+def _hungary_files(fetch, since, until):
+    """The file names made from `since` until an hour after `until` (late reports come in later files)."""
+    import re
+    names = sorted(set(re.findall(r"HABP_10M_SYNOP_(\d{14})\.csv\.zip", fetch(f"{HUNGARY}/", timeout=60).decode("latin-1"))))
+    return [f"HABP_10M_SYNOP_{n}.csv.zip" for n in names if since <= _ms(n[:12], "%Y%m%d%H%M") <= until + 3600_000]
+
+
+def _list_hu(fetch):
+    now = int(time.time() * 1000)
+    pos = {}
+    for name in _hungary_files(fetch, now - 3600_000, now)[-6:]:
+        for sid, lat, lon, _, _ in _hungary_rows(fetch(f"{HUNGARY}/{name}", timeout=60)):
+            pos[sid] = (lat, lon)
+    return [("hu", sid, lat, lon) for sid, (lat, lon) in sorted(pos.items())]
+
+
+LISTS = {"de": _list_de, "at": _list_at, "ch": _list_ch, "it": _list_it, "iv": _list_iv, "cz": _list_cz, "ie": _list_ie,
+         "se": _list_se, "fi": _list_fi, "en": _list_en, "hu": _list_hu}
 
 
 # ---------- recording (inside the server) ----------
@@ -378,8 +488,143 @@ def gauges_ie(ids, since, until):
             for sid, f in five.items()}
 
 
+def _spread15(fifteen):
+    """{id: {end of 15 minutes: mm}} -> {id: {ts: mm in the 10 minutes ending at ts}}: every sum spread evenly over
+    its three 5-minute bins, as in gauges_ie (exact over full hours)."""
+    out = {}
+    for sid, ser in fifteen.items():
+        five = {}
+        for t, v in ser.items():
+            for k in range(3):
+                five[t - k * 300_000] = v / 3
+        g = {t: v + five[t - 300_000] for t, v in five.items() if t % 600_000 == 0 and t - 300_000 in five}
+        if g:
+            out[sid] = g
+    return out
+
+
+def _sweden_values(stations):
+    """{station: {end of 15 minutes: mm}} of SMHI station entries; quality G (checked) or Y (suspect/unchecked)."""
+    out = {}
+    for key, values in stations:
+        for r in values or []:
+            try:
+                v = float(r["value"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if v >= 0 and r.get("quality") in ("G", "Y"):
+                out.setdefault(str(key), {})[int(r["date"])] = v
+    return out
+
+
+def gauge_se(sid):
+    try:
+        d = json.loads(_get(f"{SWEDEN}/station/{sid}/period/latest-day/data.json", timeout=30))
+        return _sweden_values([(sid, d.get("value"))]).get(sid, {})
+    except Exception:
+        return {}
+
+
+def gauges_se(ids, since, until):
+    """The last hour from the one bulk file; a longer look-back from each station's last 24 hours (4 workers)."""
+    want = set(ids)
+    try:
+        if since >= time.time() * 1000 - 3600_000:
+            d = json.loads(_get(f"{SWEDEN}/station-set/all/period/latest-hour/data.json", timeout=60))
+            fifteen = _sweden_values((s["key"], s.get("value")) for s in d.get("station", []) if str(s["key"]) in want)
+        else:
+            with ThreadPoolExecutor(4) as ex:
+                fifteen = dict(zip(ids, ex.map(gauge_se, ids)))
+    except Exception as e:
+        print(f"  (Swedish gauges: {e})")
+        return {}
+    return _spread15({sid: {t: v for t, v in f.items() if since - 900_000 <= t <= until + 900_000}
+                      for sid, f in fifteen.items()})
+
+
+def gauges_fi(ids, since, until):
+    try:
+        raw = _fmi_get(since - 600_000, until)
+    except Exception as e:
+        print(f"  (Finnish gauges: {e})")
+        return {}
+    want, out = set(ids), {}
+    for sid, _, _, t, v in _fmi_rows(raw):
+        if sid in want and since <= t <= until:
+            out.setdefault(sid, {})[t] = v
+    return out
+
+
+def gauges_en(ids, since, until):
+    """All rainfall readings of the days in question, newest first, page by page (4 in parallel) until the pages
+    reach `since`; only the 15-minute tipping-bucket totals of the listed stations are kept."""
+    day = lambda ms: datetime.fromtimestamp(ms / 1000, timezone.utc).strftime("%Y-%m-%d")
+    lo = since - 900_000
+    url = (f"{ENGLAND}/data/readings?parameter=rainfall&startdate={day(lo)}&enddate={day(until)}&_sorted&_limit=10000"
+           "&_offset=")
+    want, fifteen, t0 = set(ids), {}, time.time()
+
+    def page(k):
+        try:
+            return json.loads(_get(f"{url}{k * 10000}", timeout=90)).get("items", [])
+        except Exception as e:
+            print(f"  (English gauges, page {k}: {e})")
+            return None
+
+    k, n = 0, min(4, 1 + int((until - lo) / 3600_000 * 0.38))  # ~3800 readings an hour
+    while k < 40 and time.time() - t0 < 50:
+        done = False
+        with ThreadPoolExecutor(4) as ex:
+            pages = list(ex.map(page, range(k, k + n)))
+        for items in pages:
+            if items is None:
+                continue
+            for r in items:
+                m = str(r.get("measure", "")).rsplit("/", 1)[-1]
+                v = r.get("value")
+                if not m.endswith(ENGLAND_MEASURE) or not isinstance(v, (int, float)) or v < 0:
+                    continue
+                sid = m[:-len(ENGLAND_MEASURE)]
+                try:
+                    t = _ms(r["dateTime"][:19], "%Y-%m-%dT%H:%M:%S")
+                except (KeyError, ValueError):
+                    continue
+                if sid in want and lo <= t <= until + 900_000:
+                    fifteen.setdefault(sid, {})[t] = float(v)
+            if len(items) < 10000 or (items and items[-1].get("dateTime", "9")[:19] < datetime.fromtimestamp(
+                    lo / 1000, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")):
+                done = True
+        if done or all(p is None for p in pages):
+            break
+        k, n = k + n, 4
+    return _spread15(fifteen)
+
+
+def gauges_hu(ids, since, until):
+    """One small file per 10 minutes (4 workers); a later file may repeat or complete an earlier time."""
+    try:
+        names = _hungary_files(_get, since, until)
+    except Exception as e:
+        print(f"  (Hungarian gauges: {e})")
+        return {}
+
+    def rows(name):
+        try:
+            return list(_hungary_rows(_get(f"{HUNGARY}/{name}", timeout=30)))
+        except Exception:
+            return []
+
+    want, out = set(ids), {}
+    with ThreadPoolExecutor(4) as ex:
+        for part in ex.map(rows, names):
+            for sid, _, _, t, v in part:
+                if sid in want and since <= t <= until:
+                    out.setdefault(sid, {})[t] = v
+    return out
+
+
 GAUGES = {"de": gauges_de, "at": gauges_at, "ch": gauges_ch, "it": gauges_it, "iv": gauges_iv, "cz": gauges_cz,
-          "ie": gauges_ie}
+          "ie": gauges_ie, "se": gauges_se, "fi": gauges_fi, "en": gauges_en, "hu": gauges_hu}
 
 
 # ---------- the gauge archive: the sources keep hours to days, a model is built on weeks ----------
