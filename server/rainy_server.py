@@ -102,7 +102,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v1.23"
+VERSION = "server-v1.24"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -588,6 +588,7 @@ class Region:
     # rain area, a jump at "now"). The own picture has such holes more often: a step waits up to 20 min for a
     # national layer while the next one is already there. The real image replaces the fill when it arrives.
     FILL_GAPS = False
+    SPROG_THR = 0.1   # S-PROG's rain / no rain threshold (mm/h)
 
     def __init__(self):
         self.lock = threading.Lock()
@@ -654,7 +655,7 @@ class Region:
                 mot = [near(k * 60_000, 240_000) for k in (30, 15)] + [last]
             if all(g is not None for g in seq + mot):
                 try:
-                    pure = sprog_nowcast(seq, mot, FC_STEPS, self.SPROG_DOWN, motion_out=motion)
+                    pure = sprog_nowcast(seq, mot, FC_STEPS, self.SPROG_DOWN, thr=self.SPROG_THR, motion_out=motion)
                     fc = advect_blend(pure, last, motion)  # no break at "now" (ADV_FADE_MIN)
                 except Exception as e:  # never lose the forecast: fall back to the simple method
                     log(f"{self.name} S-PROG failed, using simple nowcast: {e}")
@@ -722,6 +723,13 @@ class EuropeOpera(Region):
     # see the raw images.
     DESPOKE = True
     FILL_GAPS = True
+    # The map draws rain from 0.05 mm/h; with S-PROG's threshold at 0.1 the forecast dropped everything lighter and
+    # lost rain area fast (user, 13.11.: "rain only up to now"; tile_gaps.log: -30 % of the wet pixels by +60 min).
+    # tune_eu.py, 5 runs of the night 13./14.11.2026, cell by cell on the 2 km grid, +30 / +60 / +120 min:
+    # wet area forecast / real 0.92 / 0.82 / 0.82 with 0.1, 1.00 / 1.01 / 1.01 with 0.03; CSI at 0.05 mm/h
+    # 0.57 / 0.46 / 0.36 -> 0.60 / 0.50 / 0.39; at 0.3 and 1 mm/h unchanged (0.50 / 0.38 / 0.28, 0.42 / 0.30 /
+    # 0.20); amount 0.98 / 0.97 / 1.03. Germany's own forecast has used 0.03 since 04.11.
+    SPROG_THR = 0.03
     gauge_px = None  # rain gauges of check_national_gauges.py on this grid: (col, row, on the grid)
 
     def gauges(self):
