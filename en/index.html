@@ -93,11 +93,16 @@
   .radar-frame { transition: opacity 0.45s linear; filter: blur(2.5px); } /* linear cross-fade = smooth playback */
   .nodata-overlay { pointer-events: none; }
   .basemap { transition: filter 0.4s; }
-  body.sunny .basemap { filter: sepia(0.55) saturate(1.6) hue-rotate(-12deg) brightness(1.08); } /* light orange cast */
+  /* light orange cast - only with the default design "Schlicht"; the other designs show their own map under the
+     clouds (user, 14.11.2026: "bei Klassisch würde ich die normale Karte mit Wolken erwarten") */
+  body.sunny.sun-look .basemap { filter: sepia(0.55) saturate(1.6) hue-rotate(-12deg) brightness(1.08); }
   .eu-frame, .srvus-frame, .srvsat-frame { transition: opacity 0.45s linear; filter: blur(1px); } /* already interpolated by the server */
   .sat-frame { transition: opacity 0.4s ease; filter: blur(3px); }
   .rain-tiles { transition: opacity 0.35s linear; } /* outlines are smoothed and anti-aliased by the server */
-  .cloud-tiles { transition: opacity 0.4s ease; } /* sharp cloud edges, drawn at screen resolution */
+  /* sharp cloud edges, drawn at screen resolution. No cross-fade between time steps: while one step faded out and
+     the next faded in, both were half transparent - clouds and sun tint paled at every step and vanished when the
+     timeline was dragged quickly (user, 14.11.2026). Rain (WebGL) has no such fade either. */
+  .cloud-tiles { transition: none; }
   /* dark map: lighten instead of covering, so sun tint reads as warm light and not olive */
   .place button { border: 0; background: var(--night); color: var(--fg); border-radius: 999px;
     font-size: 11px; padding: 1px 7px; margin-left: 6px; cursor: pointer; }
@@ -451,11 +456,11 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=1.03"></script>
-<script src="lang/en.js?v=1.03"></script>
+<script src="lang/de.js?v=1.04"></script>
+<script src="lang/en.js?v=1.04"></script>
 <script>
 "use strict";
-const VERSION = "v1.03";
+const VERSION = "v1.04";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -617,7 +622,7 @@ const MAP_STYLE = (() => {
   let st = {};
   try { st = JSON.parse(localStorage.getItem("rainy.style")) || {}; } catch {}
   return { sat: st.sat === "photo" ? "photo" : "clouds", theme: ["light", "dark", "auto"].includes(st.theme) ? st.theme : "dark", // dark by default (07.11.)
-    rain: st.rain === "eu" ? "eu" : "mix", area: st.area === "de" ? "de" : "eu", eusrc: st.eusrc === "nat" ? "nat" : "opera", render: st.render === "img" ? "img" : "gl", // WebGL by default (10.11.); pictures without WebGL
+    rain: st.rain === "eu" ? "eu" : "mix", area: st.area === "de" ? "de" : "eu", eusrc: st.eusrc === "opera" ? "opera" : "nat", // own Europe picture by default (user, 14.11.2026) render: st.render === "img" ? "img" : "gl", // WebGL by default (10.11.); pictures without WebGL
     fc: (new URLSearchParams(location.search).get("fc") || st.fc) === "own" ? "own" : "dwd", design: ["liberty", "bright", "fiord", "earth"].includes(st.design) ? st.design : "plain" };
 })();
 // Edition: "de" = first public version (Germany: rain radar 2 h + 24 h / 3 days; sunny 2 h from the server's DWD satellite
@@ -905,7 +910,12 @@ const rgba = (c, alphaScale = 1) => `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${
 const CLOUD_RGB = dark ? [236, 240, 247] : [128, 128, 128];
 // Clear sky by day: a warm yellow-to-red glow (pick a variant for testing with ?sun=1..4)
 const SUN_VARIANTS = { 1: [[255, 150, 20], 0.34], 2: [[255, 95, 35], 0.34], 3: [[255, 200, 40], 0.3], 4: [[240, 60, 70], 0.3] };
-const [SUN_RGB, SUN_ALPHA] = SUN_VARIANTS[new URLSearchParams(location.search).get("sun")] || SUN_VARIANTS[1];
+const [SUN_RGB, SUN_ALPHA_LOOK] = SUN_VARIANTS[new URLSearchParams(location.search).get("sun")] || SUN_VARIANTS[1];
+// The sun look (orange map + warm tint on clear sky) belongs to the default design "Schlicht"; with the other designs
+// sunny shows their map as it is with the clouds on top (user, 14.11.2026).
+const SUN_LOOK = MAP_STYLE.design === "plain";
+const SUN_ALPHA = SUN_LOOK ? SUN_ALPHA_LOOK : 0;
+document.body.classList.toggle("sun-look", SUN_LOOK);
 // Satellite look (test with ?sat=photo): "clouds" = clouds from the satellite photo drawn as our cloud layer with
 // the sun tint on clear sky; "photo" = the EUMETSAT GeoColour photo itself, like classic satellite maps.
 // Germany edition: always "clouds" (the photo comes from EUMETSAT for Europe; the server's DWD data is a cloud field).
