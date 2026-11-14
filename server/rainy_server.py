@@ -102,7 +102,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v1.24"
+VERSION = "server-v1.25"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -723,6 +723,73 @@ class EuropeOpera(Region):
     # see the raw images.
     DESPOKE = True
     FILL_GAPS = True
+    # WARM START: the images and the forecast of the last run are kept on disk, and a restarted instance continues
+    # with them at once instead of serving nothing, then measured images without a forecast, for 2-4 minutes
+    # (user, 13.11.2026: "mal war was da und manchmal nicht ... nur bis 'jetzt' was da" - three restarts while he
+    # was looking). Same run -> same tile key, so the app does not notice. Older than 20 min: a cold start.
+    STATE_DIR = os.path.join(os.environ.get("VERIFY_LOG_DIR", "."), "state") if EDITION == "eu" else None
+
+    def save_state(self):
+        d = self.STATE_DIR
+        if not d or not self.state_lock.acquire(blocking=False):  # the previous save is still writing
+            return
+        try:
+            os.makedirs(d, exist_ok=True)
+            with self.lock:
+                obs, fc, ref, filled = dict(self.obs), dict(self.fc), self.ref, set(self.filled)
+            have = {int(f[4:-4]) for f in os.listdir(d) if f.startswith("obs_") and f.endswith(".npz")}
+            for t in (obs.keys() - have) | (self.saved_filled - filled) & obs.keys():  # new, or real image for a fill
+                tmp = os.path.join(d, f"tmp_{t}.npz")
+                np.savez_compressed(tmp, g=obs[t])
+                os.replace(tmp, os.path.join(d, f"obs_{t}.npz"))
+            for t in have - obs.keys():
+                os.remove(os.path.join(d, f"obs_{t}.npz"))
+            tmp = os.path.join(d, "tmp_fc.npz")
+            np.savez_compressed(tmp, **{str(t): g for t, g in fc.items()})
+            os.replace(tmp, os.path.join(d, "fc.npz"))
+            with open(os.path.join(d, "tmp_state.json"), "w") as f:
+                json.dump({"ref": ref, "fc": sorted(fc), "filled": sorted(filled), "version": VERSION}, f)
+            os.replace(os.path.join(d, "tmp_state.json"), os.path.join(d, "state.json"))
+            self.saved_filled = filled
+        except Exception as e:
+            log(f"{self.name}: state not saved: {e}")
+        finally:
+            self.state_lock.release()
+
+    def load_state(self):
+        """True when the last run before the restart was taken over."""
+        d = self.STATE_DIR
+        try:
+            with open(os.path.join(d, "state.json")) as f:
+                meta = json.load(f)
+            ref, now = meta["ref"], time.time() * 1000
+            if now - ref > 20 * 60_000:
+                return False
+            z = np.load(os.path.join(d, "fc.npz"))
+            fc = {int(k): z[k] for k in z.files}
+            if sorted(fc) != meta["fc"]:  # stopped between the two files
+                return False
+            obs = {}
+            for name in os.listdir(d):
+                if name.startswith("obs_") and name.endswith(".npz"):
+                    t = int(name[4:-4])
+                    if now - HISTORY_MS - 15 * 60_000 < t <= ref:
+                        obs[t] = np.load(os.path.join(d, name))["g"]
+            if ref not in obs or len(obs) < 7:
+                return False
+            with self.lock:
+                self.obs, self.fc, self.ref = obs, fc, ref
+                self.filled = set(meta["filled"]) & set(obs)
+                self.fc_raw = self.fc_cells = self.fc_pure = None
+            self.saved_filled = set(self.filled)
+            log(f"{self.name}: continuing with the run of {datetime.fromtimestamp(ref / 1000, timezone.utc):%H:%MZ} "
+                f"from before the restart ({len(obs)} images)")
+            return True
+        except FileNotFoundError:
+            return False
+        except Exception as e:
+            log(f"{self.name}: state not read: {e}")
+            return False
     # The map draws rain from 0.05 mm/h; with S-PROG's threshold at 0.1 the forecast dropped everything lighter and
     # lost rain area fast (user, 13.11.: "rain only up to now"; tile_gaps.log: -30 % of the wet pixels by +60 min).
     # tune_eu.py, 5 runs of the night 13./14.11.2026, cell by cell on the 2 km grid, +30 / +60 / +120 min:
@@ -752,6 +819,7 @@ class EuropeOpera(Region):
         gauges - the only comparison of the two that does not use either one's own radar picture as the truth)."""
         if EDITION != "eu":
             return
+        threading.Thread(target=self.save_state, daemon=True).start()
         try:
             import check_national_gauges as cng
             px = self.gauges()
@@ -782,6 +850,7 @@ class EuropeOpera(Region):
         self.spokes = spokes.SpokeFilter(self.KM_PER_PX, spokes.sites(self, mosaic.merc))
         self.spoke_log = {}  # radar code -> when its line was last logged
         self.spoke_last = None  # (time step, [(length km, radar code, (col, row))]) of the newest image
+        self.state_lock, self.saved_filled = threading.Lock(), set()
 
     def despoke(self, url, rate):
         if not self.DESPOKE:
@@ -1499,6 +1568,7 @@ def main_eu():
     """Europe test instance: OPERA + own nowcast (+ the model's new showers), sunny for Europe, their verification."""
     monitor.start(EDITION, VERSION, monitor_status)
     eu = REGIONS["eu"]
+    eu.load_state()
     threading.Thread(target=update_loop, args=(eu,), daemon=True).start()
     if os.environ.get("EU_MODEL_BLEND", "1") != "0":  # only the verification shadow "cells" needs the weather model
         eu.model = ModelRain(eu)
