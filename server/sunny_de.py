@@ -893,7 +893,63 @@ class SunnyDE:
             while len(self.disp_snaps) > KEEP_RUNS:
                 self.disp_snaps.popitem(last=False)
         self.verify.take(ts, {n: v for n, v in variants.items() if v})
+        threading.Thread(target=self.save_state, daemon=True).start()
         return True
+
+    # ---------- warm start (14.11.2026: after every restart of the instance the clouds were missing for minutes -
+    # the first run needs the last hour of satellite slots again; user: "Wolken erscheinen erst deutlich später") ----
+    def _state_path(self):
+        d = os.path.join(os.environ.get("VERIFY_LOG_DIR", os.path.dirname(os.path.abspath(__file__))), "state")
+        return d, os.path.join(d, f"sunny{(self.area or {}).get('prefix', '') or 'de'}.npz")
+
+    def save_state(self):
+        if self.shift_ms or self.frozen or not self.ref or not hasattr(self, "_save_lock"):
+            return
+        if not self._save_lock.acquire(blocking=False):
+            return
+        try:
+            with self.lock:
+                parts = {f"obs_{t}": g for t, g in self.obs.items()}
+                parts.update({f"fc_{t}": g for t, g in self.fc.items()})
+                parts.update({f"disp_{t}": g for t, g in self.disp.items()})
+                parts.update({f"k_{t}": g for t, g in self.k.items()})
+                ref = self.ref
+            d, path = self._state_path()
+            os.makedirs(d, exist_ok=True)
+            tmp = path[:-4] + ".tmp.npz"
+            np.savez_compressed(tmp, ref=np.array([ref], np.int64), **parts)
+            os.replace(tmp, path)
+        except Exception as e:
+            self.log(f"sunny: state not saved: {e}")
+        finally:
+            self._save_lock.release()
+
+    def load_state(self):
+        """Continue with the run from before a restart when it is at most 30 min old. True when taken over."""
+        self._save_lock = threading.Lock()
+        try:
+            z = np.load(self._state_path()[1])
+            ref = int(z["ref"][0])
+            if time.time() * 1000 - ref > 30 * 60_000:
+                return False
+            got = {"obs": {}, "fc": {}, "disp": {}, "k": {}}
+            for key in z.files:
+                kind, _, t = key.partition("_")
+                if kind in got:
+                    got[kind][int(t)] = z[key]
+            if ref not in got["obs"] or not got["fc"]:
+                return False
+            with self.lock:
+                self.obs, self.fc, self.disp, self.k, self.ref = got["obs"], got["fc"], got["disp"], got["k"], ref
+                self.disp_snaps[ref] = dict(self.disp)
+            self.log(f"sunny: continuing with the run of {ts_stamp(ref)} from before the restart "
+                     f"({len(got['obs'])} images, {len(got['fc'])} forecast steps)")
+            return True
+        except FileNotFoundError:
+            return False
+        except Exception as e:
+            self.log(f"sunny: state not read: {e}")
+            return False
 
     def _listing(self, url, pattern):
         text = self.fetch(url, timeout=60).decode("latin-1")
@@ -946,6 +1002,7 @@ class SunnyDE:
         return 0, 0
 
     def loop(self):
+        self.load_state()
         if self.stations:
             threading.Thread(target=self.stations.loop, daemon=True).start()
         if self.model:
