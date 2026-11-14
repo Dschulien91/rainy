@@ -87,6 +87,7 @@ import clouds
 import fcverify
 import gauges
 import monitor
+import northamerica
 import mosaic
 import national
 import palette  # stepped rain colours and the rain tile look (same table as the app)
@@ -102,7 +103,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v1.27"
+VERSION = "server-v1.28"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -989,6 +990,48 @@ class EuropeNational(EuropeOpera):
         return rate
 
 
+class NorthAmericaMrms(EuropeOpera):
+    """North America (NA=1, the instance behind /na/): NOAA MRMS in place of OPERA (northamerica.py) - the same
+    nowcast, tiles, timeline, verification and warm start as the Europe instances, registered as region "eu" so all
+    of that runs unchanged. Grid: MRMS's 0.01 deg cells in 2 x 2 blocks (0.02 deg, ~2.2 km north-south, 1.4-2 km
+    east-west), 3500 x 1750."""
+    credit = "NOAA MRMS"
+    K = 2
+    DEG = northamerica.DEG0 * K
+    LAT_TOP = northamerica.LAT1 + northamerica.DEG0 / 2
+    LON_LEFT = northamerica.LON0 - northamerica.DEG0 / 2
+    NX, NY = northamerica.NX0 // K, northamerica.NY0 // K
+    KM_PER_PX = 2.0
+    GAIN = 1.0          # MRMS's rate is already in mm/h (radar with its own gauge / model corrections)
+    DESPOKE = False     # no OPERA radar list for it; MRMS has its own quality control
+    BOX = (-130.0, 20.0, -60.0, 55.0)
+
+    def __init__(self):
+        super().__init__()
+        self.listing = northamerica.MrmsListing(fetch)
+
+    def pixel_lonlat(self, col, row):
+        return self.LON_LEFT + (np.asarray(col) + 0.5) * self.DEG, self.LAT_TOP - (np.asarray(row) + 0.5) * self.DEG
+
+    def to_pixels(self, x, y):
+        lon, lat = northamerica.merc_to_lonlat(x, y)
+        return ((lon - self.LON_LEFT) / self.DEG - 0.5).astype(np.float32), ((self.LAT_TOP - lat) / self.DEG - 0.5).astype(np.float32)
+
+    def list_times(self):
+        out = self.listing.times()
+        newest = max(out, default=0)
+        if time.time() * 1000 - newest > 25 * 60_000 and time.time() - self.warned > 1800:
+            self.warned = time.time()
+            log("na radar source failed: no MRMS file in the last 25 min")
+        return out
+
+    def load(self, url):
+        return northamerica.block_mean(northamerica.decode(fetch(url, timeout=60)), self.K, NODATA)
+
+    def gauges(self):
+        return None   # no North American gauges in check_national_gauges yet
+
+
 class UsaNowcoast(Region):
     name, credit = "us", "NOAA"
     WMS = "https://nowcoast.noaa.gov/geoserver/observations/weather_radar/ows"
@@ -1095,7 +1138,9 @@ class SatelliteRain(Region):
 
 ll_to_3857 = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
 EU_NATIONAL = EDITION == "eu" and os.environ.get("EU_NATIONAL") == "1"
-REGIONS = {r.name: r for r in (EuropeNational() if EU_NATIONAL else EuropeOpera(), UsaNowcoast(), SatelliteRain())}
+NA = EDITION == "eu" and os.environ.get("NA") == "1"   # the North America instance (NOAA MRMS), behind /na/
+REGIONS = {r.name: r for r in (EuropeNational() if EU_NATIONAL else NorthAmericaMrms() if NA else EuropeOpera(),
+                               UsaNowcoast(), SatelliteRain())}
 
 
 def update_loop(region):
@@ -1574,7 +1619,7 @@ def main_eu():
         eu.model = ModelRain(eu)
         threading.Thread(target=model_loop, args=(eu.model,), daemon=True).start()
     threading.Thread(target=EU_VERIFY.loop, daemon=True).start()
-    if not EU_NATIONAL:  # measurements that are needed once, not per instance: in the OPERA instance
+    if not EU_NATIONAL and not NA:  # measurements that are needed once, not per instance: in the OPERA instance
         threading.Thread(target=gauge_archive_loop, daemon=True).start()
         threading.Thread(target=tile_gap_loop, daemon=True).start()
     # Where no radar reaches (Greece, W Turkey, east of Poland ...) the own picture drew the satellite rain estimate
@@ -1583,11 +1628,12 @@ def main_eu():
     if EU_NATIONAL and os.environ.get("SAT_FILL") == "1":
         threading.Thread(target=update_loop, args=(REGIONS["sat"],), daemon=True).start()
     # second benchmark: GeoSphere Austria's INCA nowcast against ours at the Austrian rain gauges (bench_inca.py)
-    threading.Thread(target=bench_inca.IncaBench(fetch, log, eu, mosaic.merc).loop, daemon=True).start()
+    if not NA:
+        threading.Thread(target=bench_inca.IncaBench(fetch, log, eu, mosaic.merc).loop, daemon=True).start()
     if SUNNY_ON:
         threading.Thread(target=SUNNY.loop, daemon=True).start()
     if os.environ.get("PRERENDER", "1") != "0":  # the third instance draws its tiles on demand (CPU for the other two)
-        threading.Thread(target=mosaic.prerender_box_loop, args=(MOSAIC, log, mosaic.EUROPE_BOX, mosaic.EU_PRERENDER_ZOOMS),
+        threading.Thread(target=mosaic.prerender_box_loop, args=(MOSAIC, log, eu.BOX if NA else mosaic.EUROPE_BOX, mosaic.EU_PRERENDER_ZOOMS),
                          daemon=True).start()
     threading.Thread(target=memory_loop, daemon=True).start()
     log(f"nowcast: {'pySTEPS S-PROG' if HAVE_PYSTEPS else 'simple (pySTEPS not installed)'}, Europe grid {EU_KM} km"

@@ -53,6 +53,10 @@ www.{$DOMAIN} {
 	handle_path /eun/* {
 		reverse_proxy api-eun:8771
 	}
+	# North America (beta): NOAA MRMS radar with our nowcast -> api-na
+	handle_path /na/* {
+		reverse_proxy api-na:8771
+	}
 
 	# Weather model API; responses may be cached briefly by a CDN in front of this server.
 	handle_path /om/* {
