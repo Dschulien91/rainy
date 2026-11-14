@@ -445,11 +445,11 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=1.08"></script>
-<script src="lang/en.js?v=1.08"></script>
+<script src="lang/de.js?v=1.09"></script>
+<script src="lang/en.js?v=1.09"></script>
 <script>
 "use strict";
-const VERSION = "v1.08";
+const VERSION = "v1.09";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -2316,9 +2316,10 @@ function drawChart() {
   const x = (i) => i * bw + bw / 2;
   const rain = state.mode === "rain";
 
-  // Night shading (sunny mode)
+  // Night shading (sunny mode): a shade DARKER than the sheet. In the dark theme --night (#1d2129) is lighter than the
+  // background (#15181e), so after sunset the whole sunny chart looked lighter than the rain chart (user, 14.11.2026).
   if (!rain) {
-    ctx.fillStyle = col("--night");
+    ctx.fillStyle = document.body.classList.contains("dark") ? "rgba(0, 0, 0, 0.28)" : col("--night");
     frames.forEach((f, i) => { if (!f.isDay) ctx.fillRect(i * bw, top, bw + 0.5, plotH); });
   }
   // Guides: rain light 0.5 / moderate 2 / heavy 8 mm/h (evenly spaced on the sqrt scale);
