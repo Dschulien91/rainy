@@ -451,7 +451,7 @@
 <script src="lang/en.js"></script>
 <script>
 "use strict";
-const VERSION = "v1.10";
+const VERSION = "v1.11";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -613,7 +613,7 @@ const MAP_STYLE = (() => {
   let st = {};
   try { st = JSON.parse(localStorage.getItem("rainy.style")) || {}; } catch {}
   return { sat: st.sat === "photo" ? "photo" : "clouds", theme: ["light", "dark", "auto"].includes(st.theme) ? st.theme : "dark", // dark by default (07.11.)
-    rain: st.rain === "eu" ? "eu" : "mix", area: st.area === "de" ? "de" : "eu", eusrc: st.eusrc === "opera" ? "opera" : "nat" /* own Europe picture by default (user, 14.11.2026) */, render: st.render === "img" ? "img" : "gl", // WebGL by default (10.11.); pictures without WebGL
+    rain: st.rain === "eu" ? "eu" : "mix", area: ["de", "na"].includes(st.area) ? st.area : "eu", eusrc: st.eusrc === "opera" ? "opera" : "nat" /* own Europe picture by default (user, 14.11.2026) */, render: st.render === "img" ? "img" : "gl", // WebGL by default (10.11.); pictures without WebGL
     fc: (new URLSearchParams(location.search).get("fc") || st.fc) === "own" ? "own" : "dwd", design: ["liberty", "bright", "fiord", "earth"].includes(st.design) ? st.design : "plain" };
 })();
 // Edition: "de" = first public version (Germany: rain radar 2 h + 24 h / 3 days; sunny 2 h from the server's DWD satellite
@@ -626,7 +626,11 @@ const DE_ONLY = EDITION === "de";
 // port 8772). Everything else (sunny, alerts, weather model, place search) stays with the Germany edition. Chosen in
 // the settings ("Gebiet", marked beta like every feature still being verified; ?area=eu works too).
 // Europe is the default area since v0.98 (12.11., user decision); "Deutschland" chosen in the settings stays, ?area=de / ?area=eu override
-const EU_AREA = DE_ONLY && (new URLSearchParams(location.search).get("area") || MAP_STYLE.area) === "eu";
+// Area "na" = North America (beta, 15.11.2026): NOAA MRMS radar with our nowcast from the instance behind /na/. It
+// runs the Europe area's whole pipeline (same tiles, timeline, settings), so EU_AREA is true for it as well.
+const NA_AREA = DE_ONLY && (new URLSearchParams(location.search).get("area") || MAP_STYLE.area) === "na";
+const EU_AREA = DE_ONLY && ((new URLSearchParams(location.search).get("area") || MAP_STYLE.area) === "eu" || NA_AREA);
+if (NA_AREA) Object.assign(FALLBACK, { lat: 40.7128, lon: -74.006, name: "New York" });
 // the chart canvas sizes itself on window resize only; the wide layout changes its box without one
 window.addEventListener("load", () => setTimeout(() => window.dispatchEvent(new Event("resize")), 300));
 if (DE_ONLY) {
@@ -644,13 +648,13 @@ document.getElementById("aboutBtn").addEventListener("click", () => {
 document.getElementById("aboutClose").addEventListener("click", () => document.getElementById("aboutCard").classList.remove("show"));
 // Europe area, radar source (settings "Radar", ?eusrc=nat|opera): "opera" = the European composite (EUMETNET OPERA),
 // "nat" = our own picture: OPERA with national radar products on top (third server instance behind /eun/, beta)
-const EU_NAT = EU_AREA && (new URLSearchParams(location.search).get("eusrc") || MAP_STYLE.eusrc) === "nat";
+const EU_NAT = EU_AREA && !NA_AREA && (new URLSearchParams(location.search).get("eusrc") || MAP_STYLE.eusrc) === "nat";
 const RAIN_EU = EU_AREA || (!DE_ONLY && MAP_STYLE.rain === "eu");
 // the server for the rain radar: the Europe test server in the Europe area, else the usual one
-const EU_BASE = EU_AREA && API_BASE ? (LOCAL_DEV ? `${location.protocol}//${location.hostname}:8772` : `${API_BASE}/eu`) : API_BASE;
+const EU_BASE = EU_AREA && API_BASE ? (LOCAL_DEV ? `${location.protocol}//${location.hostname}:8772` : `${API_BASE}/${NA_AREA ? "na" : "eu"}`) : API_BASE;
 const RADAR_BASE = EU_NAT && API_BASE ? (LOCAL_DEV ? `${location.protocol}//${location.hostname}:8773` : `${API_BASE}/eun`) : EU_BASE;
 // sunny too: Europe area = the Europe instance's sunny for all of Europe (the third instance has no sunny)
-const SUN_BASE = EU_BASE;
+const SUN_BASE = NA_AREA && API_BASE ? `${API_BASE}/eu` : EU_BASE; // North America has no sunny yet: the model
 const FC_OWN = DE_ONLY && !EU_AREA && MAP_STYLE.fc === "own"; // our own forecast (server variant "own") instead of DWD's
 if (MAP_STYLE.theme !== "auto") document.documentElement.classList.add(`theme-${MAP_STYLE.theme}`);
 const dark = MAP_STYLE.theme === "auto" ? window.matchMedia("(prefers-color-scheme: dark)").matches : MAP_STYLE.theme === "dark";
@@ -667,11 +671,11 @@ const MAP_DESIGNS = {
 const BASEMAP = MAP_DESIGNS[MAP_STYLE.design] || MAP_DESIGNS.plain;
 const mapDark = BASEMAP.dark;
 // Zoom out at most to about Germany and its neighbours (any screen size), and stay over Europe.
-const EUROPE = L.latLngBounds([[36, -10], [60, 30]]);
+const EUROPE = NA_AREA ? L.latLngBounds([[25, -124], [50, -67]]) : L.latLngBounds([[36, -10], [60, 30]]); // widest useful view
 const map = L.map("map", {
   zoomControl: false, attributionControl: false, fadeAnimation: false,
   minZoom: 3, maxZoom: 13, maxBoundsViscosity: 1,
-  maxBounds: DE_ONLY ? [[27, -30], [72, 50]] : [[-85, -200], [85, 200]], // full edition: the Americas too
+  maxBounds: NA_AREA ? [[12, -170], [75, -45]] : DE_ONLY ? [[27, -30], [72, 50]] : [[-85, -200], [85, 200]], // full edition: the Americas too
 })
   .setView([FALLBACK.lat, FALLBACK.lon], 10);
 // one step closer than "all of Europe": Germany with plenty of its neighbours is the widest useful view
@@ -2260,6 +2264,7 @@ function updateSource() {
     : k === "ca" ? (fc ? t("source.caForecast") : t("source.caMeasured"))
     : k === "us" ? t("source.noaaMeasured")
     : k === "rtile" ? (EU_NAT ? t(state.radarEst ? "source.satRain" : shown.ref ? "source.natForecast" : "source.natMeasured")
+      : NA_AREA ? (shown.ref ? t("source.naForecast") : t("source.naMeasured"))
       : RAIN_EU ? (shown.ref ? t("source.operaForecast") : t(EU_AREA ? "source.operaMeasured" : "source.operaNoaaMeasured"))
       : DE_ONLY ? (shown.ref ? (FC_OWN ? t("source.ownForecast") : t("source.dwdForecast")) : t("source.dwdMeasured"))
       : shown.ref ? t("source.mixForecast") : t("source.mixMeasured"))
@@ -3100,8 +3105,8 @@ function showSettings() {
     <div class="row"><span>${t("settings.colors")}</span>${seg("theme", [["auto", t("settings.themeAuto")], ["light", t("settings.themeLight")], ["dark", t("settings.themeDark")]])}</div>
     ${DE_ONLY ? "" : `<div class="row"><span>${t("settings.clouds")}</span>${seg("sat", [["clouds", t("settings.cloudsStandard")], ["photo", t("settings.cloudsPhoto")]])}</div>
     <div class="row"><span>${t("settings.rain")}</span>${seg("rain", [["mix", t("settings.rainMix")], ["eu", t("settings.rainEu")]])}</div>`}
-    ${DE_ONLY && API_BASE ? `<div class="row"><span>${t("settings.area")}</span>${seg("area", [["de", t("settings.areaDe")], ["eu", t("settings.areaEu") + BETA_MARK]])}</div>` : ""}
-    ${EU_AREA && API_BASE ? `<div class="row"><span>${t("settings.euSource")}</span>${seg("eusrc", [["opera", t("settings.euSourceOpera")], ["nat", t("settings.euSourceNat") + BETA_MARK]])}</div>` : ""}
+    ${DE_ONLY && API_BASE ? `<div class="row"><span>${t("settings.area")}</span>${seg("area", [["de", t("settings.areaDe")], ["eu", t("settings.areaEu") + BETA_MARK], ["na", t("settings.areaNa") + BETA_MARK]])}</div>` : ""}
+    ${EU_AREA && !NA_AREA && API_BASE ? `<div class="row"><span>${t("settings.euSource")}</span>${seg("eusrc", [["opera", t("settings.euSourceOpera")], ["nat", t("settings.euSourceNat") + BETA_MARK]])}</div>` : ""}
     ${API_BASE && GL_OK ? `<div class="row"><span>${t("settings.render")}</span>${seg("render", [["img", t("settings.renderImg")], ["gl", t("settings.renderGl") + BETA_MARK]])}</div>` : ""}
     ${DE_ONLY && API_BASE && !EU_AREA ? `<div class="row"><span>${t("settings.forecast")}</span>${seg("fc", [["dwd", t("settings.fcDwd")], ["own", t("settings.fcOwn") + BETA_MARK]])}</div>` : ""}
     <div class="actions"><span></span><button class="done">${t("common.done")}</button></div>`;
@@ -3552,7 +3557,8 @@ try {
   }
   // Germany edition: a place outside the radar area (e.g. on holiday in Italy) has no radar frames, so the map would
   // stay empty. Then show the Germany overview with its radar instead; the user can still pick any place.
-  const GERMANY_VIEW = { lat: 51.16, lon: 10.45, zoom: 6, name: t("place.germany") };
+  const GERMANY_VIEW = NA_AREA ? { lat: 39.5, lon: -96.0, zoom: 4, name: t("place.northAmerica") }  // a place outside it
+    : { lat: 51.16, lon: 10.45, zoom: 6, name: t("place.germany") };
   const outsideRadar = () => DE_ONLY && API_BASE && (!state.radarPoint.length || state.rainMapOnly) && !params.has("lat");
   async function showGermany() {
     map.setView([GERMANY_VIEW.lat, GERMANY_VIEW.lon], GERMANY_VIEW.zoom, { animate: false });
