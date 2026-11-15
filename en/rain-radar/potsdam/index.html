@@ -452,11 +452,11 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=1.11"></script>
-<script src="lang/en.js?v=1.11"></script>
+<script src="lang/de.js?v=1.12"></script>
+<script src="lang/en.js?v=1.12"></script>
 <script>
 "use strict";
-const VERSION = "v1.11";
+const VERSION = "v1.12";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -953,6 +953,22 @@ function paintSky(px, i4, ac, day) { // day: 0 (night) .. 1 (daylight), fraction
   for (let k = 0; k < 3; k++) px[i4 + k] = (CLOUD_RGB[k] * ac + SUN_RGB[k] * tint * (1 - ac)) / a;
   px[i4 + 3] = a * 255;
   return a;
+}
+
+// paintSky for every grey value 0..255 of a cloud tile at one daylight level, as RGBA words for a Uint32Array view
+// of the image data (little-endian: R in the lowest byte). Kept per daylight step of 0.02.
+const SKY_LUTS = new Map();
+function skyLut(day) {
+  const key = Math.round(day * 50);
+  let lut = SKY_LUTS.get(key);
+  if (!lut) {
+    const px = new Uint8ClampedArray(4);
+    const view = new Uint32Array(px.buffer);
+    lut = new Uint32Array(256);
+    for (let v = 0; v < 256; v++) { px.fill(0); paintSky(px, 0, cloudOpacity(v / 255), key / 50); lut[v] = view[0]; }
+    SKY_LUTS.set(key, lut);
+  }
+  return lut;
 }
 
 // DWD radar legend colors (style "niederschlagsradar") -> representative mm/h of each class.
@@ -1927,11 +1943,11 @@ const CloudTiles = L.GridLayer.extend({
     const attempt = (n) => loadImage(url).then((img) => {
       const ctx = tile.getContext("2d", { willReadFrequently: true });
       ctx.drawImage(img, 0, 0);
-      const d = ctx.getImageData(0, 0, 256, 256), px = d.data, day = daylightAt(this.options.ts);
-      for (let i = 0; i < px.length; i += 4) {
-        if (px[i + 3] < 128) { px[i + 3] = 0; continue; }
-        paintSky(px, i, cloudOpacity(px[i] / 255), day);
-      }
+      const d = ctx.getImageData(0, 0, 256, 256), px = d.data, lut = skyLut(daylightAt(this.options.ts));
+      // one table lookup per pixel instead of cloudOpacity + paintSky (15.11.2026: clouds appeared late while the
+      // browser painted all time steps pixel by pixel)
+      const out = new Uint32Array(px.buffer);
+      for (let i = 0, j = 0; i < px.length; i += 4, j++) out[j] = px[i + 3] < 128 ? 0 : lut[px[i]];
       ctx.putImageData(d, 0, 0);
       finish();
     }).catch(() => (n < 2 ? setTimeout(() => attempt(n + 1), 1500 * (n + 1)) : finish())); // then: stay empty
