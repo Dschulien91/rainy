@@ -197,9 +197,38 @@ KEEP_RUNS = 3  # runs (10 min apart) whose map frames stay available for tile ke
 # for ~11x its area), the weather model (fog cap, shadows) on a 0.25 deg grid from ICON-EU only (on the server's disk).
 # Verified against the later analysis on the whole area and at the DWD stations (Germany) - files eusungrid_* and
 # eusunstation_* next to the Germany edition's.
-_ex, _ey = merc(np.array([-12.0, 25.5]), np.array([36.2, 59.3]))
+# Europe up to 66.8 N and from 25 W (15.11.2026, user: Norway, Sweden, Iceland were missing): DWD's SID / CTH end at
+# 59.8 N / 13 W (CTH: 63 N / 20 W); beyond them EUMETSAT's cloud mask fills in (clm_cloud). Further north Meteosat's
+# mask has no data (67 N: 40 %, 68 N: 0) - that would need polar-orbiting satellites.
+_ex, _ey = merc(np.array([-25.0, 32.0]), np.array([35.6, 66.8]))
 EUROPE = {"bbox": (float(_ex[0]), float(_ey[0]), float(_ex[1]), float(_ey[1])), "cell": 4000.0,
-          "model": {"lats": (36.0, 59.5), "lons": (-12.0, 25.5), "deg": 0.25, "models": "icon_eu"}, "prefix": "eu"}
+          "model": {"lats": (36.0, 59.5), "lons": (-12.0, 25.5), "deg": 0.25, "models": "icon_eu"}, "prefix": "eu",
+          "clm": True}
+CLM_WMS = "https://view.eumetsat.int/geoserver/wms"   # EUMETView, public (no account), PNG maps of MSG products
+CLM_BOX, CLM_DEG = (-25.0, 35.5, 32.0, 67.5), 0.04     # lon0, lat0, lon1, lat1
+
+
+def clm_cloud(fetch, ts):
+    """EUMETSAT's MSG cloud mask (every 15 min, ~30 min late) as the cloud fraction on a regular lat/lon grid:
+    (lat ascending, lon, float32 1 = cloud / 0 = clear / NaN = no data), or None. The newest image at or before ts."""
+    lon0, lat0, lon1, lat1 = CLM_BOX
+    w, h = int(round((lon1 - lon0) / CLM_DEG)), int(round((lat1 - lat0) / CLM_DEG))
+    for back in (0, 15, 30, 45):
+        t = ts // 900_000 * 900_000 - back * 60_000
+        iso = time.strftime("%Y-%m-%dT%H:%M:00.000Z", time.gmtime(t / 1000))
+        url = (f"{CLM_WMS}?service=WMS&version=1.3.0&request=GetMap&layers=msg_fes:clm&styles=&crs=EPSG:4326"
+               f"&bbox={lat0},{lon0},{lat1},{lon1}&width={w}&height={h}&format=image/png&time={iso}")
+        try:
+            a = np.asarray(Image.open(io.BytesIO(fetch(url, timeout=60))).convert("RGBA"))
+        except Exception:
+            continue
+        data = a[..., 3] > 128
+        if data.mean() < 0.2:
+            continue
+        cloud = data & (a[..., 0] > 200) & (a[..., 1] > 200) & (a[..., 2] > 200)   # white = cloud; green / blue = clear
+        frac = np.where(data, cloud.astype(np.float32), np.nan)[::-1]
+        return lat0 + (np.arange(h) + 0.5) * CLM_DEG, lon0 + (np.arange(w) + 0.5) * CLM_DEG, frac
+    return None
 
 
 class SunGrid:
@@ -703,6 +732,7 @@ class SunnyDE:
         self.cycle_s = None
         self._st_pix = None
         self.skipped, self.skips_in_row = set(), 0  # slots rejected as implausible (JUMP_MAX)
+        self._clm_cache = {}                        # 15-min slot -> EUMETSAT cloud mask on the grid (clm_cloud)
 
     # ---------- helpers ----------
     def inside(self):
@@ -775,6 +805,13 @@ class SunnyDE:
             kd = np.where(np.isfinite(k_dni), k_dni, k_ir)
             ki = np.where(np.isfinite(k_ir), k_ir, kd)
             k = (w * kd + (1 - w) * ki).astype(np.float32)
+        if (self.area or {}).get("clm") and not np.isfinite(k).all():  # beyond DWD's area: EUMETSAT's cloud mask
+            got = self._clm_cache.get(ts // 900_000)
+            if got is None:
+                c = clm_cloud(self.fetch, ts)
+                got = self.grid.regrid(c[0], c[1], c[2], sigma=(0.7, 0.7)) if c is not None else np.full(k.shape, np.nan, np.float32)
+                self._clm_cache = {ts // 900_000: got}
+            k = np.where(np.isfinite(k), k, 1.0 - 0.92 * got).astype(np.float32)
         share = share_from_k(k, e)
         return k, share, self._display(k, e)
 
@@ -952,8 +989,8 @@ class SunnyDE:
                 kind, _, t = key.partition("_")
                 if kind in got:
                     got[kind][int(t)] = z[key]
-            if ref not in got["obs"] or not got["fc"]:
-                return False
+            if ref not in got["obs"] or not got["fc"] or got["obs"][ref].shape != (self.grid.ny, self.grid.nx):
+                return False  # missing, or saved on another grid (the area grew)
             with self.lock:
                 self.obs, self.fc, self.disp, self.k, self.ref = got["obs"], got["fc"], got["disp"], got["k"], ref
                 self.disp_snaps[ref] = dict(self.disp)
