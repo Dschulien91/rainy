@@ -791,6 +791,12 @@ class SunnyDE:
         if cth_data is not None:
             lat, lon, c = read_nc(cth_data, ["CTH"])
             k_ir = k_from_cth(self.grid.regrid(lat, lon, c["CTH"]))
+            # the file's outermost rows / columns read 0 (= no cloud): along its north edge at 63 N that drew a straight
+            # cloud-free line across Norway and Finland (15.11.2026) - a 0.3 deg margin is left to the next source
+            m = 0.3
+            edge = ((self.grid.lat > lat.max() - m) | (self.grid.lat < lat.min() + m)
+                    | (self.grid.lon > lon.max() - m) | (self.grid.lon < lon.min() + m))
+            k_ir = np.where(edge, np.nan, k_ir).astype(np.float32)
             low = self.model.field(ts, "low") if self.model and LOWCC_W > 0 else None
             if low is not None:  # fog / low stratus the IR cannot tell from the ground
                 # night and rising sun only: replay 08./09.11. vs the DWD stations, morning MAE +60/+90/+120
