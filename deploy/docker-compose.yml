@@ -157,9 +157,11 @@ services:
     volumes:
       - open-meteo-data:/app/data
     command: >
-      sync ncep_hrrr_conus,ncep_hrrr_conus_15min,cmc_gem_hrdps,ncep_gfs013
-      temperature_2m,precipitation,cloud_cover,cloud_cover_low,weather_code,wind_u_component_700hPa,wind_v_component_700hPa
+      sync ncep_hrrr_conus,ncep_hrrr_conus_15min,cmc_gem_hrdps,ncep_gfs013,ncep_gfs025
+      temperature_2m,precipitation,cloud_cover,cloud_cover_low,weather_code,wind_u_component_700hPa,wind_v_component_700hPa,wind_speed_700hPa,wind_direction_700hPa,snowfall_water_equivalent,frozen_precipitation_percent,categorical_freezing_rain,cape,lifted_index,visibility,wind_gusts_10m,showers
       --past-days 2 --repeat-interval 15 --concurrent 4 --bounding-box 15,-170,75,-50
+    # weather_code is derived by Open-Meteo for these models (snow, freezing rain, CAPE, lifted index, visibility,
+    # gusts, showers): without those variables the symbol took 2.8 s per new place; the 700 hPa wind comes from GFS 0.25.
 
   caddy:
     image: caddy:2
