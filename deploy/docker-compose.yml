@@ -148,6 +148,19 @@ services:
       temperature_2m,precipitation,cloud_cover,cloud_cover_low,weather_code,wind_u_component_700hPa,wind_v_component_700hPa
       --past-days 3 --repeat-interval 10 --concurrent 4
 
+  # The same for North America (area "Nordamerika", 15.11.2026): without it the first weather-model request for a
+  # North American place read the models from the remote mirror and took ~30 s. NOAA HRRR (3 km, +15 min steps) for
+  # the US, Canada's GEM HRDPS (2.5 km), NOAA GFS 13 km as the wide fallback - all cut to North America.
+  openmeteo-sync-na:
+    image: ghcr.io/open-meteo/open-meteo
+    restart: always
+    volumes:
+      - open-meteo-data:/app/data
+    command: >
+      sync ncep_hrrr_conus,ncep_hrrr_conus_15min,cmc_gem_hrdps,ncep_gfs013
+      temperature_2m,precipitation,cloud_cover,cloud_cover_low,weather_code,wind_u_component_700hPa,wind_v_component_700hPa
+      --past-days 2 --repeat-interval 15 --concurrent 4 --bounding-box 15,-170,75,-50
+
   caddy:
     image: caddy:2
     restart: always
