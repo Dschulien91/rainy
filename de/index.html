@@ -457,11 +457,11 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=1.18"></script>
-<script src="lang/en.js?v=1.18"></script>
+<script src="lang/de.js?v=1.19"></script>
+<script src="lang/en.js?v=1.19"></script>
 <script>
 "use strict";
-const VERSION = "v1.18";
+const VERSION = "v1.19";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -738,7 +738,10 @@ map.getPane("labels").style.pointerEvents = "none";
     // calmer map: no road names, states or minor places; places only from sensible zoom levels
     const drop = new Set(["road_oneway", "road_oneway_opposite", "highway_name_other", "highway_name_motorway",
       "place_state", "place_other", "place_country_other"]);
-    const minZoom = { place_suburb: 12, place_village: 11, place_town: 9, place_city: 6, place_city_large: 4, water_name: 9 };
+    // (maplibre zoom = map zoom - 1) towns from map zoom 8 and cities from 6 (was 10 and 7): in between a rural view
+    // showed no place at all (user, 15.11.2026: "irgendwo in der Mitte so wenig Staedte, dass man gar nix sieht");
+    // the label collision keeps it from getting crowded
+    const minZoom = { place_suburb: 12, place_village: 10, place_town: 7, place_city: 5, place_city_large: 4, water_name: 9 };
     style.layers = style.layers.filter((l) => !drop.has(l.id));
     for (const l of style.layers) if (minZoom[l.id] != null) l.minzoom = Math.max(l.minzoom || 0, minZoom[l.id]);
     // orientation comes from borders, not roads: roads, rails and road labels only when zoomed in to the city
@@ -775,8 +778,10 @@ map.getPane("labels").style.pointerEvents = "none";
     const casing = (id, width) => ({ id: id + "_case", type: "line", source: src, "source-layer": "boundary",
       filter: borders.find((b) => b.id === id).filter, layout: { "line-join": "round", "line-cap": "round", visibility: "none" },
       paint: { "line-color": "#ffffff", "line-opacity": 0.5, "line-blur": 0.6, "line-width": width } });
-    borders.splice(1, 0, casing("rainy_border_state", ["interpolate", ["linear"], ["zoom"], 4, 2, 7, 3, 10, 4, 13, 4.6]));
-    borders.splice(3, 0, casing("rainy_border_country", ["interpolate", ["linear"], ["zoom"], 3, 3.2, 6, 4.5, 10, 5.8, 13, 6.6]));
+    // the casing only a little wider than its line (15.11.2026: zoomed out the white casing was 3x the dark state line,
+    // so the borders looked white there)
+    borders.splice(1, 0, casing("rainy_border_state", ["interpolate", ["linear"], ["zoom"], 4, 1.3, 7, 2, 10, 2.9, 13, 3.6]));
+    borders.splice(3, 0, casing("rainy_border_country", ["interpolate", ["linear"], ["zoom"], 3, 2.2, 6, 3.3, 10, 4.6, 13, 5.6]));
     const part = (keep) => ({ ...style, layers: style.layers.filter(keep) });
     if (MAP_STYLE.design === "earth") {
       // NASA Blue Marble (public domain, ~500 m pixels, so blurry when zoomed in to a city)
