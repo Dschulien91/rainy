@@ -111,3 +111,92 @@ if __name__ == "__main__":  # quick check: newest file, decode time, coverage
     v = decode(get(t[ts]))
     print(len(t), "steps, newest", datetime.fromtimestamp(ts / 1000, timezone.utc), f"decoded in {time.time() - t0:.1f}s,",
           f"covered {np.mean(v >= 0):.2f}, wet {np.mean(v >= 0.1):.3f}, max {v.max():.0f} mm/h")
+
+
+# ---------- rain gauges: US airport weather reports (METAR) ----------
+METAR_URL = "https://aviationweather.gov/data/cache/metars.cache.csv.gz"
+
+
+def metar_rows(raw):
+    """(station, lat, lon, end of the hour in ms, mm) for every ROUTINE report of an automated station with a
+    precipitation sensor ("AO2") in North America. The hourly report's P group is the precipitation since the last
+    routine report (hundredths of an inch); without it the sensor measured nothing ("PNO" = sensor out: skipped).
+    The cache holds each station's newest report only: the server reads it every 10 minutes and keeps them."""
+    import csv
+    text = gzip.decompress(raw).decode("utf-8", "replace").splitlines()
+    rows = list(csv.reader(text))
+    if not rows or rows[0][0] != "raw_text":
+        return
+    col = {name: i for i, name in enumerate(rows[0]) if name not in ("sky_cover", "cloud_base_ft_agl")}
+    for r in rows[1:]:
+        try:
+            raw_text, sid, obs = r[0], r[col["station_id"]], r[col["observation_time"]]
+            lat, lon = float(r[col["latitude"]]), float(r[col["longitude"]])
+        except (ValueError, IndexError, KeyError):
+            continue
+        if r[col["metar_type"]] != "METAR" or " AO2" not in raw_text or " PNO" in raw_text:
+            continue
+        if not (20 <= lat <= 56 and -130 <= lon <= -60):
+            continue
+        m = re.search(r" P(\d{4})\b", raw_text.split(" RMK ", 1)[1] if " RMK " in raw_text else "")
+        mm = int(m.group(1)) * 0.254 if m else 0.0
+        t = int(datetime.strptime(obs[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc).timestamp() * 1000)
+        yield sid, lat, lon, t, mm
+
+
+class MetarGauges:
+    """Keeps the hourly precipitation of the US METAR stations: <log_dir>/metar/<YYYYMMDD>.jsonl (one line per
+    station hour: id, end time ms, mm) and <log_dir>/metar/stations.json (id, lat, lon; order never changes)."""
+
+    def __init__(self, fetch, log_dir, log):
+        import os
+        self.fetch, self.log = fetch, log
+        self.dir = os.path.join(log_dir, "metar")
+        os.makedirs(self.dir, exist_ok=True)
+        self.st_path = os.path.join(self.dir, "stations.json")
+        self.seen = set()
+
+    def stations(self):
+        import json
+        try:
+            with open(self.st_path) as f:
+                return [tuple(s) for s in json.load(f)]
+        except (OSError, ValueError):
+            return []
+
+    def poll(self):
+        import json
+        import os
+        st = self.stations()
+        known = {s[1] for s in st}
+        new_st, lines = [], {}
+        for sid, lat, lon, t, mm in metar_rows(self.fetch(METAR_URL, timeout=60)):
+            if sid not in known:
+                new_st.append(("us", sid, round(lat, 4), round(lon, 4)))
+                known.add(sid)
+            if (sid, t) in self.seen:
+                continue
+            self.seen.add((sid, t))
+            day = datetime.fromtimestamp(t / 1000, timezone.utc).strftime("%Y%m%d")
+            lines.setdefault(day, []).append(json.dumps({"id": sid, "t": t, "mm": round(mm, 2)}))
+        if new_st:
+            with open(self.st_path + ".tmp", "w") as f:
+                json.dump(st + new_st, f)
+            os.replace(self.st_path + ".tmp", self.st_path)
+        for day, ls in lines.items():
+            with open(os.path.join(self.dir, f"{day}.jsonl"), "a") as f:
+                f.write("\n".join(ls) + "\n")
+        if len(self.seen) > 200_000:
+            cut = time.time() * 1000 - 6 * 3600_000
+            self.seen = {k for k in self.seen if k[1] > cut}
+        return sum(len(v) for v in lines.values()), len(new_st)
+
+    def loop(self):
+        while True:
+            try:
+                n, s = self.poll()
+                if n:
+                    self.log(f"metar: {n} station hours, {s} new stations")
+            except Exception as e:
+                self.log(f"metar failed: {e}")
+            time.sleep(600)

@@ -104,7 +104,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v1.30"
+VERSION = "server-v1.31"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -1010,6 +1010,8 @@ class NorthAmericaMrms(EuropeOpera):
     def __init__(self):
         super().__init__()
         self.listing = northamerica.MrmsListing(fetch)
+        self.metar = northamerica.MetarGauges(fetch, os.environ.get("VERIFY_LOG_DIR", "."), log)
+        self.gauge_at = 0.0
 
     def pixel_lonlat(self, col, row):
         return self.LON_LEFT + (np.asarray(col) + 0.5) * self.DEG, self.LAT_TOP - (np.asarray(row) + 0.5) * self.DEG
@@ -1024,13 +1026,30 @@ class NorthAmericaMrms(EuropeOpera):
         if time.time() * 1000 - newest > 25 * 60_000 and time.time() - self.warned > 1800:
             self.warned = time.time()
             log("na radar source failed: no MRMS file in the last 25 min")
-        return out
+        return {t: (t, url) for t, url in out.items()}
 
-    def load(self, url):
-        return northamerica.block_mean(northamerica.decode(fetch(url, timeout=60)), self.K, NODATA)
+    def load(self, src):
+        ts, url = src
+        rate = northamerica.block_mean(northamerica.decode(fetch(url, timeout=60)), self.K, NODATA)
+        try:  # the picture at the US rain gauges (METAR), every image: check_na_gauges.py
+            import check_national_gauges as cng
+            px = self.gauges()
+            if px is not None:
+                v = cng.at_gauges(rate, px)
+                cng.record(ts, v, v)
+        except Exception as e:
+            log(f"natobs failed: {e}")
+        return rate
 
     def gauges(self):
-        return None   # no North American gauges in check_national_gauges yet
+        """The US METAR stations with a precipitation sensor (northamerica.MetarGauges; the list grows while new
+        stations report, so it is read again every hour)."""
+        if self.gauge_px is None or time.time() - self.gauge_at > 3600:
+            import check_national_gauges as cng
+            st = self.metar.stations()
+            self.gauge_px = cng.pixels(self, st, mosaic.merc) if st else None
+            self.gauge_at = time.time()
+        return self.gauge_px
 
 
 class UsaNowcoast(Region):
@@ -1674,6 +1693,8 @@ def main_eu():
     # second benchmark: GeoSphere Austria's INCA nowcast against ours at the Austrian rain gauges (bench_inca.py)
     if not NA:
         threading.Thread(target=bench_inca.IncaBench(fetch, log, eu, mosaic.merc).loop, daemon=True).start()
+    else:  # the US rain gauges (METAR) for the North America instance's verification
+        threading.Thread(target=eu.metar.loop, daemon=True).start()
     if SUNNY_ON:
         threading.Thread(target=SUNNY.loop, daemon=True).start()
     if os.environ.get("PRERENDER", "1") != "0":  # the third instance draws its tiles on demand (CPU for the other two)
