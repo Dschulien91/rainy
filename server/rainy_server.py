@@ -104,7 +104,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v1.32"
+VERSION = "server-v1.33"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -1006,6 +1006,12 @@ class NorthAmericaMrms(EuropeOpera):
     GAIN = 1.0          # MRMS's rate is already in mm/h (radar with its own gauge / model corrections)
     DESPOKE = False     # no OPERA radar list for it; MRMS has its own quality control
     BOX = (-130.0, 20.0, -60.0, 55.0)
+    # S-PROG on grid / 3 (~6 x 5 km) instead of / 2: at / 2 pySTEPS needed +1.4 GB per run on top of ~0.9 GB held, over
+    # the container's 2.5 GB - the instance was OOM-killed on every second run from 14.11. 23:13 UTC on (135 starts),
+    # and its restarts pushed the whole host into OOM kills of the Germany and Europe instances. Measured locally
+    # (15.11.): / 3 needs +0.45 GB and half the time (17 s instead of 34 s); 5 issue times, cell by cell on 4x4 blocks,
+    # CSI +15/+30 at 0.1 mm/h 0.759/0.666 vs 0.767/0.673 (the first hour is the advected full-resolution image).
+    SPROG_DOWN = 3
 
     def __init__(self):
         super().__init__()

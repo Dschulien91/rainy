@@ -80,7 +80,12 @@ def counts(fc, obs, mask):
 
 def truth(valid):
     p = os.path.join(OBS, valid.strftime("%Y%m%d%H%M") + ".npz")
-    return np.load(p)["rate"].astype(np.float32) if os.path.exists(p) else None
+    if not os.path.exists(p):
+        return None
+    try:  # a few files written during the OPERA outage of 12.11.2026 hold an object array instead of a grid
+        return np.load(p)["rate"].astype(np.float32)
+    except ValueError:
+        return None
 
 
 def shots():

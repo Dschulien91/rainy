@@ -30,8 +30,10 @@ NO_ROW_S = 15 * 60
 RAIN_MAX_MIN, SUN_MAX_MIN = 25, 50
 STARTS_MAX, STARTS_WINDOW_S = 3, 30 * 60
 AGAIN_S = 6 * 3600
-NAMES = {"de": "Deutschland", "eu": "Europa", "eun": "Europa (eigenes Modell)"}
-SUBDIRS = {"eun": "eun"}  # the third instance writes its verify_log into this subfolder (edition "eu" in its rows)
+NAMES = {"de": "Deutschland", "eu": "Europa", "eun": "Europa (eigenes Modell)", "na": "Nordamerika"}
+# the third and fourth instance write their verify_log into these subfolders (edition "eu" in their rows)
+SUBDIRS = {"eun": "eun", "na": "na"}
+NO_SUNNY = ("eun", "na")
 
 
 def _rows(name, days=2, sub=None):
@@ -52,7 +54,7 @@ def _rows(name, days=2, sub=None):
     return out
 
 
-def problems(now=None, editions=("de", "eu", "eun")):
+def problems(now=None, editions=("de", "eu", "eun", "na")):
     """{key: German text} of what is wrong right now."""
     now = now or time.time()
     out = {}
@@ -66,7 +68,7 @@ def problems(now=None, editions=("de", "eu", "eun")):
             continue
         for key, label, limit in (("rain_age", "Regenradar", RAIN_MAX_MIN + (10 if ed == "eun" else 0)),
                                   ("sun_age", "sunny", SUN_MAX_MIN)):
-            if ed == "eun" and key == "sun_age":  # the third instance has no sunny
+            if ed in NO_SUNNY and key == "sun_age":  # the third and fourth instance have no sunny
                 continue
             age = r.get(key)
             if age is None:
