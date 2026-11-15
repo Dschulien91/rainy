@@ -1068,26 +1068,54 @@ class SunnyDE:
         with self.lock:
             return run in self.disp_snaps
 
-    def image(self, ts, bbox, w, h, run=None):
-        """Cloud value as a grey + alpha PNG (alpha 0 outside the shown area or where unknown); None: unknown frame.
-        run: the run a tile key names; its frames while it is kept, else (or for a frame it lacks) the current ones."""
+    def _frame(self, ts, run):
         with self.lock:
             g = self.disp_snaps.get(run, {}).get(ts)
-            if g is None:
-                g = self.disp.get(ts)
-        if g is None:
-            return None
+            return g if g is not None else self.disp.get(ts)
+
+    def _grey_alpha(self, g, bbox, w, h, col_row=None):
         minx, miny, maxx, maxy = bbox
-        X, Y = np.meshgrid(minx + (np.arange(w) + 0.5) / w * (maxx - minx), maxy - (np.arange(h) + 0.5) / h * (maxy - miny))
-        col, row = (v.astype(np.float32) for v in self.grid.to_pixels(X, Y))
+        if col_row is None:
+            X, Y = np.meshgrid(minx + (np.arange(w) + 0.5) / w * (maxx - minx), maxy - (np.arange(h) + 0.5) / h * (maxy - miny))
+            col_row = tuple(v.astype(np.float32) for v in self.grid.to_pixels(X, Y))
+        col, row = col_row
         known = (g < 255).astype(np.float32)
         v = cv2.remap(np.where(g < 255, g, 0).astype(np.float32), col, row, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
         kn = cv2.remap(known, col, row, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
         ins = cv2.remap(self.inside(), col, row, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
         grey = np.clip(v / np.maximum(kn, 1e-3), 0, 255).astype(np.uint8)
         alpha = ((ins > 0.5) & (kn > 0.5)).astype(np.uint8) * 255
+        return grey, alpha, col_row
+
+    def image(self, ts, bbox, w, h, run=None):
+        """Cloud value as a grey + alpha PNG (alpha 0 outside the shown area or where unknown); None: unknown frame.
+        run: the run a tile key names; its frames while it is kept, else (or for a frame it lacks) the current ones."""
+        g = self._frame(ts, run)
+        if g is None:
+            return None
+        grey, alpha, _ = self._grey_alpha(g, bbox, w, h)
         buf = io.BytesIO()
         Image.fromarray(np.dstack([grey, alpha]), "LA").save(buf, "PNG", compress_level=3)
+        return buf.getvalue()
+
+    ATLAS_COLS = 8
+
+    def image_atlas(self, t0, n, bbox, w, h, run=None):
+        """The frames t0, t0 + 10 min, ... (n of them) of one map tile in ONE grey + alpha PNG, ATLAS_COLS cells of
+        w x h per row (a frame the run lacks stays transparent). The app loads one of these per tile position for the
+        whole sunny timeline instead of one tile per time step (15.11.2026: ~250 requests, clouds came in late)."""
+        rows = -(-n // self.ATLAS_COLS)
+        out = np.zeros((rows * h, self.ATLAS_COLS * w, 2), np.uint8)
+        col_row = None
+        for i in range(n):
+            g = self._frame(t0 + i * STEP_MS, run)
+            if g is None:
+                continue
+            grey, alpha, col_row = self._grey_alpha(g, bbox, w, h, col_row)
+            r, c = divmod(i, self.ATLAS_COLS)
+            out[r * h:(r + 1) * h, c * w:(c + 1) * w, 0], out[r * h:(r + 1) * h, c * w:(c + 1) * w, 1] = grey, alpha
+        buf = io.BytesIO()
+        Image.fromarray(out, "LA").save(buf, "PNG", compress_level=3)
         return buf.getvalue()
 
     def point(self, lat, lon):
