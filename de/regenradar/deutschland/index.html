@@ -445,11 +445,11 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=1.20"></script>
-<script src="lang/en.js?v=1.20"></script>
+<script src="lang/de.js?v=1.21"></script>
+<script src="lang/en.js?v=1.21"></script>
 <script>
 "use strict";
-const VERSION = "v1.20";
+const VERSION = "v1.21";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -652,7 +652,7 @@ const RAIN_EU = EU_AREA || (!DE_ONLY && MAP_STYLE.rain === "eu");
 const EU_BASE = EU_AREA && API_BASE ? (LOCAL_DEV ? `${location.protocol}//${location.hostname}:8772` : `${API_BASE}/${NA_AREA ? "na" : "eu"}`) : API_BASE;
 const RADAR_BASE = EU_NAT && API_BASE ? (LOCAL_DEV ? `${location.protocol}//${location.hostname}:8773` : `${API_BASE}/eun`) : EU_BASE;
 // sunny too: Europe area = the Europe instance's sunny for all of Europe (the third instance has no sunny)
-const SUN_BASE = NA_AREA && API_BASE ? `${API_BASE}/eu` : EU_BASE; // North America has no sunny yet: the model
+const SUN_BASE = EU_BASE; // North America: sunny from GOES-East in the /na/ instance (server v1.33)
 const FC_OWN = DE_ONLY && !EU_AREA && MAP_STYLE.fc === "own"; // our own forecast (server variant "own") instead of DWD's
 if (MAP_STYLE.theme !== "auto") document.documentElement.classList.add(`theme-${MAP_STYLE.theme}`);
 const dark = MAP_STYLE.theme === "auto" ? window.matchMedia("(prefers-color-scheme: dark)").matches : MAP_STYLE.theme === "dark";

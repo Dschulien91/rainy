@@ -95,6 +95,7 @@ import palette  # stepped rain colours and the rain tile look (same table as the
 import ptype
 import recorder
 import sunny_de
+import sunny_na
 import thunder
 
 try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is used
@@ -1584,7 +1585,10 @@ OWN = OwnNowcast(DE)
 # Germany edition: sunshine from DWD satellite data (sunny_de.py) behind the same cloud API and tiles as the full
 # edition's EUMETSAT clouds, so the app's sunny mode is the same code for both
 # Europe test instance: the same sunny for all of Europe (sunny_de.EUROPE: 4 km grid, ICON-EU, files eusun*)
-SUNNY = (sunny_de.SunnyDE(fetch, log, None, OPENMETEO_URL, openmeteo_available, area=sunny_de.EUROPE) if EDITION == "eu"
+# sunny: Germany (DWD satellite) / Europe (DWD satellite, EU area) / the Americas (GOES-East, sunny_na.py; North America
+# instance, 15.11.2026)
+SUNNY = (sunny_na.SunnyGoes(fetch, log) if NA
+         else sunny_de.SunnyDE(fetch, log, None, OPENMETEO_URL, openmeteo_available, area=sunny_de.EUROPE) if EDITION == "eu"
          else sunny_de.SunnyDE(fetch, log, DE, OPENMETEO_URL, openmeteo_available))
 SUNNY_ON = EDITION in ("de", "eu") and os.environ.get("SUNNY_DE", "1") != "0"
 SKY = SUNNY if SUNNY_ON else CLOUDS

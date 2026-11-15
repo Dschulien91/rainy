@@ -102,18 +102,18 @@ services:
 
   # North America (beta): NOAA MRMS radar (US + southern Canada) with the same nowcast, tiles and verification as
   # api-eu (rainy_server.NorthAmericaMrms, region "eu" inside). Served under /na/, files in verify_log/na/.
-  # Pre-renders its tiles (zoom 3-6 over North America); no sunny yet, no weather-model blend, no gauge checks.
+  # Pre-renders its tiles (zoom 3-6 over North America); sunny from GOES-East; no weather-model blend.
   api-na:
     build: ../server
     restart: always
-    mem_limit: 2500m
+    mem_limit: 3000m   # + sunny for the Americas (GOES, ~0.5 GB more)
     cpus: 1.5
     environment:
       PORT: "8771"
       EDITION: eu
       NA: "1"
       EU_MODEL_BLEND: "0"
-      SUNNY_DE: "0"
+      SUNNY_DE: "1"      # sunny from GOES-East (sunny_na.py)
       VERIFY_LOG_DIR: /app/verify_log/na
       DATA_DIR: /app/data
       MALLOC_ARENA_MAX: "2"
