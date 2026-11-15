@@ -456,11 +456,11 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=1.16"></script>
-<script src="lang/en.js?v=1.16"></script>
+<script src="lang/de.js?v=1.17"></script>
+<script src="lang/en.js?v=1.17"></script>
 <script>
 "use strict";
-const VERSION = "v1.16";
+const VERSION = "v1.17";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -782,17 +782,26 @@ map.getPane("labels").style.pointerEvents = "none";
       L.tileLayer("https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/BlueMarble_ShadedRelief_Bathymetry/default/" +
         "GoogleMapsCompatible_Level8/{z}/{y}/{x}.jpeg", { maxNativeZoom: 8, className: "basemap" }).addTo(map);
     } else {
-      const base = L.maplibreGL({ style: part((l) => l.type !== "symbol"), interactive: false }).addTo(map);
+      // sunny (15.11.2026): the warm tint of clear sky lies in the base map UNDER the water and the clouds - only land
+      // turns warm, the water stays nearly black, and clouds are the same grey-white over land and sea. Before, the
+      // tint was painted into the cloud tiles over everything and the water was a layer above the clouds.
+      const baseLayers = style.layers.filter((l) => l.type !== "symbol");
+      const firstWater = baseLayers.findIndex((l) => l["source-layer"] === "water" && l.type === "fill");
+      const tint = { id: "rainy_sun_tint", type: "fill", source: "rainy_world", layout: { visibility: "none" },
+        paint: { "fill-color": `rgb(${SUN_RGB.join(",")})`, "fill-opacity": 0 } };
+      if (SUN_LOOK) baseLayers.splice(firstWater >= 0 ? firstWater : baseLayers.length, 0, tint);
+      const world = { type: "geojson", data: { type: "Feature", properties: {}, geometry: { type: "Polygon",
+        coordinates: [[[-180, -85], [180, -85], [180, 85], [-180, 85], [-180, -85]]] } } };
+      const base = L.maplibreGL({ style: { ...style, sources: { ...style.sources, rainy_world: world }, layers: baseLayers },
+        interactive: false }).addTo(map);
       base.getContainer().classList.add("basemap");
+      basemapBase = base;
+      base.getMaplibreMap().on("load", applyBasemapMode);
     }
     // borders and place names sit above the weather, so they stay readable under rain and clouds
     // sunny mode: the sun tint and clouds cover the basemap, so water gets its own tint and a coastline on top
     const waterSrc = (style.layers.find((l) => l["source-layer"] === "water") || {}).source || src;
     const sunWater = [
-      { id: "rainy_sun_water", type: "fill", source: waterSrc, "source-layer": "water", layout: { visibility: "none" },
-        // dark map: a very dark grey-blue, nearly opaque (user 15.11.2026: B #1d3f7a was too blue; the old #0b1a2e at
-        // 0.45 let the land's orange through by day and looked like a shadow)
-        paint: { "fill-color": mapDark ? "#0a1020" : "#2d6fb4", "fill-opacity": mapDark ? 0.97 : 0.22 } }, // nearly black blue (user, 15.11.2026)
       { id: "rainy_sun_coast", type: "line", source: waterSrc, "source-layer": "water", layout: { visibility: "none" },
         paint: { "line-color": mapDark ? "#4c5f80" : "#2d6fb4", "line-opacity": 0.7,
           "line-width": ["interpolate", ["linear"], ["zoom"], 3, 0.5, 8, 1, 13, 1.5] } },
@@ -808,13 +817,36 @@ map.getPane("labels").style.pointerEvents = "none";
     basemapTop.getMaplibreMap().on("load", applyBasemapMode);
   } catch (err) { console.warn("basemap failed", err); }
 })();
-let basemapTop = null;
-// Show the sunny-only water layers in sun mode.
+let basemapTop = null, basemapBase = null;
+const WATER_PAINT = {};
+// Sun mode on the base map: the land tint (rainy_sun_tint, opacity set per frame by applySunTint) and nearly black
+// water (user, 15.11.2026: "extrem dunkelblau, fast schwarz"); rain mode: the map's own water.
+function applyBaseMode() {
+  const b = basemapBase && basemapBase.getMaplibreMap();
+  if (!b || !b.isStyleLoaded() || !SUN_LOOK) return;
+  const sun = state.mode === "sun";
+  if (b.getLayer("rainy_sun_tint")) b.setLayoutProperty("rainy_sun_tint", "visibility", sun ? "visible" : "none");
+  for (const l of b.getStyle().layers) {
+    if (l["source-layer"] !== "water" || l.type !== "fill") continue;
+    WATER_PAINT[l.id] ??= [b.getPaintProperty(l.id, "fill-color"), b.getPaintProperty(l.id, "fill-opacity")];
+    b.setPaintProperty(l.id, "fill-color", sun ? "#070c17" : WATER_PAINT[l.id][0]);
+    b.setPaintProperty(l.id, "fill-opacity", sun ? 1 : WATER_PAINT[l.id][1] ?? 1);
+  }
+  applySunTint();
+}
+function applySunTint() {
+  const b = basemapBase && basemapBase.getMaplibreMap();
+  if (!b || !b.isStyleLoaded() || !b.getLayer("rainy_sun_tint") || state.mode !== "sun") return;
+  const f = cur().frames[cur().idx];
+  b.setPaintProperty("rainy_sun_tint", "fill-opacity", f ? SUN_ALPHA_LOOK * daylightAt(f.ts) : 0);
+}
+// Show the sunny-only layers in sun mode.
 function applyBasemapMode() {
+  applyBaseMode();
   const m = basemapTop && basemapTop.getMaplibreMap();
   if (!m || !m.isStyleLoaded()) return;
   const sun = state.mode === "sun";
-  for (const id of ["rainy_sun_water", "rainy_sun_coast"]) m.setLayoutProperty(id, "visibility", sun ? "visible" : "none");
+  for (const id of ["rainy_sun_coast"]) m.setLayoutProperty(id, "visibility", sun ? "visible" : "none");
   // sun mode: white clouds hide the light borders - dark lines on a light casing instead (variant B of A-D, 10.11.)
   const keep = (id, prop) => (BORDER_PAINT[id + prop] ??= m.getPaintProperty(id, prop));
   for (const id of ["rainy_border_state", "rainy_border_country"]) {
@@ -922,7 +954,7 @@ const [SUN_RGB, SUN_ALPHA_LOOK] = SUN_VARIANTS[new URLSearchParams(location.sear
 // The sun look (orange map + warm tint on clear sky) belongs to the default design "Schlicht"; with the other designs
 // sunny shows their map as it is with the clouds on top (user, 14.11.2026).
 const SUN_LOOK = MAP_STYLE.design === "plain";
-const SUN_ALPHA = SUN_LOOK ? SUN_ALPHA_LOOK : 0;
+const SUN_ALPHA = 0; // the tint is a base-map layer since v1.17 (applySunTint); SUN_ALPHA_LOOK is its strength
 document.body.classList.toggle("sun-look", SUN_LOOK);
 // Satellite look (test with ?sat=photo): "clouds" = clouds from the satellite photo drawn as our cloud layer with
 // the sun tint on clear sky; "photo" = the EUMETSAT GeoColour photo itself, like classic satellite maps.
@@ -2288,6 +2320,7 @@ function preloadTiles(s) {
 function renderFrame() {
   const s = cur(), f = s.frames[s.idx];
   if (!f) return;
+  if (state.mode === "sun") applySunTint();
   // lightning is measured (last minutes): only on the current and past frames, not in the forecast
   if (lightningLayer) {
     const show = state.mode === "rain" && f.ts <= Date.now() + 5 * 60e3;
