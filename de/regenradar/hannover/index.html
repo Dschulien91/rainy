@@ -452,11 +452,11 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=1.12"></script>
-<script src="lang/en.js?v=1.12"></script>
+<script src="lang/de.js?v=1.13"></script>
+<script src="lang/en.js?v=1.13"></script>
 <script>
 "use strict";
-const VERSION = "v1.12";
+const VERSION = "v1.13";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -1779,6 +1779,10 @@ function buildViews() {
       }
       return { ts, value: sun, model: sun, isDay, temp: temp(ts), map };
     }));
+    // the cloud frames this timeline shows, as one range for the atlas tiles (all frames of a tile in one request)
+    const cts = state.views["sun-short"].frames.filter((f) => f.map.kind === "ctile").map((f) => f.map.ts);
+    const a0 = cts.length ? Math.min(...cts) : 0, an = cts.length ? Math.round((Math.max(...cts) - a0) / 600e3) + 1 : 0;
+    state.cloudAtlas = an >= 1 && an <= 40 ? { t0: a0, n: an } : null;
   }
   // Keep the time the user picked on the timeline (e.g. +40 min) when the place changes (pin, search, favourite):
   // the new timeline starts at the same moment instead of jumping back to "now". refreshAll() resets to "now" first.
@@ -1929,6 +1933,17 @@ function resolveMap(m) {
 // URL changes with every new data run, so cached tiles never go stale.
 const tileLayers = new Map();
 let shownTiles = null;
+// Atlas images of the sunny tiles: URL -> Promise<img>, the last 96 kept; a server that has no atlas is remembered
+const ATLAS = new Map(), atlasFailed = new Set();
+function atlasImage(url, base) {
+  let p = ATLAS.get(url);
+  if (!p) {
+    p = loadImage(url).catch((e) => { ATLAS.delete(url); atlasFailed.add(base); throw e; });
+    ATLAS.set(url, p);
+    while (ATLAS.size > 96) ATLAS.delete(ATLAS.keys().next().value);
+  }
+  return p;
+}
 const CloudTiles = L.GridLayer.extend({
   createTile(c, done) {
     const tile = document.createElement("canvas");
@@ -1939,10 +1954,15 @@ const CloudTiles = L.GridLayer.extend({
     let finished = false;
     const finish = () => { if (!finished) { finished = true; done(null, tile); } };
     setTimeout(finish, 15000);
-    const url = L.Util.template(this.options.url, c);
-    const attempt = (n) => loadImage(url).then((img) => {
+    const url = L.Util.template(this.options.url, c), a = this.options.atlas;
+    // atlas (server v1.32): one image with all frames of this tile position, shared by every time step's layer;
+    // a server without it (404) -> the frame's own tile
+    const source = () => (a && !atlasFailed.has(a.base) ? atlasImage(L.Util.template(a.url, c), a.base)
+      .then((img) => [img, (a.k % 8) * 256, Math.floor(a.k / 8) * 256], () => loadImage(url).then((img) => [img, 0, 0]))
+      : loadImage(url).then((img) => [img, 0, 0]));
+    const attempt = (n) => source().then(([img, sx, sy]) => {
       const ctx = tile.getContext("2d", { willReadFrequently: true });
-      ctx.drawImage(img, 0, 0);
+      ctx.drawImage(img, sx, sy, 256, 256, 0, 0, 256, 256);
       const d = ctx.getImageData(0, 0, 256, 256), px = d.data, lut = skyLut(daylightAt(this.options.ts));
       // one table lookup per pixel instead of cloudOpacity + paintSky (15.11.2026: clouds appeared late while the
       // browser painted all time steps pixel by pixel)
@@ -1961,8 +1981,14 @@ const CloudTiles = L.GridLayer.extend({
 // showed nothing new until the step had loaded, all steps after ~24 s.
 const RAIN_COARSE_Z = EU_AREA ? 6 : 8;
 const coarseUseful = (kind) => kind === "rain" && map.getZoom() > RAIN_COARSE_Z;
+function cloudAtlasFor(ts) {
+  const A = state.cloudAtlas;
+  if (!A || !state.tileKey.cloud || ts < A.t0 || ts > A.t0 + (A.n - 1) * 600e3) return null;
+  return { url: `${SUN_BASE}/tiles/clouddata/${state.tileKey.cloud}/${A.t0}-${A.n}/{z}/{x}/{y}.png`, base: SUN_BASE,
+    k: Math.round((ts - A.t0) / 600e3) };
+}
 function tileLayer(kind, ts, coarse = false) {
-  const id = `${kind}/${state.tileKey[kind]}/${ts}${coarse ? "/c" : ""}`;
+  const id = `${kind}/${state.tileKey[kind]}/${ts}${coarse ? "/c" : ""}`; // preloadTiles builds the same ids
   let layer = tileLayers.get(id);
   if (!layer) {
     const url = `${kind === "rain" ? RADAR_BASE : SUN_BASE}/tiles/${kind === "rain" && RAIN_EU ? "raineu" : kind === "rain" && FC_OWN ? "rainown" : kind}/${state.tileKey[kind]}/${ts}/{z}/{x}/{y}.png`;
@@ -1972,7 +1998,7 @@ function tileLayer(kind, ts, coarse = false) {
       ? L.tileLayer(url, { pane: "weather", opacity: 0, maxNativeZoom: coarse ? RAIN_COARSE_Z : 10, className: "rain-tiles", crossOrigin: "anonymous" })
       // the sunny grid has ~2 km cells: zoom-8 tiles (~400 m pixels) hold all its detail, closer in they are only
       // enlarged - no new server tiles per zoom step for every time step of the timeline (empty squares while zooming)
-      : new CloudTiles({ pane: "weather", opacity: 0, className: "cloud-tiles", url, ts, maxNativeZoom: 8 });
+      : new CloudTiles({ pane: "weather", opacity: 0, className: "cloud-tiles", url, ts, maxNativeZoom: 8, atlas: cloudAtlasFor(ts) });
     if (kind === "rain") { // a rain tile that failed once (server busy) is asked for again instead of staying empty
       layer.on("tileerror", (e) => {
         const n = (e.tile.retries || 0) + 1;
