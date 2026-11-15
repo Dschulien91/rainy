@@ -60,6 +60,7 @@ Requests to data sources carry a neutral User-Agent and no identifying informati
 """
 from collections import OrderedDict
 import contextlib
+import glob
 import io
 import json
 import math
@@ -103,7 +104,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v1.29"
+VERSION = "server-v1.30"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -1577,6 +1578,48 @@ def monitor_status():
             "sun_age": round((now - sun) / 60_000, 1) if sun else None}
 
 
+def model_at_gauges_loop():
+    """Every 3 hours: the weather model's forecast (Open-Meteo best match, as the app's 24 h / 3-day views show it) for the next
+    24 hours at every rain gauge of check_national_gauges -> verify_log/modelgauge/<issue time>.npz (t, precip mm per
+    hour, temperature 2 m; 14 days). The truth is the gauge archive: check_model_gauges.py scores the 24 h forecast
+    by lead and region - the base for correcting it per place (user, 14./15.11.2026; meteoblue / WetterOnline do this)."""
+    import check_national_gauges as cng
+    out_dir = os.path.join(cng.ROOT, "modelgauge")
+    time.sleep(300)
+    while True:
+        try:
+            st = cng.stations()
+            if st and openmeteo_available():
+                issue = int(time.time() // 3600 * 3600 * 1000)
+                t, pr, tt = None, [], []
+                for i in range(0, len(st), 150):
+                    part = st[i:i + 150]
+                    q = (f"{OPENMETEO_URL}/v1/forecast?latitude={','.join(f'{x[2]:.3f}' for x in part)}"
+                         f"&longitude={','.join(f'{x[3]:.3f}' for x in part)}&hourly=precipitation,temperature_2m"
+                         f"&forecast_hours=25&timeformat=unixtime")
+                    d = json.loads(fetch(q, timeout=120))
+                    d = d if isinstance(d, list) else [d]
+                    for x in d:
+                        h = x["hourly"]
+                        t = np.array(h["time"], np.int64) * 1000
+                        pr.append([np.nan if v is None else v for v in h["precipitation"]][:len(t)])
+                        tt.append([np.nan if v is None else v for v in h["temperature_2m"]][:len(t)])
+                os.makedirs(out_dir, exist_ok=True)
+                tmp = os.path.join(out_dir, f"{issue}.tmp.npz")
+                np.savez_compressed(tmp, t=t, precip=np.array(pr, np.float16), temp=np.array(tt, np.float16),
+                                    ids=np.array([f"{x[0]}:{x[1]}" for x in st]))
+                os.replace(tmp, os.path.join(out_dir, f"{issue}.npz"))
+                old = time.time() * 1000 - 14 * 86400_000
+                for fp in glob.glob(os.path.join(out_dir, "*.npz")):
+                    if os.path.basename(fp)[:-4].isdigit() and int(os.path.basename(fp)[:-4]) < old:
+                        os.remove(fp)
+        except Exception as e:
+            log(f"model at gauges failed: {e}")
+        # every 3 hours at :10 (one pass reads ~3600 places and took 6 min the first time: the Nordic / UK best-match
+        # models are read from the remote mirror) - 8 issue times a day are plenty for scores by lead
+        time.sleep(3 * 3600 - time.time() % (3 * 3600) + 600)
+
+
 def gauge_archive_loop():
     """Hourly: the last hours of all rain gauge networks into verify_log/gaugetruth (check_national_gauges.py) - the
     sources keep hours to days, the evaluation needs weeks."""
@@ -1621,6 +1664,7 @@ def main_eu():
     threading.Thread(target=EU_VERIFY.loop, daemon=True).start()
     if not EU_NATIONAL and not NA:  # measurements that are needed once, not per instance: in the OPERA instance
         threading.Thread(target=gauge_archive_loop, daemon=True).start()
+        threading.Thread(target=model_at_gauges_loop, daemon=True).start()
         threading.Thread(target=tile_gap_loop, daemon=True).start()
     # Where no radar reaches (Greece, W Turkey, east of Poland ...) the own picture drew the satellite rain estimate
     # (H SAF, ~30 min old, from cloud tops) faintly into the hatched area. User, 13.11.2026: it shows rain inside
