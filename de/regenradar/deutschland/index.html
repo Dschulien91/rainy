@@ -445,11 +445,11 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=1.15"></script>
-<script src="lang/en.js?v=1.15"></script>
+<script src="lang/de.js?v=1.16"></script>
+<script src="lang/en.js?v=1.16"></script>
 <script>
 "use strict";
-const VERSION = "v1.15";
+const VERSION = "v1.16";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -781,9 +781,9 @@ map.getPane("labels").style.pointerEvents = "none";
       { id: "rainy_sun_water", type: "fill", source: waterSrc, "source-layer": "water", layout: { visibility: "none" },
         // dark map: a very dark grey-blue, nearly opaque (user 15.11.2026: B #1d3f7a was too blue; the old #0b1a2e at
         // 0.45 let the land's orange through by day and looked like a shadow)
-        paint: { "fill-color": mapDark ? "#1c2a40" : "#2d6fb4", "fill-opacity": mapDark ? 0.95 : 0.22 } },
+        paint: { "fill-color": mapDark ? "#0a1020" : "#2d6fb4", "fill-opacity": mapDark ? 0.97 : 0.22 } }, // nearly black blue (user, 15.11.2026)
       { id: "rainy_sun_coast", type: "line", source: waterSrc, "source-layer": "water", layout: { visibility: "none" },
-        paint: { "line-color": mapDark ? "#5f7598" : "#2d6fb4", "line-opacity": 0.7,
+        paint: { "line-color": mapDark ? "#4c5f80" : "#2d6fb4", "line-opacity": 0.7,
           "line-width": ["interpolate", ["linear"], ["zoom"], 3, 0.5, 8, 1, 13, 1.5] } },
     ];
     const top = part((l) => l.type === "symbol");
@@ -939,8 +939,10 @@ const SUN_MAP = [0.05, 0.8];
 const sunShare = (c) => 1 - clamp((c - SUN_MAP[0]) / SUN_MAP[1], 0, 1);
 const CLOUD_EDGE = [0.6, 0.68], VEIL = [0.1, 0.6], VEIL_ALPHA = 0.3;
 const cloudCover = (v) => smoothstep(CLOUD_EDGE[0], CLOUD_EDGE[1], v);
+// Solid clouds cover 0.82-0.97 (was 0.62-0.92): over the dark water of the sunny map the old ones turned dark grey,
+// over land light grey (user, 15.11.2026: clouds should look grey-white over water too). The veil stays see-through.
 const cloudOpacity = (v) => Math.max(VEIL_ALPHA * smoothstep(VEIL[0], VEIL[1], v),
-  cloudCover(v) * (0.62 + 0.3 * clamp((v - CLOUD_EDGE[1]) / 0.25, 0, 1)));
+  cloudCover(v) * (0.82 + 0.15 * clamp((v - CLOUD_EDGE[1]) / 0.25, 0, 1)));
 // Paint cloud opacity ac over the sun tint (by day) into an RGBA buffer at i4; returns the resulting alpha.
 function paintSky(px, i4, ac, day) { // day: 0 (night) .. 1 (daylight), fractional in twilight
   const tint = day > 0 ? day * SUN_ALPHA * (1 - Math.min(1, ac / 0.5)) : 0, a = ac + tint * (1 - ac);
