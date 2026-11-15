@@ -457,11 +457,11 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=1.19"></script>
-<script src="lang/en.js?v=1.19"></script>
+<script src="lang/de.js?v=1.20"></script>
+<script src="lang/en.js?v=1.20"></script>
 <script>
 "use strict";
-const VERSION = "v1.19";
+const VERSION = "v1.20";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -1740,7 +1740,10 @@ async function loadSatLatest(loc) {
 // (~30-40 min), as the light does. Before (10.11.) the tint switched off at once at sunset - a big jump on the map.
 function daylightAt(ts) {
   if (!state.loc) return isDayAt(ts) ? 1 : 0;
-  return clamp((sunElevation(ts, state.loc.lat, state.loc.lon) + 1) / 5, 0, 1);
+  // a short fade centred on sunrise / sunset (-0.83 deg, refraction included): full sun from +0.7 deg, none below
+  // -2.3 deg - about one 15-minute step on either side. Before (until v1.19) it faded from +4 deg down, so the warm
+  // tint was gone half an hour before the sunset mark in the chart (user, 15.11.2026: "sieht aus wie ein Fehler").
+  return clamp((sunElevation(ts, state.loc.lat, state.loc.lon) + 0.83) / 3 + 0.5, 0, 1);
 }
 function isDayAt(ts) {
   const p = state.point;
