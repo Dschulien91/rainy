@@ -446,11 +446,11 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=1.14"></script>
-<script src="lang/en.js?v=1.14"></script>
+<script src="lang/de.js?v=1.15"></script>
+<script src="lang/en.js?v=1.15"></script>
 <script>
 "use strict";
-const VERSION = "v1.14";
+const VERSION = "v1.15";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -780,11 +780,11 @@ map.getPane("labels").style.pointerEvents = "none";
     const waterSrc = (style.layers.find((l) => l["source-layer"] === "water") || {}).source || src;
     const sunWater = [
       { id: "rainy_sun_water", type: "fill", source: waterSrc, "source-layer": "water", layout: { visibility: "none" },
-        // dark map: a full dark blue (variant B, user 15.11.2026) - the old #0b1a2e at 0.45 turned brown under the
-        // sunny map's orange filter by day and looked like a shadow
-        paint: { "fill-color": mapDark ? "#1d3f7a" : "#2d6fb4", "fill-opacity": mapDark ? 0.95 : 0.22 } },
+        // dark map: a very dark grey-blue, nearly opaque (user 15.11.2026: B #1d3f7a was too blue; the old #0b1a2e at
+        // 0.45 let the land's orange through by day and looked like a shadow)
+        paint: { "fill-color": mapDark ? "#1c2a40" : "#2d6fb4", "fill-opacity": mapDark ? 0.95 : 0.22 } },
       { id: "rainy_sun_coast", type: "line", source: waterSrc, "source-layer": "water", layout: { visibility: "none" },
-        paint: { "line-color": mapDark ? "#6d95d0" : "#2d6fb4", "line-opacity": 0.7,
+        paint: { "line-color": mapDark ? "#5f7598" : "#2d6fb4", "line-opacity": 0.7,
           "line-width": ["interpolate", ["linear"], ["zoom"], 3, 0.5, 8, 1, 13, 1.5] } },
     ];
     const top = part((l) => l.type === "symbol");
