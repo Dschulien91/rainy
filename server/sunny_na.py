@@ -9,8 +9,8 @@ the sunshine from DWD's direct radiation by day and from cloud-top heights at ni
 Everything else is SunnyDE (sunny_de.py): k = 1 - 0.95 x cloud probability stands in for the clear-sky index, and the
 motion, the 2 h forecast, the map frames, the atlas tiles, the grid verification and the warm start run unchanged on an
 America grid (Web Mercator, 6 km cells, 135 W - 50 W, 12 N - 60 N; GOES-East sees it all, the far north-west at a
-flat angle). Not yet: GOES-West (Alaska, Hawaii, the Pacific coast at a better angle), station verification (METAR
-sky cover), the weather-model blend.
+flat angle). Verified at the stations against the METAR cloud cover (northamerica.MetarSky, rough: 1 - cover vs the sun share).
+Not yet: GOES-West (Alaska, Hawaii, the Pacific coast at a better angle), the weather-model blend.
 """
 import io
 import re
@@ -55,9 +55,13 @@ def goes_index(f, lat, lon):
 
 
 class SunnyGoes(sunny_de.SunnyDE):
-    def __init__(self, fetch, log):
+    def __init__(self, fetch, log, sky=None):
+        """sky: northamerica.MetarSky - the METAR cloud cover as the station truth (filled by the instance's METAR loop)."""
         super().__init__(fetch, log, None, None, stations=False, area=AMERICA)
         self._idx = None
+        if sky is not None:
+            self.stations = sky
+            self.verify = sunny_de.SunVerify(self, sky, log, prefix="na")
 
     def _files(self):
         """{slot (scan start rounded down to 10 min, ms): key} of the last ~3 hours."""

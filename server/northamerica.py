@@ -155,6 +155,7 @@ class MetarGauges:
         os.makedirs(self.dir, exist_ok=True)
         self.st_path = os.path.join(self.dir, "stations.json")
         self.seen = set()
+        self.sky = MetarSky()   # cloud cover, the station truth of sunny for the Americas (sunny_na.py)
 
     def stations(self):
         import json
@@ -170,7 +171,10 @@ class MetarGauges:
         st = self.stations()
         known = {s[1] for s in st}
         new_st, lines = [], {}
-        for sid, lat, lon, t, mm in metar_rows(self.fetch(METAR_URL, timeout=60)):
+        raw = self.fetch(METAR_URL, timeout=60)
+        for sid, lat, lon, t, cover in metar_sky(raw):
+            self.sky.add(sid, lat, lon, t, cover)
+        for sid, lat, lon, t, mm in metar_rows(raw):
             if sid not in known:
                 new_st.append(("us", sid, round(lat, 4), round(lon, 4)))
                 known.add(sid)
@@ -200,3 +204,75 @@ class MetarGauges:
             except Exception as e:
                 self.log(f"metar failed: {e}")
             time.sleep(600)
+
+
+# ---------- cloud cover for sunny: the METAR sky condition ----------
+SKY_COVER = {"CLR": 0.0, "SKC": 0.0, "NCD": 0.0, "NSC": 0.0, "CAVOK": 0.0, "FEW": 0.19, "SCT": 0.44, "BKN": 0.75,
+             "OVC": 1.0, "OVX": 1.0, "VV": 1.0}
+
+
+def metar_sky(raw):
+    """(station, lat, lon, observation time ms, cloud cover 0..1) of every report in North America (US and Canada): the
+    largest of the reported layers (FEW 1-2/8, SCT 3-4/8, BKN 5-7/8, OVC 8/8). Caveat: automated stations look up
+    to 12,000 ft only - "CLR" there can hide high cloud the satellite sees."""
+    import csv
+    rows = list(csv.reader(gzip.decompress(raw).decode("utf-8", "replace").splitlines()))
+    if not rows or rows[0][0] != "raw_text":
+        return
+    head = rows[0]
+    col = {name: i for i, name in enumerate(head) if name not in ("sky_cover", "cloud_base_ft_agl")}
+    sky = [i for i, name in enumerate(head) if name == "sky_cover"]
+    for r in rows[1:]:
+        try:
+            lat, lon = float(r[col["latitude"]]), float(r[col["longitude"]])
+        except (ValueError, IndexError):
+            continue
+        if not (12 <= lat <= 60 and -135 <= lon <= -50):
+            continue
+        covers = [SKY_COVER[r[i]] for i in sky if i < len(r) and r[i] in SKY_COVER]
+        if not covers:  # a clear sky is often only in the raw text ("CLR", "SKC", "CAVOK", "NCD", "NSC")
+            text = " " + r[0].split(" RMK ")[0] + " "
+            if not re.search(r" (CLR|SKC|CAVOK|NCD|NSC) ", text):
+                continue
+            covers = [0.0]
+        t = int(datetime.strptime(r[col["observation_time"]][:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc).timestamp() * 1000)
+        yield r[col["station_id"]], lat, lon, t, max(covers)
+
+
+class MetarSky:
+    """The METAR cloud cover as sunny's station truth (the interface of sunny_de.SunStations): truth(end) = {station:
+    1 - cover} of the last report in the 40 minutes before end - compared with the forecast sun share by day (a
+    rough truth: a cover of 1 - share, not measured sunshine; sunny_de.SunVerify, score_sun.py --prefix na).
+    Filled by MetarGauges.poll every 10 minutes; nothing of its own to run."""
+
+    def __init__(self):
+        import threading
+        self.lock = threading.Lock()
+        self.stations = {}   # id -> (lat, lon)
+        self.obs = {}        # id -> {time ms: cover}
+
+    def add(self, sid, lat, lon, t, cover):
+        with self.lock:
+            self.stations[sid] = (lat, lon)
+            d = self.obs.setdefault(sid, {})
+            d[t] = cover
+            if len(d) > 40:
+                for k in sorted(d)[:-30]:
+                    del d[k]
+
+    def truth(self, end_ts):
+        out = {}
+        with self.lock:
+            for sid, d in self.obs.items():
+                ts = [t for t in d if end_ts - 40 * 60_000 < t <= end_ts]
+                if ts:
+                    out[sid] = 1.0 - d[max(ts)]
+        return out
+
+    def newest(self):
+        with self.lock:
+            ends = [max(d) for d in self.obs.values() if d]
+        return int(np.median(ends)) if ends else 0
+
+    def loop(self):
+        pass

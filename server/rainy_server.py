@@ -105,7 +105,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v1.36"
+VERSION = "server-v1.37"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -1587,7 +1587,7 @@ OWN = OwnNowcast(DE)
 # Europe test instance: the same sunny for all of Europe (sunny_de.EUROPE: 4 km grid, ICON-EU, files eusun*)
 # sunny: Germany (DWD satellite) / Europe (DWD satellite, EU area) / the Americas (GOES-East, sunny_na.py; North America
 # instance, 15.11.2026)
-SUNNY = (sunny_na.SunnyGoes(fetch, log) if NA
+SUNNY = (sunny_na.SunnyGoes(fetch, log, sky=REGIONS["eu"].metar.sky) if NA
          else sunny_de.SunnyDE(fetch, log, None, OPENMETEO_URL, openmeteo_available, area=sunny_de.EUROPE) if EDITION == "eu"
          else sunny_de.SunnyDE(fetch, log, DE, OPENMETEO_URL, openmeteo_available))
 SUNNY_ON = EDITION in ("de", "eu") and os.environ.get("SUNNY_DE", "1") != "0"
