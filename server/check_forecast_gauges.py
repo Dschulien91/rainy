@@ -8,7 +8,8 @@ verify_log/fcgauge/ (OPERA instance) and verify_log/eun/fcgauge/ (own picture), 
 run's other forecasts where the instance has them. The gauges' values come from the server's archive
 (verify_log/gaugetruth, hourly) plus what the sources have right now ("--archive": the archive alone, fast).
 
-  docker exec -w /app deploy-api-eun-1 python check_forecast_gauges.py [--hours 24] [--archive]
+  docker exec -w /app deploy-api-eun-1 python check_forecast_gauges.py [--hours 24] [--until YYYYMMDDHHMM] [--archive]
+  (--until: the window ends there, UTC, instead of now - to compare runs before and after a change)
 
 Per country (and Italy together, and all) and lead, on the runs both instances have:
   European / own           the forecast the instance serves
@@ -22,6 +23,7 @@ Read it as: own must beat European where a national layer counts (Italy, Germany
 none does (Austria, Czechia); a forecast below its own persistence at +30 means the motion is wrong there; a
 forecast whose amount ("x") falls with the lead while persistence keeps it loses rain area (13.11.: -35 % in 1 h).
 """
+import calendar
 import glob
 import os
 import sys
@@ -35,12 +37,14 @@ HOURS = float(sys.argv[sys.argv.index("--hours") + 1]) if "--hours" in sys.argv 
 DIRS = {"European": os.path.join(cng.ROOT, "fcgauge"), "own": os.path.join(cng.ROOT, "eun", "fcgauge")}
 EXTRA = {"pure": "S-PROG", "cells": "+model"}
 st = cng.stations()
-since = time.time() * 1000 - HOURS * 3600_000
+UNTIL = (calendar.timegm(time.strptime(sys.argv[sys.argv.index("--until") + 1], "%Y%m%d%H%M")) * 1000
+         if "--until" in sys.argv else time.time() * 1000)
+since = UNTIL - HOURS * 3600_000
 refs = None
 for d in DIRS.values():
     have = {int(os.path.basename(p)[:-4]) for p in glob.glob(os.path.join(d, "*.npz"))}
     refs = have if refs is None else refs & have
-refs = sorted(t for t in refs if t >= since)
+refs = sorted(t for t in refs if since <= t <= UNTIL)
 if not refs:
     sys.exit("no forecast run that both instances noted in this time")
 print(f"{len(refs)} forecast runs of both instances, {time.strftime('%d.%m. %H:%M', time.gmtime(refs[0] / 1000))} - "
