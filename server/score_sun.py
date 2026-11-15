@@ -4,7 +4,8 @@ Grid (verify_log/sungrid_*.jsonl, against the later DWD satellite analysis, ~3 k
 CSI / POD / FAR, mean share bias and MAE. Stations (verify_log/sunstation_*.jsonl, against DWD's 10-minute sunshine
 duration SD_10): MAE of the sun share and the hit rate of "sunny or not".
 
-  python score_sun.py sat pers kpers model nwp [--hours 24 | --all | --day 20261110] [--dir verify_log] [--prefix eu]
+  python score_sun.py sat pers kpers model nwp [--hours 24 | --all | --day 20261110] [--dir verify_log] [--prefix eu] [--broken]
+  (--broken: also the stations that were in broken cloud when the run started - compare "sat" with "sharp")
   (--prefix eu: the Europe instance's files eusungrid_* / eusunstation_*)
 The last line is the analysis itself at the stations (variant "ana", lead 0): how well the newest satellite image
 says "sun or not" where a gauge measures it - no forecast can be better than that.
@@ -73,6 +74,18 @@ for n in load.names:
                 r = v[n]
                 e += r["mae"] * r["n"]; b += r["bias"] * r["n"]; h += r["hit"] * r["n"]; w += r["n"]
         print(f"  {n:8s} +{lead:3d}  {e / max(w, 1):.3f} {h / max(w, 1):.3f} {b / max(w, 1):+.3f} {w:6d}")
+if "--broken" in args:  # stations in broken cloud at the run's start (sunny_de.SunVerify.step: nb, mae_b, ...)
+    print("stations in broken cloud at the start (analysis share 0.15-0.85):")
+    print("  variant   lead   MAE   hit  bias      n")
+    for n in load.names:
+        for lead in leads:
+            e = b = h = w = 0
+            for (_, l), v in st.items():
+                r = v[n]
+                if l == lead and r.get("nb"):
+                    e += r["mae_b"] * r["nb"]; b += r["bias_b"] * r["nb"]; h += r["hit_b"] * r["nb"]; w += r["nb"]
+            if w:
+                print(f"  {n:8s} +{lead:3d}  {e / w:.3f} {h / w:.3f} {b / w:+.3f} {w:6d}")
 if ANA:
     w = sum(r["n"] for r in ANA)
     print(f"analysis at the stations (newest image vs gauge, {len(ANA)} images, {w} values): "

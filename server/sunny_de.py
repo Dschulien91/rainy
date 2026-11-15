@@ -654,15 +654,25 @@ class SunVerify:
             fc = dict(zip((str(x) for x in z["sid"]), (float(x) for x in z["v"])))
             truth = self.stations.truth(end)
             where = sun.station_coords()
-            pairs = [(fc[s], truth[s]) for s in fc if s in truth and s in where
-                     and sun_elevation(valid, where[s][0], where[s][1]) >= SCORE_ELEV]
-            if len(pairs) < 5:
+            keys = [s for s in fc if s in truth and s in where and sun_elevation(valid, where[s][0], where[s][1]) >= SCORE_ELEV]
+            if len(keys) < 5:
                 continue
-            f, o = np.array(pairs, np.float32).T
-            slines.append({"variant": variant, "ref": r, "lead": lead, "valid": valid, "v": monitor.TAG, "n": len(pairs),
-                           "mae": round(float(np.abs(f - o).mean()), 4), "bias": round(float((f - o).mean()), 4),
-                           "hit": round(float(((f >= SUNNY) == (o >= SUNNY)).mean()), 4),
-                           "obs": int((o >= SUNNY).sum()), "fcn": int((f >= SUNNY).sum())})
+            f, o = np.array([(fc[s], truth[s]) for s in keys], np.float32).T
+            row = {"variant": variant, "ref": r, "lead": lead, "valid": valid, "v": monitor.TAG, "n": len(keys),
+                   "mae": round(float(np.abs(f - o).mean()), 4), "bias": round(float((f - o).mean()), 4),
+                   "hit": round(float(((f >= SUNNY) == (o >= SUNNY)).mean()), 4),
+                   "obs": int((o >= SUNNY).sum()), "fcn": int((f >= SUNNY).sum())}
+            # broken cloud at the run's start (the satellite analysis at the station between 0.15 and 0.85 sun share):
+            # scored apart, for Schaefchenwolken & co. (15.11.2026; score_sun.py --broken)
+            a0 = sun.obs_share(r)
+            if a0 is not None:
+                ana = sun.at_pixels(a0, sun.station_pixels())
+                b = np.array([0.15 <= ana.get(s, np.nan) <= 0.85 for s in keys])
+                if b.any():
+                    row.update({"nb": int(b.sum()), "mae_b": round(float(np.abs(f - o)[b].mean()), 4),
+                                "bias_b": round(float((f - o)[b].mean()), 4),
+                                "hit_b": round(float(((f >= SUNNY) == (o >= SUNNY))[b].mean()), 4)})
+            slines.append(row)
         self._write(self.prefix + "sungrid", lines)
         self._write(self.prefix + "sunstation", slines)
         return len(lines), len(slines)
@@ -799,7 +809,7 @@ class SunnyDE:
         flow = self._motion(prev[0].astype(np.float32), k1, prev[1]) if prev else None
         base = fill_nan(k1)
         known = np.isfinite(k1).astype(np.float32)
-        out = {"sat": {}, "satold": {}, "kpers": {}, "pers": {}, "model": {}, "nwp": {}}
+        out = {"sat": {}, "satold": {}, "sharp": {}, "kpers": {}, "pers": {}, "model": {}, "nwp": {}}
         disp = {}
         for lead in FC_LEADS:
             ts = ref + lead * 60_000
@@ -810,7 +820,11 @@ class SunnyDE:
                 kn = cv2.remap(known, mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
             else:
                 kk, kn = base.copy(), known
-            kold = None
+            kold = ksharp = None
+            if lead in LEADS:  # shadow "sharp": moved, never blurred (15.11.2026, user: "Schaefchenwolken can stay all
+                # day, but our forecast blurs small clouds away" - does keeping the pattern score better at the stations,
+                # above all in broken cloud? score_sun.py sat sharp ... --broken)
+                ksharp = np.where(kn > 0.5, kk, np.nan).astype(np.float32)
             if lead in LEADS:  # the old blur, for the shadow "satold"
                 kold = np.where(kn > 0.5, cv2.GaussianBlur(kk, (0, 0), BLUR * math.sqrt(lead / 10)), np.nan).astype(np.float32)
             kk = cv2.GaussianBlur(kk, (0, 0), max(0.3, BLUR * math.sqrt(lead / 10) * min(1.0, lead / SHARP_MIN)))
@@ -820,6 +834,7 @@ class SunnyDE:
             disp[ts] = self._display(kk, e)
             if lead in LEADS:  # shadows only where they are scored
                 out["satold"][ts] = share_from_k(kold, e)
+                out["sharp"][ts] = share_from_k(ksharp, e)
                 out["kpers"][ts] = share_from_k(k1, e)
                 if obs is not None:
                     out["pers"][ts] = obs.astype(np.float32)
