@@ -445,11 +445,11 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=1.17"></script>
-<script src="lang/en.js?v=1.17"></script>
+<script src="lang/de.js?v=1.18"></script>
+<script src="lang/en.js?v=1.18"></script>
 <script>
 "use strict";
-const VERSION = "v1.17";
+const VERSION = "v1.18";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -810,9 +810,12 @@ let basemapTop = null, basemapBase = null;
 const WATER_PAINT = {};
 // Sun mode on the base map: the land tint (rainy_sun_tint, opacity set per frame by applySunTint) and nearly black
 // water (user, 15.11.2026: "extrem dunkelblau, fast schwarz"); rain mode: the map's own water.
+// The style (layers) is there - isStyleLoaded() also waits for every tile of the view, so right after opening sunny
+// the tint stayed at 0 until the timeline was moved (user, 15.11.2026: "am Anfang ueberall dunkel").
+const styleReady = (m) => { try { return !!(m && m.getStyle() && m.getStyle().layers); } catch { return false; } };
 function applyBaseMode() {
   const b = basemapBase && basemapBase.getMaplibreMap();
-  if (!b || !b.isStyleLoaded() || !SUN_LOOK) return;
+  if (!styleReady(b) || !SUN_LOOK) return;
   const sun = state.mode === "sun";
   if (b.getLayer("rainy_sun_tint")) b.setLayoutProperty("rainy_sun_tint", "visibility", sun ? "visible" : "none");
   for (const l of b.getStyle().layers) {
@@ -825,7 +828,7 @@ function applyBaseMode() {
 }
 function applySunTint() {
   const b = basemapBase && basemapBase.getMaplibreMap();
-  if (!b || !b.isStyleLoaded() || !b.getLayer("rainy_sun_tint") || state.mode !== "sun") return;
+  if (!styleReady(b) || !b.getLayer("rainy_sun_tint") || state.mode !== "sun") return;
   const f = cur().frames[cur().idx];
   b.setPaintProperty("rainy_sun_tint", "fill-opacity", f ? SUN_ALPHA_LOOK * daylightAt(f.ts) : 0);
 }
