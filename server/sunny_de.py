@@ -213,13 +213,13 @@ def clm_cloud(fetch, ts):
     (lat ascending, lon, float32 1 = cloud / 0 = clear / NaN = no data), or None. The newest image at or before ts."""
     lon0, lat0, lon1, lat1 = CLM_BOX
     w, h = int(round((lon1 - lon0) / CLM_DEG)), int(round((lat1 - lat0) / CLM_DEG))
-    for back in (0, 15, 30, 45):
+    for back in (15, 30):
         t = ts // 900_000 * 900_000 - back * 60_000
         iso = time.strftime("%Y-%m-%dT%H:%M:00.000Z", time.gmtime(t / 1000))
         url = (f"{CLM_WMS}?service=WMS&version=1.3.0&request=GetMap&layers=msg_fes:clm&styles=&crs=EPSG:4326"
                f"&bbox={lat0},{lon0},{lat1},{lon1}&width={w}&height={h}&format=image/png&time={iso}")
         try:
-            a = np.asarray(Image.open(io.BytesIO(fetch(url, timeout=60))).convert("RGBA"))
+            a = np.asarray(Image.open(io.BytesIO(fetch(url, timeout=25))).convert("RGBA"))
         except Exception:
             continue
         data = a[..., 3] > 128
@@ -812,12 +812,9 @@ class SunnyDE:
             ki = np.where(np.isfinite(k_ir), k_ir, kd)
             k = (w * kd + (1 - w) * ki).astype(np.float32)
         if (self.area or {}).get("clm") and not np.isfinite(k).all():  # beyond DWD's area: EUMETSAT's cloud mask
-            got = self._clm_cache.get(ts // 900_000)
-            if got is None:
-                c = clm_cloud(self.fetch, ts)
-                got = self.grid.regrid(c[0], c[1], c[2], sigma=(0.7, 0.7)) if c is not None else np.full(k.shape, np.nan, np.float32)
-                self._clm_cache = {ts // 900_000: got}
-            k = np.where(np.isfinite(k), k, 1.0 - 0.92 * got).astype(np.float32)
+            t_clm, got = self._clm_cache.get("now", (0, None))
+            if got is not None and abs(ts - t_clm) <= 60 * 60_000:  # the newest one the background thread has
+                k = np.where(np.isfinite(k), k, 1.0 - 0.92 * got).astype(np.float32)
         share = share_from_k(k, e)
         return k, share, self._display(k, e)
 
@@ -1059,8 +1056,25 @@ class SunnyDE:
             return self.verify.step(self.ref)
         return 0, 0
 
+    def clm_loop(self):
+        """EUMETSAT's cloud mask for the area beyond DWD's data, fetched in the background every 10 minutes - never in
+        the slot loop: on 15.11.2026 EUMETView answered HTTP 500 after 20 s, and fetching it per slot (up to four
+        tries) held sunny for all of Europe up for 16 minutes per update."""
+        while True:
+            try:
+                now = int(time.time() * 1000)
+                c = clm_cloud(self.fetch, now)
+                if c is not None:
+                    grid = self.grid.regrid(c[0], c[1], c[2], sigma=(0.7, 0.7))
+                    self._clm_cache = {"now": (now // 900_000 * 900_000 - 15 * 60_000, grid)}
+            except Exception as e:
+                self.log(f"sunny: cloud mask failed: {e}")
+            time.sleep(600)
+
     def loop(self):
         self.load_state()
+        if (self.area or {}).get("clm"):
+            threading.Thread(target=self.clm_loop, daemon=True).start()
         if self.stations:
             threading.Thread(target=self.stations.loop, daemon=True).start()
         if self.model:
