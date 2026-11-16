@@ -2,10 +2,10 @@
 same lead, same truth - per provider and country (network, or SYNOP country). "Are we on par with the competitors,
 especially at +120 min?"
 
-Join per competitor run R (a full hour; CHMI / ECCC also :30) and lead L:
+Join per competitor run R (a full hour; CHMI / KNMI / ECCC also :30) and lead L:
   competitor  the provider's value at R + L (box mean +-5 km, like ours; --point: the cell under the gauge; ECCC has
               only the point). MET Norway's "+120" is its +115 step; MEANDER's values are 30-min means centred on L
-              (+120: the last 15 min).
+              (+120: the last 15 min); KNMI's are the 5-min sum ending at R + L x 12 (its stored +0 is not scored).
   ours        each instance's forecast (verify_log/fcgauge = "European" (OPERA), verify_log/eun/fcgauge = "own";
               North America: verify_log/na/fcgauge) of the newest run r with R - 15 min <= r <= R (normally r = R:
               both note runs at full 10 min) at the same nominal lead L. "age" = R - r is printed (--exact: r = R only).
@@ -57,7 +57,7 @@ MIN_N = int(opt("--min", 20))
 KIND = "pt" if "--point" in args else "v"
 HOURLY_NETS = {"sy", "pt", "us", "ca"}
 PROVIDERS = {"metno": "MET Norway radar nowcast (Yr)", "incabe": "RMI INCA-BE", "chmi": "CHMI COTREC",
-             "meander": "HungaroMet MEANDER", "eccc": "ECCC radar extrapolation"}
+             "knmi": "KNMI pySTEPS nowcast", "meander": "HungaroMet MEANDER", "eccc": "ECCC radar extrapolation"}
 
 if NA:
     LOG = cng.LOG_DIR if os.path.basename(cng.LOG_DIR.rstrip("/\\")) == "na" else os.path.join(cng.LOG_DIR, "na")

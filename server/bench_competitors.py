@@ -2,12 +2,12 @@
 "auf Augenhoehe mit den Wettbewerbern, vor allem die 120 Minuten Vorhersage").
 
 Wherever a national weather service publishes its own radar nowcast as open data, this module records that nowcast
-at the gauges of check_national_gauges.py (Europe) / northamerica.MetarGauges (North America), once per hour (CHMI and
-ECCC twice), as a user would have got it: the provider's run at a full hour, its forecast for +30 / +60 / +90 / +120 min.
+at the gauges of check_national_gauges.py (Europe) / northamerica.MetarGauges (North America), once per hour (CHMI, KNMI
+and ECCC twice), as a user would have got it: the provider's run at a full hour, its forecast for +30 / +60 / +90 / +120 min.
 score_competitors.py joins these rows with OUR forecast of the same run time at the same gauges (verify_log/fcgauge,
 the instances' record_fc) and the gauge truth (verify_log/gaugetruth, metar/) and prints the scores per country.
 
-Providers (all read anonymously through the server's fetch(); no account, no key):
+Providers (all read anonymously through the server's fetch(); no account, no key - KNMI: its public anonymous key):
   metno   MET Norway radar nowcast (the one Yr shows; Nordic composite NO/SE/FI + DK/Baltic edges), CC BY 4.0.
           THREDDS radarnowcasting/yrwms-nordic...nordiclcc-1000.<YYYYMMDDTHHMM00Z>.nc: CF NetCDF4, lwe_precipitation_rate
           (mm/h, instantaneous), Lambert conformal 1 km 1694 x 2134, 24 steps 0..+115 min every 5 min, a new run every
@@ -41,18 +41,34 @@ Providers (all read anonymously through the server's fetch(); no account, no key
           hours are centred), <= 4 requests/s. The snow layer (Radar_1km_SnowPrecipRate-Extrapolation) is in cm/h of
           SNOW depth and returns values wherever there are echoes (same reflectivity, snow Z-S), not a phase-resolved
           water equivalent -> not used.
+  knmi    KNMI precipitation nowcast (operational pySTEPS, deterministic, from the real-time 5-min accumulation
+          RTCOR-5m; NL + BE / NW Germany within the Dutch / Belgian / German radars' reach), KNMI Data Platform open
+          data API, dataset radar_forecast version 2.0 (files RAD_NL25_RAC_FM_<YYYYMMDDHHMM>.h5, ~0.7 MB, a run every
+          5 min, published ~3-4 min after its time). Licence CC BY 4.0, attribution: "Source: KNMI (Royal Netherlands
+          Meteorological Institute)". KNMI HDF5: image1 .. image25, image_datetime_valid = run + 0 .. +120 min, each
+          the precipitation SUM of the 5 min ending at that time (uint16, image<N>/calibration "GEO=0.01*PV+0" mm;
+          65534 = missing, 65535 = outside the image) -> x 12 = the mean rate (mm/h) of the 5 min before the lead.
+          Grid 700 x 765 cells of 1 km, polar stereographic (geographic/map_projection proj4 string, in km), cell
+          (row, col) has its outer corner at x = (col + geo_column_offset) * geo_pixel_size_x, y = (row +
+          geo_row_offset) * geo_pixel_size_y. Also +0 is recorded (KNMI's own radar picture, not scored as a
+          forecast). The API needs a key: KNMI's PUBLISHED anonymous key (KNMI_ANON_KEY, shared by all unregistered
+          users, rate-limited, replaced periodically - env KNMI_KEY overrides it); no account. Per take two requests:
+          the API's temporary download URL of the run's file, then the file (S3). At most one take per 15 min (runs
+          :00 and :30); a 429 (the shared 50/min are often gone for a minute) is retried twice 30 s later, then
+          429 / 403 back off for 15 min .. 2 h (logged).
 
 Each provider value at a gauge is the mean over a box of +-FOOT_KM around it ("v"; our fcgauge value is the 5 x 5 mean
 of the 2-km grid = ~10 x 10 km) and the cell under the gauge ("pt"). ECCC has only the point.
 Rows: <log_dir>/bench/<provider>_<YYYYMMDD of the run>.jsonl, ONE LINE PER RUN (the gauge ids once, not per lead):
   {"p": provider, "run": run ms, "got": ms when read, "fp": box half-width km, "leads": [30, 60, ...] nominal minutes,
    "dt": [30, 60, ...] the provider's actual step, "ids": ["network:id", ...], "v": [[mm/h or null per id] per lead],
-   "pt": [[...] per lead]}   (+ "var": "cloud" for MEANDER's cloud cover, values 0..1)
+   "pt": [[...] per lead]}   (+ "var": "cloud" for MEANDER's cloud cover, values 0..1; KNMI: lead 0 too, and "pub" =
+   ms when KNMI published the file)
 
 Server: CompetitorBench(fetch, log, log_dir, stations, na=False).loop() in its own thread - one download at a time,
 every request with a timeout, every take with a time budget, a failing provider is retried within its window and
 never blocks the others for longer than its budget.
-Test without the server:  python bench_competitors.py --once metno|incabe|chmi|meander|eccc [--stations f.json] [--dir d]
+Test without the server:  python bench_competitors.py --once metno|incabe|chmi|knmi|meander|eccc [--stations f.json] [--dir d]
 """
 import calendar
 import hashlib
@@ -451,6 +467,123 @@ class Chmi(Provider):
         return [self.row(run, st, [s[0] for s in self.STEPS], [s[1] for s in self.STEPS], v, p)]
 
 
+# KNMI's anonymous Open Data API key as PUBLISHED on https://developer.dataplatform.knmi.nl/open-data-api ("Anonymous
+# key": shared by all unregistered users, 50 requests/min + 3000/h for everybody together; read 16.11.2026, valid till
+# 1.8.2027 - KNMI replaces it periodically: copy the new one from that page, or set env KNMI_KEY). Not ours, no account.
+KNMI_ANON_KEY = ("eyJvcmciOiI1ZTU1NGUxOTI3NGE5NjAwMDEyYTNlYjEiLCJpZCI6IjUzYTg1ZDBhMmQ5YzRkYzJiYWNlNzQ4NTQ2Zjk4ODExIiwiaCI6"
+                 "Im11cm11cjEyOCJ9")
+
+
+class Knmi(Provider):
+    """KNMI's pySTEPS precipitation nowcast for the Netherlands (see the module docstring)."""
+    name = "knmi"
+    API = "https://api.dataplatform.knmi.nl/open-data/v1/datasets/radar_forecast/versions/2.0/files/"
+    FILE = "RAD_NL25_RAC_FM_{t}.h5"
+    OFFSETS = (0, 30)
+    START_MIN, END_MIN = 5, 50      # published ~3-4 min after the run, kept for days
+    RETRY_S = 900                   # the anonymous key's quota is shared: never more than one take per 15 min
+    MIN_GAP_S = 900
+    BACKOFF_S = (900, 1800, 3600, 7200)   # after 429 / 403 answers in a row
+    QUICK_RETRIES = 2               # 429: retried 30 s later within the take, then BACKOFF_S
+    BUDGET_S = 180
+    LEADS = (0,) + LEADS            # +0 = KNMI's radar picture at the run time (not a forecast; for the amounts)
+
+    def __init__(self, fetch, log):
+        super().__init__(fetch, log)
+        self.key = os.environ.get("KNMI_KEY") or KNMI_ANON_KEY
+        self.last_api = 0.0
+        self.hold_until, self.strikes = 0.0, 0
+
+    def due(self, now_ms):
+        if time.time() < max(self.hold_until, self.last_api + self.MIN_GAP_S):
+            return None
+        return super().due(now_ms)
+
+    def api(self, url, timeout=40):
+        """One Open Data API request with the key - the same neutral User-Agent as the server's fetch(), the key in
+        the Authorization header (KNMI's public anonymous key), nothing else."""
+        import urllib.request
+        if self.deadline and time.time() > self.deadline:
+            raise OverBudget(f"{self.name}: take ran over its {self.BUDGET_S} s budget")
+        self.requests += 1
+        self.last_api = time.time()
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Authorization": self.key})
+        for attempt in range(1 + self.QUICK_RETRIES):
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as r:
+                    out = r.read()
+                break
+            except urllib.error.HTTPError as e:
+                # 429 mostly = the shared 50 requests/min are gone for this minute (seen 16.11.2026: a 429, 25 s
+                # later 200 with 2500 of the hour's 3000 left) -> two quiet retries 30 s apart, then the long back-off
+                if e.code == 429 and attempt < self.QUICK_RETRIES and time.time() + 35 < (self.deadline or 1e18):
+                    time.sleep(30)
+                    continue
+                self._refused(e)
+        self.strikes = 0
+        return out
+
+    def _refused(self, e):
+        """A final HTTP error of the API: 429 / 403 -> back off (15 min .. 2 h) and log it; others are raised."""
+        if e.code in (403, 429):
+            wait = self.BACKOFF_S[min(self.strikes, len(self.BACKOFF_S) - 1)]
+            self.strikes += 1
+            self.hold_until = time.time() + wait
+            why = "shared quota used up" if e.code == 429 else "key expired? set KNMI_KEY"
+            self.log(f"competitor knmi: HTTP {e.code} from the Open Data API ({why}), backing off {wait // 60} min")
+            raise NotReady(f"HTTP {e.code}")
+        raise e
+
+    def take(self, run, stations):
+        import h5py
+        import pyproj
+        name = self.FILE.format(t=_iso(run, "%Y%m%d%H%M"))
+        try:
+            meta = json.loads(self.api(self.API + name + "/url"))
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                raise NotReady("no file yet (404)")
+            raise
+        raw = self.get(meta["temporaryDownloadUrl"], timeout=60, tries=2)   # S3, signed URL: no key, no API quota
+        pub = _ms_iso(meta["lastModified"]) if meta.get("lastModified") else None
+        with h5py.File(io.BytesIO(raw), "r") as f:
+            start = f["overview"].attrs["product_datetime_start"].decode()
+            if datetime.strptime(start[:17], "%d-%b-%Y;%H:%M").replace(tzinfo=timezone.utc).timestamp() * 1000 != run:
+                raise Gone(f"run time inside the file is {start}")
+            g = f["geographic"].attrs
+            px, py = float(g["geo_pixel_size_x"][0]), float(g["geo_pixel_size_y"][0])
+            x0, y0 = float(g["geo_column_offset"][0]) * px, float(g["geo_row_offset"][0]) * py   # outer UL corner
+            nx, ny = int(g["geo_number_columns"][0]), int(g["geo_number_rows"][0])
+            proj = pyproj.Proj(f["geographic/map_projection"].attrs["projection_proj4_params"].decode())
+            x, y = proj(np.array([s[3] for s in stations]), np.array([s[2] for s in stations]))
+            fc, fr = (x - x0) / px - 0.5, (y - y0) / py - 0.5     # fractional centre indices
+            inside = (fc >= 0) & (fc <= nx - 1) & (fr >= 0) & (fr <= ny - 1)
+            st, fc, fr = [s for s, o in zip(stations, inside) if o], fc[inside], fr[inside]
+            if not st:
+                return []
+            h = int(round(FOOT_KM / abs(px)))
+            v = np.full((len(self.LEADS), len(st)), np.nan, np.float32)
+            p = v.copy()
+            for i, lead in enumerate(self.LEADS):
+                grp = f[f"image{lead // 5 + 1}"]
+                valid = datetime.strptime(grp.attrs["image_datetime_valid"].decode()[:17], "%d-%b-%Y;%H:%M")
+                if valid.replace(tzinfo=timezone.utc).timestamp() * 1000 != run + lead * MIN_MS:
+                    raise Gone(f"image{lead // 5 + 1} is valid at {valid}, expected +{lead}")
+                cal = grp["calibration"].attrs
+                m = re.fullmatch(r"GEO=([-+.\deE]+)\*PV\+?([-+.\deE]+)", cal["calibration_formulas"].decode().strip())
+                if not m:
+                    raise ValueError(f"unknown calibration {cal['calibration_formulas']}")
+                d = grp["image_data"][()]
+                a = (d.astype(np.float32) * float(m.group(1)) + float(m.group(2))) * 12.0   # mm / 5 min -> mm/h
+                a[(d == int(cal["calibration_missing_data"][0])) | (d == int(cal["calibration_out_of_image"][0]))] = np.nan
+                v[i], p[i] = sample(a, fr, fc, h, h)
+        ok = np.isfinite(p[0])          # inside the radar coverage at the run time
+        st = [s for s, o in zip(st, ok) if o]
+        if not st:
+            return []
+        return [self.row(run, st, self.LEADS, self.LEADS, v[:, ok], p[:, ok], pub=pub)]
+
+
 class Meander(Provider):
     name = "meander"
     BASE = "https://odp.met.hu/weather/nwp/MEANDER/nc/"
@@ -594,7 +727,7 @@ class Eccc(Provider):
         return [self.row(run, st, [lead], [lead], [vals], [vals], fp=0)]
 
 
-EUROPE = (IncaBe, Chmi, Meander, MetNo)   # priority order: the shortest windows first
+EUROPE = (IncaBe, Chmi, Knmi, Meander, MetNo)   # priority order: the shortest windows first
 NORTH_AMERICA = (Eccc,)
 
 
