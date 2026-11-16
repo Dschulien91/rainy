@@ -463,11 +463,11 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=1.22"></script>
-<script src="lang/en.js?v=1.22"></script>
+<script src="lang/de.js?v=1.23"></script>
+<script src="lang/en.js?v=1.23"></script>
 <script>
 "use strict";
-const VERSION = "v1.22";
+const VERSION = "v1.23";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -1632,6 +1632,16 @@ async function loadWarningsPoint(loc) {
     if (!r) continue;
     for (const w of r.warnings) {
       if (w.level < 2 || (dwd && w.source === "meteoalarm" && w.country === "germany")) continue;
+      // the same warning from both instances, or one warning split by the service into overlapping pieces (DWD:
+      // several "DAUERREGEN" level 3 for the same place with different starts): one entry spanning them all
+      const same = out.find((o) => o.id === w.id || (o.source === w.source && o.event === w.event && o.level === w.level &&
+        o.title === w.title && w.onset <= (o.expires || Infinity) && o.onset <= (w.expires || Infinity)));
+      if (same) {
+        same.onset = Math.min(same.onset, w.onset);
+        same.expires = same.expires && w.expires ? Math.max(same.expires, w.expires) : null;
+        same.sent = Math.max(same.sent || 0, w.sent || 0) || same.sent;
+        continue;
+      }
       out.push(Object.assign({ attribution: (r.attribution || {})[w.source] }, w));
     }
   }
