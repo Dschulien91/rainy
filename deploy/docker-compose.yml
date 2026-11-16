@@ -114,6 +114,7 @@ services:
       NA: "1"
       EU_MODEL_BLEND: "0"
       SUNNY_DE: "1"      # sunny from GOES-East (sunny_na.py)
+      OPENMETEO_URL: http://openmeteo:8080   # the model at the gauges (HRRR & co., check_na_gauges "model +60/+120")
       VERIFY_LOG_DIR: /app/verify_log/na
       DATA_DIR: /app/data
       MALLOC_ARENA_MAX: "2"
