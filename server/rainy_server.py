@@ -105,7 +105,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v1.45"
+VERSION = "server-v1.46"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -1539,6 +1539,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(200, json.dumps({"outbox": devtools.OUTBOX[-10:]}, ensure_ascii=False).encode(), "application/json", 0)
             if u.path in ("/api/geo/reverse", "/api/geo/search"):  # place names / search, anonymised for the user
                 return self.geo(u)
+            if u.path == "/api/warnings/point" and WARNINGS is not None:  # official warnings at a place
+                import official_warnings
+                ws = WARNINGS.at(round(float(q["lat"]), 2), round(float(q["lon"]), 2), lang=q.get("lang", "de")[:5])
+                attr = {src: official_warnings.ATTRIBUTION.get(src) for src in {w["source"] for w in ws}}
+                return self.send(200, json.dumps({"warnings": ws, "attribution": attr}, ensure_ascii=False).encode(),
+                                 "application/json", 60)
+            if u.path == "/api/warnings/areas" and WARNINGS is not None:  # ?bbox=west,south,east,north (optional)
+                bbox = tuple(map(float, q["bbox"].split(","))) if q.get("bbox") else None
+                return self.send(200, json.dumps(WARNINGS.areas_geojson(bbox)).encode(), "application/json", 60)
             if u.path == "/api/thunder/areas":  # DWD thunderstorm / heavy rain warning areas (GeoJSON)
                 with THUNDER.lock:
                     body = THUNDER.geojson
@@ -1695,6 +1704,16 @@ SUNNY_ON = EDITION in ("de", "eu") and os.environ.get("SUNNY_DE", "1") != "0"
 SKY = SUNNY if SUNNY_ON else CLOUDS
 MOSAIC = mosaic.Mosaic(REGIONS, DE, SKY, sample, palette.paint, log, de_only=EDITION == "de", ptype=PTYPE)
 THUNDER = thunder.Thunder(fetch, log)
+WARNINGS = None  # official warnings (official_warnings.py): DWD in the de instance, MeteoAlarm in api-eu, NWS/ECCC in api-na
+
+
+def warnings_start(regions):
+    """Official severe-weather warnings for the app's place card / map (16.11.2026; competitors show them): only served
+    by /api/warnings/point and /api/warnings/areas - the app does not use them yet (design to be chosen by the user)."""
+    global WARNINGS
+    import official_warnings
+    WARNINGS = official_warnings.Warnings(fetch, log, os.path.join(DATA_DIR, "warnings"), regions=regions)
+    threading.Thread(target=WARNINGS.loop, daemon=True).start()
 ALERTS = alerts.AlertEngine(DATA_DIR, {**REGIONS, "de": DE}, log, UA, VAPID_SUBJECT,
                             order=("de",) if EDITION == "de" else ("eu", "us"), thunder=THUNDER,
                             kind_at=lambda lat, lon, ts: ptype.NAMES[int(MOSAIC.kind(ts, *(np.array([[v]]) for v in mosaic.merc(lon, lat)))[0, 0])]
@@ -1836,6 +1855,8 @@ def main_eu():
                                  "out_dir": os.path.join(os.environ.get("VERIFY_LOG_DIR", "."), "modelgauge")}).start()
     if SUNNY_ON:
         threading.Thread(target=SUNNY.loop, daemon=True).start()
+    if not EU_NATIONAL:  # the own-picture instance shares api-eu's warnings (the app asks /eu or /na)
+        warnings_start(("na",) if NA else ("eu",))
     if os.environ.get("PRERENDER", "1") != "0":  # the third instance draws its tiles on demand (CPU for the other two)
         threading.Thread(target=mosaic.prerender_box_loop, args=(MOSAIC, log, eu.BOX if NA else mosaic.EUROPE_BOX, mosaic.EU_PRERENDER_ZOOMS),
                          daemon=True).start()
@@ -1868,6 +1889,8 @@ elif __name__ == "__main__":
     threading.Thread(target=mosaic.prerender_loop, args=(MOSAIC, log), daemon=True).start()
     threading.Thread(target=RECORDER.loop, daemon=True).start()
     threading.Thread(target=THUNDER.loop, daemon=True).start()
+    if EDITION == "de":
+        warnings_start(("de",))
     threading.Thread(target=memory_loop, daemon=True).start()
     for r in REGIONS.values() if EDITION == "full" else ():
         if r.name == "eu":
