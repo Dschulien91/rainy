@@ -105,7 +105,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v1.49"
+VERSION = "server-v1.50"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -543,6 +543,119 @@ def local_amount(fc, last, motion, km_per_px, sigma_km=LOCAL_PM_KM, power=1.0, c
     return out
 
 
+# The forecast's WET AREA grows (16.11.2026, North America): from +30 min on the served forecast covered x1.14-1.23
+# of the later image's wet area while the last image unchanged had x1.0-1.08 - S-PROG runs on a coarse grid (6 km
+# there) and the upsampling smears every light-rain edge outwards. A global S-PROG threshold (0.03 -> 0.10) only
+# reached x1.11 at a CSI cost. local_area() sets a LOCAL rain / no rain threshold instead: in a Gaussian window
+# (sigma LOCAL_AREA_KM) the forecast may be as wet as the last image moved along the motion (Lagrangian persistence)
+# times LOCAL_AREA_SLACK; the threshold is the forecast rate that leaves that wet fraction (never below the map's
+# 0.05 mm/h: the area is only ever cut, never grown); the removed light rain is given back to the rest of the window
+# so every region keeps its amount. Applied to the final field (after advect_blend: the blend of the moved image and
+# S-PROG is itself wetter than either at +30). tune_eu.py, 4 runs each, 16.11.2026, on top of the served local150n,
+# wet area / CSI at 0.05 0.3 1 mm/h, +30 / +60 / +120:
+#   North America  served x1.14 / 1.13 / 1.14  ->  sigma 300, slack 1.05: x1.04 / 1.05 / 1.04, CSI identical
+#                  (sigma 300, slack 1: x0.99 / 1.01 / 1.00; sigma 150 slack 1 cuts too much: x0.96 / 0.94 at +60/+120)
+#   Europe         served x0.98 / 0.97 / 0.96  ->  x0.98 / 0.97 / 0.95, CSI identical, regional amounts unchanged
+# Cost 0.4-0.5 s per run on the server (24 steps, both grids). LOCAL_AREA=1 switches it on (default off).
+LOCAL_AREA_KM = 300.0
+LOCAL_AREA_SLACK = 1.05
+LOCAL_AREA = os.environ.get("LOCAL_AREA", "0") == "1"
+
+
+def local_area(fc, last, motion, km_per_px, sigma_km=LOCAL_AREA_KM, slack=LOCAL_AREA_SLACK, tmax=1.0, clip=2.0):
+    """fc: forecast steps (float16, NODATA outside); last: the newest analysis; motion: sprog_nowcast(motion_out=...).
+    Returns the steps with the wet fraction (>= 0.05 mm/h) of every window cut to at most the advected last image's,
+    rain amount per window unchanged. `slack`: the window may be that much wetter than the moved image (windows
+    where the forecast is drier are never filled up). Local threshold at most `tmax` mm/h, amount factor at most
+    `clip`. Rain is only removed or scaled up: dry and NODATA pixels stay exactly as they were."""
+    vel, down = motion.get("velocity"), motion.get("down", 1)
+    if vel is None or not len(fc):
+        return fc
+    last = np.asarray(last, np.float32)
+    ny, nx = last.shape
+    # window statistics on a grid of ~sigma / 5 (at least 16 km); the histograms come from every s-th row / column
+    # (~16 pixels per cell), the thresholds are read from a grid of s x s pixel blocks
+    c = max(2, 2 * int(round(max(16.0, sigma_km / 5.0) / km_per_px / 2.0)))
+    s = max([1] + [d for d in range(1, c // 4 + 1) if c % d == 0])
+    cy, cx = ny // c, nx // c
+    if cy < 2 or cx < 2:
+        return fc
+    sy, sx = cy * c // s, cx * c // s
+    ncell = cy * cx
+    # rate levels 0.05 * 2^(k/4) up to tmax (the last one is tmax itself); lookup table float16 bits -> level
+    nlv = max(2, int(math.ceil(4.0 * math.log2(max(tmax, 0.1) / 0.05))) + 1)
+    lt = np.log(0.05) + np.arange(nlv) * (0.25 * math.log(2.0))
+    lt[-1] = math.log(tmax)
+    nb = nlv + 1
+    # bin of every sampled pixel = its cell * nb + its level (level from the float16 bits through a lookup table)
+    cellnb = ((np.arange(sy) // (c // s))[:, None] * (cx * nb) + (np.arange(sx) // (c // s))[None, :] * nb).ravel()
+    with np.errstate(invalid="ignore"):  # the table includes the NaN bit patterns
+        f16 = np.nan_to_num(np.arange(65536, dtype=np.uint16).view(np.float16).astype(np.float32), nan=-1.0, posinf=1e4)
+    lut = np.clip(np.floor(np.log2(np.maximum(f16, 0.05) * 20.0) * 4.0) + 1.0, 0, nlv - 1)
+    lut = np.where(f16 >= tmax, nlv, np.where(f16 >= 0.05, lut, 0)).astype(np.intp)
+    g16 = lambda g: np.ascontiguousarray(g, dtype=np.float16)
+    samp = lambda a: a[: cy * c : s, : cx * c : s]
+    area = lambda a: cv2.resize(a, (cx, cy), interpolation=cv2.INTER_AREA)
+    valid = area((samp(g16(fc[0])) >= 0).astype(np.float32))   # NODATA is the same in every step (the last image's)
+    lc = last[: cy * c, : cx * c]
+    wet0, cov0 = area((lc >= 0.05).astype(np.float32)), area((lc >= 0).astype(np.float32))
+    u = cv2.resize(np.nan_to_num(vel[0]).astype(np.float32), (cx, cy), interpolation=cv2.INTER_LINEAR) * down / c
+    v = cv2.resize(np.nan_to_num(vel[1]).astype(np.float32), (cx, cy), interpolation=cv2.INTER_LINEAR) * down / c
+    gx, gy = np.meshgrid(np.arange(cx, dtype=np.float32), np.arange(cy, dtype=np.float32))
+    sig = max(1.0, sigma_km / (c * km_per_px))
+    blur = lambda a: cv2.GaussianBlur(a, (0, 0), sig, borderType=cv2.BORDER_CONSTANT)
+    norm = np.maximum(blur(np.ones((cy, cx), np.float32)), 1e-6)
+    bv = np.maximum(blur(valid), 1e-6)
+    # coarse field -> grid of s x s pixel blocks (edge cells continued over the last partial cell), read at the
+    # blocks of the pixels `blk`
+    ey, ex_ = -(-ny // c) - cy, -(-nx // c) - cx
+    fw = (cx + ex_) * (c // s)
+
+    def at(a, blk):
+        a = cv2.copyMakeBorder(a, 0, ey, 0, ex_, cv2.BORDER_REPLICATE) if ey or ex_ else a
+        return cv2.resize(a, (fw, (cy + ey) * (c // s)), interpolation=cv2.INTER_LINEAR).ravel()[blk]
+    out = []
+    for i, g in enumerate(fc):
+        g = g16(g)
+        gs = samp(g)
+        h = np.bincount(cellnb + lut[gs.view(np.uint16)].ravel(), minlength=ncell * nb).reshape(cy, cx, nb)
+        ex = np.cumsum(h[:, :, :0:-1], axis=2)[:, :, ::-1].astype(np.float32)   # ex[..., k]: sampled pixels >= level k
+        mx, my = gx - u * (i + 1), gy - v * (i + 1)
+        adv = cv2.remap(wet0, mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        cov = cv2.remap(cov0, mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        bc = blur(cov)
+        target = blur(adv) / np.maximum(bc, 1e-6) * slack   # wet fraction of the moved last image in the window
+        frac = blur(np.ascontiguousarray(ex)) / (bv * (c // s) ** 2)[:, :, None]   # all levels at once (channels)
+        # first level whose wet fraction is not above the target; the threshold interpolated in log rate
+        k = (frac > target[:, :, None]).sum(axis=2)
+        k1 = np.clip(k, 1, nlv - 1)
+        fa = np.take_along_axis(frac, (k1 - 1)[:, :, None], 2)[:, :, 0]
+        fb = np.take_along_axis(frac, k1[:, :, None], 2)[:, :, 0]
+        t = np.clip((fa - target) / np.maximum(fa - fb, 1e-6), 0.0, 1.0)
+        logt = np.where(k == 0, lt[0], np.where(k >= nlv, lt[-1], lt[k1 - 1] + t * (lt[k1] - lt[k1 - 1])))
+        wc = np.clip(bc / norm, 0.0, 1.0) ** 2           # only where the source was seen (as local_amount)
+        logt = (wc * logt + (1.0 - wc) * lt[0]).astype(np.float32)
+        if not (logt > lt[0] + 1e-4).any():
+            out.append(g)
+            continue
+        thr = np.exp(logt)
+        # give the removed light rain back to the window: amount before / after from the sampled pixels
+        g0 = np.maximum(gs.astype(np.float32), 0)
+        a0 = area(g0)
+        a1 = area(np.where(g0 >= cv2.resize(thr, (sx, sy), interpolation=cv2.INTER_LINEAR), g0, 0).astype(np.float32))
+        eps = 0.005 * float(a0.mean()) + 1e-6
+        r = np.clip((blur(a0) + eps) / (blur(a1) + eps), 1.0, clip).astype(np.float32)
+        # only the wet pixels change (dry and NODATA stay as they are): below the local threshold -> 0, else x r
+        b = g.copy().ravel()
+        idx = np.flatnonzero((g.view(np.uint16).ravel() - np.uint16(1)) < np.uint16(0x7C00))   # 0 < rate < inf
+        rows, cols = np.divmod(idx, nx)
+        blk = rows // s * fw + cols // s
+        val = b[idx].astype(np.float32)
+        b[idx] = np.where(val >= at(thr, blk), val * at(r, blk), 0).astype(np.float16)
+        out.append(b.reshape(ny, nx))
+    return out
+
+
 # ---------- our own nowcast for Germany ----------
 class DeModelArea:
     """The German radar grid as a ModelRain region: model points only where the map shows the radar."""
@@ -729,6 +842,8 @@ class Region:
                     if LOCAL_AMOUNT:  # every region keeps its rain amount (local_amount, 16.11.2026)
                         pure = local_amount(pure, last, motion, self.KM_PER_PX, keep=False)
                     fc = advect_blend(pure, last, motion)  # no break at "now" (ADV_FADE_MIN)
+                    if LOCAL_AREA:  # off by default: wet area per window <= the moved last image's (local_area)
+                        fc = local_area(fc, last, motion, self.KM_PER_PX)
                 except Exception as e:  # never lose the forecast: fall back to the simple method
                     log(f"{self.name} S-PROG failed, using simple nowcast: {e}")
         if fc is None:

@@ -31,7 +31,19 @@ ALL = {"thr 0.10 (old)": dict(thr=0.1), "thr 0.05": dict(thr=0.05), "thr 0.03": 
        # 16.11.: local amount control after S-PROG (rainy_server.local_amount), window sigma in km / power
        "served": dict(thr=0.03), "local150": dict(thr=0.03, local=(150, 1.0)), "local80": dict(thr=0.03, local=(80, 1.0)),
        "local300": dict(thr=0.03, local=(300, 1.0)), "local150h": dict(thr=0.03, local=(150, 0.5)),
-       "local150n": dict(thr=0.03, local=(150, 1.0, False)), "local80n": dict(thr=0.03, local=(80, 1.0, False))}
+       "local150n": dict(thr=0.03, local=(150, 1.0, False)), "local80n": dict(thr=0.03, local=(80, 1.0, False)),
+       # 16.11.: local wet-area control (rainy_server.local_area) on top of the served local150n: window sigma in km,
+       # where: "mid" = after local_amount (before the advection blend), "pre" = before local_amount, "post" = after
+       # the advection blend (the final field); optional: slack (window may be that much wetter than the moved image)
+       "area150": dict(thr=0.03, local=(150, 1.0, False), area=(150, "mid")),
+       "area80": dict(thr=0.03, local=(150, 1.0, False), area=(80, "mid")),
+       "area300": dict(thr=0.03, local=(150, 1.0, False), area=(300, "mid")),
+       "area150pre": dict(thr=0.03, local=(150, 1.0, False), area=(150, "pre")),
+       "area150post": dict(thr=0.03, local=(150, 1.0, False), area=(150, "post")),
+       "area80post": dict(thr=0.03, local=(150, 1.0, False), area=(80, "post")),
+       "area300post": dict(thr=0.03, local=(150, 1.0, False), area=(300, "post")),
+       "area150postS": dict(thr=0.03, local=(150, 1.0, False), area=(150, "post", 1.05)),
+       "area300postS": dict(thr=0.03, local=(150, 1.0, False), area=(300, "post", 1.05))}
 VARIANTS = ({k: ALL[k] for k in sys.argv[3].split(",")} if len(sys.argv) > 3 else
             {k: ALL[k] for k in ("thr 0.10 (old)", "thr 0.05", "thr 0.03")})
 REGIONS = {"Germany": (5.9, 15.0, 47.3, 55.0), "Alps CH/AT": (6.0, 16.5, 45.8, 47.8), "Czechia": (12.1, 18.9, 48.6, 51.0),
@@ -63,6 +75,7 @@ def img(t):
     return cache[t]
 
 
+AREA_S = {}  # variant -> seconds per local_area call (24 steps)
 acc = {}   # (variant, lead) -> [wet fc, wet real, sum fc, sum real, {th: [h, m, f]}]
 done = 0
 for k in range(RUNS):
@@ -80,11 +93,22 @@ for k in range(RUNS):
             motion = {}
             kw = dict(kw)
             loc = kw.pop("local", None)
+            area = kw.pop("area", None)
             pure = rs.sprog_nowcast(seq, mot, rs.FC_STEPS, eu.SPROG_DOWN, motion_out=motion, **kw)
+
+            def area_ctl(f, where):
+                if not area or area[1] != where:
+                    return f
+                t0 = time.time()
+                f = rs.local_area(f, last, motion, eu.KM_PER_PX, sigma_km=area[0], slack=area[2] if len(area) > 2 else 1.0)
+                AREA_S.setdefault(name, []).append(time.time() - t0)
+                return f
+            pure = area_ctl(pure, "pre")
             if loc:
                 pure = rs.local_amount(pure, last, motion, eu.KM_PER_PX, sigma_km=loc[0], power=loc[1],
                                        keep=loc[2] if len(loc) > 2 else True)
-            full = rs.advect_blend(pure, last, motion)
+            pure = area_ctl(pure, "mid")
+            full = area_ctl(rs.advect_blend(pure, last, motion), "post")
             fc = {lead: full[lead // 5 - 1] for lead in LEADS}
             del pure, full
         for lead in LEADS:
@@ -111,6 +135,8 @@ for name in ["pers"] + list(VARIANTS):
         if a:
             csi = " ".join("%.2f" % (h / max(1, h + m + f)) for h, m, f in (a[4][th] for th in THS))
             print(f"  {name:16s} +{lead:3d}  wet area x{a[0] / max(1, a[1]):.2f}  amount x{a[2] / max(1e-9, a[3]):.2f}  CSI {csi}")
+for name, ts in AREA_S.items():
+    print(f"  {name:16s} local_area {np.mean(ts):.2f} s per run (max {max(ts):.2f})")
 print()
 print("rain amount forecast / real later image per region (the gauges said: forecast x1.2-1.5 of the later picture)")
 for name in ["pers"] + list(VARIANTS):

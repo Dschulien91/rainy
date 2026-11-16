@@ -115,6 +115,7 @@ services:
       EU_MODEL_BLEND: "0"
       SUNNY_DE: "1"      # sunny from GOES-East (sunny_na.py)
       OPENMETEO_URL: http://openmeteo:8080   # the model at the gauges (HRRR & co., check_na_gauges "model +60/+120")
+      LOCAL_AREA: "1"   # wet area per 300 km window <= the moved last image x1.05 (16.11.: NA wet area x1.14 -> x1.04, CSI equal)
       VERIFY_LOG_DIR: /app/verify_log/na
       DATA_DIR: /app/data
       MALLOC_ARENA_MAX: "2"
