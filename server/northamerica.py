@@ -274,5 +274,9 @@ class MetarSky:
             ends = [max(d) for d in self.obs.values() if d]
         return int(np.median(ends)) if ends else 0
 
+    @property
+    def values(self):  # SunnyDE.health counts the stations by it (as SunStations.values)
+        return self.obs
+
     def loop(self):
         pass
