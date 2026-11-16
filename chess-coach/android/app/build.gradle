@@ -1,0 +1,58 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'app.schachcoach'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'app.schachcoach'
+        minSdk 26
+        targetSdk 35
+        versionCode 1
+        versionName '1.0'
+    }
+
+    // One fixed key, so a newer APK installs over the old one and keeps your games.
+    // (Personal sideload app: the key is in the repository. For the Play Store you would use a private key.)
+    signingConfigs {
+        shared {
+            storeFile file('schachcoach.keystore')
+            storePassword 'schachcoach'
+            keyAlias 'schachcoach'
+            keyPassword 'schachcoach'
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.shared
+        }
+        debug {
+            signingConfig signingConfigs.shared
+        }
+    }
+
+    // The app itself is the web app in ../../web (HTML/JS + Stockfish WASM), served from the APK's assets.
+    sourceSets {
+        main {
+            assets.srcDirs = ['../../web']
+        }
+    }
+
+    androidResources {
+        noCompress += ['wasm']
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    implementation 'androidx.webkit:webkit:1.12.1'
+    implementation 'androidx.work:work-runtime:2.10.0'
+}
