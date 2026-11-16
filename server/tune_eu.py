@@ -30,7 +30,8 @@ ALL = {"thr 0.10 (old)": dict(thr=0.1), "thr 0.05": dict(thr=0.05), "thr 0.03": 
        "thr 0.03 pm-mean": dict(thr=0.03, probmatch="mean"), "thr 0.10 pm-mean": dict(thr=0.1, probmatch="mean"),
        # 16.11.: local amount control after S-PROG (rainy_server.local_amount), window sigma in km / power
        "served": dict(thr=0.03), "local150": dict(thr=0.03, local=(150, 1.0)), "local80": dict(thr=0.03, local=(80, 1.0)),
-       "local300": dict(thr=0.03, local=(300, 1.0)), "local150h": dict(thr=0.03, local=(150, 0.5))}
+       "local300": dict(thr=0.03, local=(300, 1.0)), "local150h": dict(thr=0.03, local=(150, 0.5)),
+       "local150n": dict(thr=0.03, local=(150, 1.0, False)), "local80n": dict(thr=0.03, local=(80, 1.0, False))}
 VARIANTS = ({k: ALL[k] for k in sys.argv[3].split(",")} if len(sys.argv) > 3 else
             {k: ALL[k] for k in ("thr 0.10 (old)", "thr 0.05", "thr 0.03")})
 REGIONS = {"Germany": (5.9, 15.0, 47.3, 55.0), "Alps CH/AT": (6.0, 16.5, 45.8, 47.8), "Czechia": (12.1, 18.9, 48.6, 51.0),
@@ -81,7 +82,8 @@ for k in range(RUNS):
             loc = kw.pop("local", None)
             pure = rs.sprog_nowcast(seq, mot, rs.FC_STEPS, eu.SPROG_DOWN, motion_out=motion, **kw)
             if loc:
-                pure = rs.local_amount(pure, last, motion, eu.KM_PER_PX, sigma_km=loc[0], power=loc[1])
+                pure = rs.local_amount(pure, last, motion, eu.KM_PER_PX, sigma_km=loc[0], power=loc[1],
+                                       keep=loc[2] if len(loc) > 2 else True)
             full = rs.advect_blend(pure, last, motion)
             fc = {lead: full[lead // 5 - 1] for lead in LEADS}
             del pure, full

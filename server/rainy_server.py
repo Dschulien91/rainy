@@ -489,9 +489,10 @@ def advect_blend(fc, last, motion, fade_min=ADV_FADE_MIN):
 LOCAL_PM_KM = 150.0
 
 
-def local_amount(fc, last, motion, km_per_px, sigma_km=LOCAL_PM_KM, power=1.0, clip=3.0):
+def local_amount(fc, last, motion, km_per_px, sigma_km=LOCAL_PM_KM, power=1.0, clip=3.0, keep=True):
     """fc: S-PROG steps (float16, NODATA outside); last: the newest analysis; motion: sprog_nowcast(motion_out=...).
-    Returns the steps with every region's rain amount set to the advected last image's (scaled to S-PROG's total)."""
+    Returns the steps with every region's rain amount set to the advected last image's (keep: scaled to S-PROG's
+    total; else the advected image's own total = Lagrangian persistence)."""
     vel, down = motion.get("velocity"), motion.get("down", 1)
     if vel is None or not len(fc):
         return fc
@@ -517,7 +518,8 @@ def local_amount(fc, last, motion, km_per_px, sigma_km=LOCAL_PM_KM, power=1.0, c
         if tf <= 0 or ta <= 0:
             out.append(g)
             continue
-        adv *= tf / ta                                   # keep S-PROG's total: only the distribution moves
+        if keep:
+            adv *= tf / ta                               # keep S-PROG's total: only the distribution moves
         eps = 0.02 * tf / f.size + 1e-6
         r = np.clip((blur(adv) + eps) / (blur(f) + eps), 1.0 / clip, clip) ** power
         r = cv2.resize(r.astype(np.float32), (cx * c, cy * c), interpolation=cv2.INTER_LINEAR)
