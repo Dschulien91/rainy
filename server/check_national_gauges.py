@@ -85,7 +85,8 @@ NAMES = {"de": "Germany (DWD gauges)", "at": "Austria (TAWES gauges)", "ch": "Sw
          "it": "Italy, Lombardy (ARPA Lombardia gauges)", "iv": "Italy, Veneto (ARPAV gauges)",
          "cz": "Czechia (CHMI gauges)", "ie": "Italy, Emilia-Romagna (ARPAE gauges)",
          "se": "Sweden (SMHI gauges)", "fi": "Finland (FMI gauges)", "en": "England (Environment Agency gauges)",
-         "hu": "Hungary (HungaroMet gauges)"}
+         "hu": "Hungary (HungaroMet gauges)",
+         "sy": "Europe, SYNOP stations (hourly amounts only; per country in check_forecast_gauges.py)"}
 
 
 # ---------- gauge lists ----------
@@ -250,8 +251,19 @@ def _list_hu(fetch):
     return [("hu", sid, lat, lon) for sid, (lat, lon) in sorted(pos.items())]
 
 
+def _list_sy(fetch):
+    """The European SYNOP stations that report a 1-hour precipitation amount (synop.SynopFeed in the OPERA
+    instance; not Germany - the DWD gauges are denser). Id "<country>-<WMO number>"."""
+    try:
+        with open(os.path.join(ROOT, "synop", "stations.json")) as f:
+            st = json.load(f)
+    except (OSError, ValueError):
+        return []
+    return [("sy", f"{v[2]}-{wmo}", v[0], v[1]) for wmo, v in sorted(st.items()) if v[3] and v[2] != "de"]
+
+
 LISTS = {"de": _list_de, "at": _list_at, "ch": _list_ch, "it": _list_it, "iv": _list_iv, "cz": _list_cz, "ie": _list_ie,
-         "se": _list_se, "fi": _list_fi, "en": _list_en, "hu": _list_hu}
+         "se": _list_se, "fi": _list_fi, "en": _list_en, "hu": _list_hu, "sy": _list_sy}
 
 
 # ---------- recording (inside the server) ----------
@@ -623,8 +635,24 @@ def gauges_hu(ids, since, until):
     return out
 
 
+def gauges_sy(ids, since, until):
+    """SYNOP 1-hour amounts, spread evenly over the hour's six 10-minute steps - only the HOURLY tables are
+    meaningful for this network (the 10-minute ones see a smooth hour)."""
+    import synop
+    by_wmo = {sid.split("-", 1)[1]: sid for sid in ids}
+    out = {}
+    for wmo, ser in synop.hourly_rain(ROOT, list(by_wmo), since - 3600_000, until).items():
+        g = {}
+        for t, mm in ser.items():
+            if t % 600_000 == 0:
+                for k in range(6):
+                    g[t - k * 600_000] = mm / 6
+        out[by_wmo[wmo]] = g
+    return out
+
+
 GAUGES = {"de": gauges_de, "at": gauges_at, "ch": gauges_ch, "it": gauges_it, "iv": gauges_iv, "cz": gauges_cz,
-          "ie": gauges_ie, "se": gauges_se, "fi": gauges_fi, "en": gauges_en, "hu": gauges_hu}
+          "ie": gauges_ie, "se": gauges_se, "fi": gauges_fi, "en": gauges_en, "hu": gauges_hu, "sy": gauges_sy}
 
 
 # ---------- the gauge archive: the sources keep hours to days, a model is built on weeks ----------

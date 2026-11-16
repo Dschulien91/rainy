@@ -105,7 +105,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v1.40"
+VERSION = "server-v1.41"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -1619,17 +1619,19 @@ def monitor_status():
             "sun_age": round((now - sun) / 60_000, 1) if sun else None}
 
 
-def model_at_gauges_loop():
-    """Every 3 hours: the weather model's forecast (Open-Meteo best match, as the app's 24 h / 3-day views show it) for the next
+def model_at_gauges_loop(stations=None, out_dir=None, every_h=3):
+    """Every 3 hours (North America: every hour, its METAR / SWOB stations - the model baseline next to the
+    nowcast's +60 / +120 in check_na_gauges.py): the weather model's forecast (Open-Meteo best match, as the app's 24 h / 3-day views show it) for the next
     24 hours at every rain gauge of check_national_gauges -> verify_log/modelgauge/<issue time>.npz (t, precip mm per
     hour, temperature 2 m; 14 days). The truth is the gauge archive: check_model_gauges.py scores the 24 h forecast
     by lead and region - the base for correcting it per place (user, 14./15.11.2026; meteoblue / WetterOnline do this)."""
     import check_national_gauges as cng
-    out_dir = os.path.join(cng.ROOT, "modelgauge")
+    out_dir = out_dir or os.path.join(cng.ROOT, "modelgauge")
+    stations = stations or cng.stations
     time.sleep(300)
     while True:
         try:
-            st = cng.stations()
+            st = stations()
             if st and openmeteo_available():
                 issue = int(time.time() // 3600 * 3600 * 1000)
                 t, pr, tt = None, [], []
@@ -1658,7 +1660,17 @@ def model_at_gauges_loop():
             log(f"model at gauges failed: {e}")
         # every 3 hours at :10 (one pass reads ~3600 places and took 6 min the first time: the Nordic / UK best-match
         # models are read from the remote mirror) - 8 issue times a day are plenty for scores by lead
-        time.sleep(3 * 3600 - time.time() % (3 * 3600) + 600)
+        time.sleep(every_h * 3600 - time.time() % (every_h * 3600) + 600)
+
+
+def synop_start():
+    """All-Europe SYNOP reports (synop.py): hourly rain at stations in every country (gauge network "sy") and the cloud
+    cover as a second station truth for sunny Europe (files eusysunstation_*: score_sun.py --prefix eusy)."""
+    import synop
+    feed = synop.SynopFeed(fetch, log, os.environ.get("VERIFY_LOG_DIR", "."))
+    threading.Thread(target=feed.loop, daemon=True).start()
+    if SUNNY_ON:
+        SUNNY.extra_verify.append(sunny_de.SunVerify(SUNNY, feed.sky, log, prefix="eusy", stations_only=True))
 
 
 def gauge_archive_loop():
@@ -1707,6 +1719,7 @@ def main_eu():
         threading.Thread(target=gauge_archive_loop, daemon=True).start()
         threading.Thread(target=model_at_gauges_loop, daemon=True).start()
         threading.Thread(target=tile_gap_loop, daemon=True).start()
+        synop_start()
     # Where no radar reaches (Greece, W Turkey, east of Poland ...) the own picture drew the satellite rain estimate
     # (H SAF, ~30 min old, from cloud tops) faintly into the hatched area. User, 13.11.2026: it shows rain inside
     # the "no data" hatching and does not fit the radar picture next to it -> off (SAT_FILL=1 brings it back).
@@ -1715,8 +1728,11 @@ def main_eu():
     # second benchmark: GeoSphere Austria's INCA nowcast against ours at the Austrian rain gauges (bench_inca.py)
     if not NA:
         threading.Thread(target=bench_inca.IncaBench(fetch, log, eu, mosaic.merc).loop, daemon=True).start()
-    else:  # the US rain gauges (METAR) for the North America instance's verification
+    else:  # the US / Canadian rain gauges (METAR, SWOB) and the model at them for the North America instance
         threading.Thread(target=eu.metar.loop, daemon=True).start()
+        threading.Thread(target=model_at_gauges_loop, daemon=True,
+                         kwargs={"stations": eu.metar.stations, "every_h": 1,
+                                 "out_dir": os.path.join(os.environ.get("VERIFY_LOG_DIR", "."), "modelgauge")}).start()
     if SUNNY_ON:
         threading.Thread(target=SUNNY.loop, daemon=True).start()
     if os.environ.get("PRERENDER", "1") != "0":  # the third instance draws its tiles on demand (CPU for the other two)

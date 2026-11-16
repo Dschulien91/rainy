@@ -144,9 +144,40 @@ def metar_rows(raw):
         yield sid, lat, lon, t, mm
 
 
+# ---------- rain gauges: Canada (ECCC SWOB, 16.11.2026) ----------
+# Canadian METARs carry no precipitation amount. ECCC's surface weather observations (SWOB) do: the MSC GeoMet OGC API
+# serves every station's hourly record (open, no account); only the federal networks are kept (MSC, NAV CANADA, DND -
+# the provincial partner networks are "all rights reserved"). pcpn_amt_pst1hr (all precipitation, water equivalent),
+# else rnfl_amt_pst1hr (rain); the hour ends at date_tm (full hour).
+SWOB_URL = ("https://api.weather.gc.ca/collections/swob-realtime/items?f=json&limit=3000&datetime={t}"
+            "&properties=msc_id-value,stn_id-value,date_tm-value,pcpn_amt_pst1hr,rnfl_amt_pst1hr,data_pvdr-value")
+SWOB_PROVIDERS = {"MSC", "NAV CANADA", "DND"}
+
+
+def swob_rows(raw):
+    """(station "CA-<id>", lat, lon, end of the hour ms, mm) of one hour's SWOB records."""
+    import json
+    for f in json.loads(raw).get("features", []):
+        p = f.get("properties", {})
+        sid = p.get("msc_id-value") or p.get("stn_id-value")  # MSC's own stations have only the MSC id
+        if p.get("data_pvdr-value") not in SWOB_PROVIDERS or not sid:
+            continue
+        mm = p.get("pcpn_amt_pst1hr")
+        mm = p.get("rnfl_amt_pst1hr") if mm is None else mm
+        try:
+            lon, lat = (float(v) for v in f["geometry"]["coordinates"][:2])
+            t = int(datetime.strptime(p["date_tm-value"][:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc).timestamp() * 1000)
+        except (KeyError, TypeError, ValueError):
+            continue
+        if mm is None or mm < 0 or t % 3600_000:
+            continue
+        yield "CA-" + sid, lat, lon, t, float(mm)
+
+
 class MetarGauges:
     """Keeps the hourly precipitation of the US METAR stations: <log_dir>/metar/<YYYYMMDD>.jsonl (one line per
-    station hour: id, end time ms, mm) and <log_dir>/metar/stations.json (id, lat, lon; order never changes)."""
+    station hour: id, end time ms, mm) and <log_dir>/metar/stations.json (id, lat, lon; order never changes).
+    Since 16.11.2026 also Canada's federal stations (SWOB, ids "CA-...", country "ca"; poll_canada)."""
 
     def __init__(self, fetch, log_dir, log):
         import os
@@ -155,6 +186,7 @@ class MetarGauges:
         os.makedirs(self.dir, exist_ok=True)
         self.st_path = os.path.join(self.dir, "stations.json")
         self.seen = set()
+        self.ca_done = set()   # hours of SWOB already read
         self.sky = MetarSky()   # cloud cover, the station truth of sunny for the Americas (sunny_na.py)
 
     def stations(self):
@@ -195,6 +227,46 @@ class MetarGauges:
             self.seen = {k for k in self.seen if k[1] > cut}
         return sum(len(v) for v in lines.values()), len(new_st)
 
+    def _append(self, rows, country):
+        """rows (sid, lat, lon, t, mm) -> the station list and the day files; returns (new hours, new stations)."""
+        import json
+        import os
+        st = self.stations()
+        known = {s[1] for s in st}
+        new_st, lines = [], {}
+        for sid, lat, lon, t, mm in rows:
+            if sid not in known:
+                new_st.append((country, sid, round(lat, 4), round(lon, 4)))
+                known.add(sid)
+            if (sid, t) in self.seen:
+                continue
+            self.seen.add((sid, t))
+            day = datetime.fromtimestamp(t / 1000, timezone.utc).strftime("%Y%m%d")
+            lines.setdefault(day, []).append(json.dumps({"id": sid, "t": t, "mm": round(mm, 2)}))
+        if new_st:
+            with open(self.st_path + ".tmp", "w") as f:
+                json.dump(st + new_st, f)
+            os.replace(self.st_path + ".tmp", self.st_path)
+        for day, ls in lines.items():
+            with open(os.path.join(self.dir, f"{day}.jsonl"), "a") as f:
+                f.write("\n".join(ls) + "\n")
+        return sum(len(v) for v in lines.values()), len(new_st)
+
+    def poll_canada(self):
+        """The last three full hours of SWOB not read yet (records arrive up to ~30 min after the hour)."""
+        now = int(time.time() * 1000)
+        n = s = 0
+        for back in (3, 2, 1):
+            t = (now - 40 * 60_000) // 3600_000 * 3600_000 - (back - 1) * 3600_000
+            if t in self.ca_done:
+                continue
+            stamp = datetime.fromtimestamp(t / 1000, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            a, b = self._append(list(swob_rows(self.fetch(SWOB_URL.format(t=stamp), timeout=120))), "ca")
+            self.ca_done.add(t)
+            n, s = n + a, s + b
+        self.ca_done = {t for t in self.ca_done if t > now - 6 * 3600_000}
+        return n, s
+
     def loop(self):
         while True:
             try:
@@ -203,6 +275,12 @@ class MetarGauges:
                     self.log(f"metar: {n} station hours, {s} new stations")
             except Exception as e:
                 self.log(f"metar failed: {e}")
+            try:
+                n, s = self.poll_canada()
+                if n:
+                    self.log(f"swob (Canada): {n} station hours, {s} new stations")
+            except Exception as e:
+                self.log(f"swob failed: {e}")
             time.sleep(600)
 
 

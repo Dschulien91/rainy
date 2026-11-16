@@ -550,8 +550,12 @@ class SunVerify:
     restarts (last_ref): before 10.11. a restart lost them, and the last hour's runs were made again from the reloaded
     images (the first of them without motion) and replaced the real rows. log_dir given (replays): memory only."""
 
-    def __init__(self, sun, stations, log, log_dir=None, prefix=""):
+    def __init__(self, sun, stations, log, log_dir=None, prefix="", stations_only=False):
+        """stations_only: a second station truth for the same runs (synop.SynopFeed.sky for all of Europe, 16.11.2026)
+        - its own station rows (<prefix>sunstation_*), no grid rows and no timeline (the main verifier writes those)."""
         self.sun, self.stations, self.log, self.prefix = sun, stations, log, prefix
+        self.stations_only = stations_only
+        self._pix, self._pix_n = None, -1
         self.persist = log_dir is None
         self.log_dir = log_dir or LOG_DIR
         g = sun.grid
@@ -567,6 +571,23 @@ class SunVerify:
                 self.last_ref = int(f.read().strip()) if self.persist else 0
         except (OSError, ValueError):
             self.last_ref = 0
+
+    def _where(self):
+        return self.stations.stations if self.stations else {}
+
+    def _pixels(self):
+        """Station pixels on the sunny grid: the instance's own stations, or this verifier's other station set."""
+        if self.stations is self.sun.stations:
+            return self.sun.station_pixels()
+        where = self._where()
+        if len(where) != self._pix_n:
+            pix = {}
+            for sid, (lat, lon) in list(where.items()):
+                col, row = (int(round(float(v))) for v in self.sun.grid.to_pixels(*merc(lon, lat)))
+                if 1 <= col < self.sun.grid.nx - 1 and 1 <= row < self.sun.grid.ny - 1:
+                    pix[sid] = (row, col)
+            self._pix, self._pix_n = pix, len(where)
+        return self._pix
 
     def _down(self, a):
         ok = np.isfinite(a)
@@ -586,7 +607,7 @@ class SunVerify:
         """Keep the leads of a new run: variants = {name: {valid ts: share grid}}."""
         if ref == self.done_ref or ref <= self.last_ref:
             return
-        sts = self.sun.station_pixels()
+        sts = self._pixels()
 
         def at_stations(key, g):
             if sts:
@@ -597,8 +618,9 @@ class SunVerify:
                 g = grids.get(ref + lead * 60_000)
                 if g is None:
                     continue
-                d = self._down(g)
-                self.pending.put((name, ref, lead), g=np.where(np.isfinite(d), np.round(d * 250), 255).astype(np.uint8))
+                if not self.stations_only:
+                    d = self._down(g)
+                    self.pending.put((name, ref, lead), g=np.where(np.isfinite(d), np.round(d * 250), 255).astype(np.uint8))
                 at_stations((name, ref, lead), g)
         a = self.sun.obs_share(ref)
         if a is not None:
@@ -611,7 +633,8 @@ class SunVerify:
                     f.write(str(ref))
             except OSError:
                 pass
-        self._timeline(ref)
+        if not self.stations_only:
+            self._timeline(ref)
 
     def _timeline(self, ref):
         """The run's map frames (last hour + forecast) as the app draws them, step by step: monitor.timeline."""
@@ -682,7 +705,7 @@ class SunVerify:
                 continue
             fc = dict(zip((str(x) for x in z["sid"]), (float(x) for x in z["v"])))
             truth = self.stations.truth(end)
-            where = sun.station_coords()
+            where = self._where()
             keys = [s for s in fc if s in truth and s in where and sun_elevation(valid, where[s][0], where[s][1]) >= SCORE_ELEV]
             if len(keys) < 5:
                 continue
@@ -695,7 +718,7 @@ class SunVerify:
             # scored apart, for Schaefchenwolken & co. (15.11.2026; score_sun.py --broken)
             a0 = sun.obs_share(r)
             if a0 is not None:
-                ana = sun.at_pixels(a0, sun.station_pixels())
+                ana = sun.at_pixels(a0, self._pixels())
                 b = np.array([0.15 <= ana.get(s, np.nan) <= 0.85 for s in keys])
                 if b.any():
                     row.update({"nb": int(b.sum()), "mae_b": round(float(np.abs(f - o)[b].mean()), 4),
@@ -733,6 +756,7 @@ class SunnyDE:
         self._st_pix = None
         self.skipped, self.skips_in_row = set(), 0  # slots rejected as implausible (JUMP_MAX)
         self._clm_cache = {}                        # 15-min slot -> EUMETSAT cloud mask on the grid (clm_cloud)
+        self.extra_verify = []                      # SunVerify(stations_only=True): other station truths (SYNOP)
 
     # ---------- helpers ----------
     def inside(self):
@@ -908,7 +932,7 @@ class SunnyDE:
                 with self.lock:
                     for d in (self.obs, self.k, self.disp):
                         d.pop(bad, None)
-                for d in (self.verify.pending, self.verify.spending):
+                for d in (self.verify.pending, self.verify.spending, *(v.spending for v in self.extra_verify)):
                     for key in [key for key in d if key[1] == bad]:
                         del d[key]
                 self.skipped.add(bad)
@@ -948,6 +972,11 @@ class SunnyDE:
             while len(self.disp_snaps) > KEEP_RUNS:
                 self.disp_snaps.popitem(last=False)
         self.verify.take(ts, {n: v for n, v in variants.items() if v})
+        for ev in self.extra_verify:
+            try:
+                ev.take(ts, {n: v for n, v in variants.items() if v})
+            except Exception as e:
+                self.log(f"sunny extra verify ({ev.prefix}) failed: {e}")
         threading.Thread(target=self.save_state, daemon=True).start()
         return True
 
@@ -1052,9 +1081,15 @@ class SunnyDE:
         return n
 
     def verify_step(self):
-        if self.ref:
-            return self.verify.step(self.ref)
-        return 0, 0
+        if not self.ref:
+            return 0, 0
+        g, s = self.verify.step(self.ref)
+        for ev in self.extra_verify:
+            try:
+                s += ev.step(self.ref)[1]
+            except Exception as e:
+                self.log(f"sunny extra verify ({ev.prefix}) failed: {e}")
+        return g, s
 
     def clm_loop(self):
         """EUMETSAT's cloud mask for the area beyond DWD's data, fetched in the background every 10 minutes - never in

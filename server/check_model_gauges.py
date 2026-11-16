@@ -20,11 +20,12 @@ import time
 import numpy as np
 
 import check_national_gauges as cng
+import synop
 
 DAYS = float(sys.argv[sys.argv.index("--days") + 1]) if "--days" in sys.argv else 7.0
 PRIOR = 5.0
 THS = (0.2, 1.0)
-BUCKETS = ((1, 3), (4, 6), (7, 12), (13, 24))
+BUCKETS = ((1, 1), (2, 2), (3, 3), (4, 6), (7, 12), (13, 24))  # +1 h / +2 h: next to the nowcast's +60 / +120 hours
 now = time.time() * 1000
 files = sorted(f for f in glob.glob(os.path.join(cng.ROOT, "modelgauge", "*.npz")) if os.path.basename(f)[:-4].isdigit()
                and int(os.path.basename(f)[:-4]) > now - DAYS * 86400_000)
@@ -43,6 +44,8 @@ for f, issue in zip(files, issues):
         g = truth.get(c, {}).get(sid)
         if not g:
             continue
+        if c == "sy":  # SYNOP stations: per country (as in check_forecast_gauges.py)
+            c = f"sy-{sid.split('-', 1)[0]}"
         for i, end in enumerate(t):
             lead = int(round((end - issue) / 3600_000))
             if not 1 <= lead <= 24 or not np.isfinite(pr[k, i]):
@@ -79,7 +82,8 @@ for name in sorted(set(C)) + ["all"]:
     sel = np.ones(len(R), bool) if name == "all" else C == name
     if R[sel, 2].sum() < 1:
         continue
-    print(f"\n{cng.NAMES.get(name, name)}: {int(sel.sum())} gauge-hours, gauge mean {R[sel, 2].mean():.3f} mm")
+    label = f"{synop.NAMES.get(name[3:], name[3:])} (SYNOP)" if name.startswith("sy-") else cng.NAMES.get(name, name)
+    print(f"\n{label}: {int(sel.sum())} gauge-hours, gauge mean {R[sel, 2].mean():.3f} mm")
     for lo, hi in BUCKETS:
         m = sel & (R[:, 1] >= lo) & (R[:, 1] <= hi)
         if m.sum() < 50:

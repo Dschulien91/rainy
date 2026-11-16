@@ -9,6 +9,7 @@ run's other forecasts where the instance has them. The gauges' values come from 
 (verify_log/gaugetruth, hourly) plus what the sources have right now ("--archive": the archive alone, fast).
 
   docker exec -w /app deploy-api-eun-1 python check_forecast_gauges.py [--hours 24] [--until YYYYMMDDHHMM] [--archive]
+      [--only sy-fr,France,de]   (only these groups: network keys or parts of the names)
   (--until: the window ends there, UTC, instead of now - to compare runs before and after a change)
 
 Per country (and Italy together, and all) and lead, on the runs both instances have:
@@ -21,6 +22,8 @@ Per country (and Italy together, and all) and lead, on the runs both instances h
 "x" = rain amount against the gauges, CSI / POD / FAR at 0.1 / 0.3 / 1 mm/h on 10-minute pairs (the forecast for the
 time T against the gauge sums ending at T and T + 10 min, as in check_national_gauges.py) and on sums over full
 hours ("hours": six runs' forecasts with the same lead, 0.2 / 1 / 3 mm - judge light rain there).
+Since 16.11.2026 also the European SYNOP stations (synop.py; hourly amounts, so only the "hours" tables), one group
+per country - France, Spain, Poland, the Benelux, the Balkans, the Nordics ... where no 10-minute network is open.
 Read it as: own must beat European where a national layer counts (Italy, Germany, Switzerland) and equal it where
 none does (Austria, Czechia); a forecast below its own persistence at +30 means the motion is wrong there; a
 forecast whose amount ("x") falls with the lead while persistence keeps it loses rain area (13.11.: -35 % in 1 h).
@@ -64,6 +67,11 @@ for name in DIRS:
 # "later pic" (16.11.): the instance's own picture at the forecast's VALID time at the same gauges = what the forecast is
 # trained to hit. forecast x ~ later pic x -> the amount error is the picture's (radar / gain); forecast x >> later pic x
 # -> the forecast itself inflates rain at the gauges (15./16.11.: Germany x1.7-1.9 at +60 with persistence x1.1-1.3).
+def group(s):
+    """The SYNOP stations (network "sy", all of Europe) are scored per country: "sy-fr", "sy-pl", ..."""
+    return f"sy-{s[1].split('-', 1)[0]}" if s[0] == "sy" else s[0]
+
+
 rows = {}   # (country, lead) -> [(gauge mm/h, one value per column ..., gauge index, valid time)]
 n = min(len(st), *(z["fc"].shape[1] for inst in data.values() for z in inst.values()))
 for t in refs:
@@ -82,7 +90,7 @@ for t in refs:
             q = truth.get(st[k][0], {}).get(st[k][1], {})
             v = [q.get(T), q.get(T + 600_000)]
             if None not in v:
-                rows.setdefault((st[k][0], lead), []).append((np.mean(v) * 6, *vals[:, k], k, T))
+                rows.setdefault((group(st[k]), lead), []).append((np.mean(v) * 6, *vals[:, k], k, T))
 
 
 def hourly(r):
@@ -93,16 +101,27 @@ def hourly(r):
     return np.array([np.mean(g, 0) for g in groups.values() if len(g) == 6], np.float32).reshape(-1, len(cols) + 1)
 
 
-countries = sorted({s[0] for s in st})
-groups = [(cng.NAMES[c], (c,)) for c in countries]
-groups += [("Italy (all regions)", ("it", "iv", "ie")), ("All gauges", tuple(countries))]
+import synop  # noqa: E402
+
+countries = sorted({group(s) for s in st})
+dense = [c for c in countries if not c.startswith("sy-")]
+syn = [c for c in countries if c.startswith("sy-")]
+groups = [(cng.NAMES[c], (c,)) for c in dense]
+groups += [("Italy (all regions)", ("it", "iv", "ie")), ("All dense gauge networks", tuple(dense))]
+# SYNOP (16.11.2026): one hourly amount per station -> hours tables only; the countries without an open 10-min network
+groups += [(f"{synop.NAMES.get(c[3:], c[3:])} (SYNOP)", (c,)) for c in syn]
+groups += [("All SYNOP stations", tuple(syn))]
+only = sys.argv[sys.argv.index("--only") + 1].split(",") if "--only" in sys.argv else None
 for name, cs in groups:
+    if only and not any(o in cs or o.lower() in name.lower() for o in only):
+        continue
     for lead in cng.FC_LEADS:
         r = [x for c in cs for x in rows.get((c, lead), [])]
         if not r:
             continue
         a = np.array([x[:-2] for x in r], np.float32)
-        cng.table(f"{name}, +{lead} min", a[:, 0], {c[0]: a[:, i + 1] for i, c in enumerate(cols)})
+        if not cs[0].startswith("sy-"):
+            cng.table(f"{name}, +{lead} min", a[:, 0], {c[0]: a[:, i + 1] for i, c in enumerate(cols)})
         h = hourly(r)
         if len(h):
             cng.table(f"{name}, +{lead} min, hours", h[:, 0], {c[0]: h[:, i + 1] for i, c in enumerate(cols)},
