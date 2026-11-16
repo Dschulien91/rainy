@@ -105,7 +105,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v1.47"
+VERSION = "server-v1.48"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -1854,6 +1854,12 @@ def main_eu():
         threading.Thread(target=model_at_gauges_loop, daemon=True).start()
         threading.Thread(target=tile_gap_loop, daemon=True).start()
         synop_start()
+        # competitors' open nowcasts at our gauges (bench_competitors.py, 16.11.2026: MET Norway / Yr, RMI INCA-BE,
+        # CHMI COTREC, HungaroMet MEANDER) - score_competitors.py
+        import bench_competitors
+        import check_national_gauges as cng
+        threading.Thread(target=bench_competitors.CompetitorBench(
+            fetch, log, os.environ.get("VERIFY_LOG_DIR", "."), cng.stations).loop, daemon=True).start()
     # Where no radar reaches (Greece, W Turkey, east of Poland ...) the own picture drew the satellite rain estimate
     # (H SAF, ~30 min old, from cloud tops) faintly into the hatched area. User, 13.11.2026: it shows rain inside
     # the "no data" hatching and does not fit the radar picture next to it -> off (SAT_FILL=1 brings it back).
@@ -1864,6 +1870,9 @@ def main_eu():
         threading.Thread(target=bench_inca.IncaBench(fetch, log, eu, mosaic.merc).loop, daemon=True).start()
     else:  # the US / Canadian rain gauges (METAR, SWOB) and the model at them for the North America instance
         threading.Thread(target=eu.metar.loop, daemon=True).start()
+        import bench_competitors  # ECCC's radar extrapolation (Canada + USA, to +72 min) at a sample of our gauges
+        threading.Thread(target=bench_competitors.CompetitorBench(
+            fetch, log, os.environ.get("VERIFY_LOG_DIR", "."), eu.metar.stations, na=True).loop, daemon=True).start()
         threading.Thread(target=model_at_gauges_loop, daemon=True,
                          kwargs={"stations": eu.metar.stations, "every_h": 1,
                                  "out_dir": os.path.join(os.environ.get("VERIFY_LOG_DIR", "."), "modelgauge")}).start()
