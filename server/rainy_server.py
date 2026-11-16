@@ -105,7 +105,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v1.46"
+VERSION = "server-v1.47"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -487,6 +487,11 @@ def advect_blend(fc, last, motion, fade_min=ADV_FADE_MIN):
 # region's rain where it travels), compared to the forecast in a wide Gaussian window (sigma LOCAL_PM_KM); the
 # forecast is scaled by that ratio (to the power `power`, clipped), the domain total stays S-PROG's.
 LOCAL_PM_KM = 150.0
+# Served since server-v1.47 (16.11.2026) with keep=False: tune_eu.py, 4 runs of 16.11., amount forecast / later image
+# at +60 / +120: Germany 0.74 / 0.67 -> 1.02 / 0.99, Alps 0.67 / 0.73 -> 0.95 / 1.05, England 0.70 / 0.63 -> 0.96 /
+# 0.90, Czechia 0.90 / 0.99 -> 1.05 / 1.19; cell-by-cell CSI unchanged (+-0.01). The uncorrected S-PROG stays the
+# scored shadow "sprog0" (= the old served forecast from +60 on). LOCAL_AMOUNT=0 switches it off.
+LOCAL_AMOUNT = os.environ.get("LOCAL_AMOUNT", "1") == "1"
 
 
 def local_amount(fc, last, motion, km_per_px, sigma_km=LOCAL_PM_KM, power=1.0, clip=3.0, keep=True):
@@ -502,18 +507,23 @@ def local_amount(fc, last, motion, km_per_px, sigma_km=LOCAL_PM_KM, power=1.0, c
     src = _coarse(np.where(last < 0, 0, last), c)
     src[src < 0] = 0
     cy, cx = src.shape
+    # where the moved image comes from outside the radar coverage (rain drifting in from the Atlantic, the domain
+    # edge), it knows nothing: there the factor fades to 1 (S-PROG unchanged)
+    cov0 = cv2.resize((last[: cy * c, : cx * c] >= 0).astype(np.float32), (cx, cy), interpolation=cv2.INTER_AREA)
     u = cv2.resize(np.nan_to_num(vel[0]).astype(np.float32), (cx, cy), interpolation=cv2.INTER_LINEAR) * down / c
     v = cv2.resize(np.nan_to_num(vel[1]).astype(np.float32), (cx, cy), interpolation=cv2.INTER_LINEAR) * down / c
     gx, gy = np.meshgrid(np.arange(cx, dtype=np.float32), np.arange(cy, dtype=np.float32))
     sig = max(1.0, sigma_km / (c * km_per_px))
     blur = lambda a: cv2.GaussianBlur(a, (0, 0), sig, borderType=cv2.BORDER_CONSTANT)
+    norm = np.maximum(blur(np.ones((cy, cx), np.float32)), 1e-6)
     out = []
     for i, g in enumerate(fc):
         gf = np.asarray(g, np.float32)
         f = _coarse(np.where(gf < 0, 0, gf)[: cy * c, : cx * c], c)
         f[f < 0] = 0
-        adv = cv2.remap(src, gx - u * (i + 1), gy - v * (i + 1), cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT,
-                        borderValue=0)
+        mx, my = gx - u * (i + 1), gy - v * (i + 1)
+        adv = cv2.remap(src, mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        cov = cv2.remap(cov0, mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
         tf, ta = float(f.sum()), float(adv.sum())
         if tf <= 0 or ta <= 0:
             out.append(g)
@@ -522,6 +532,8 @@ def local_amount(fc, last, motion, km_per_px, sigma_km=LOCAL_PM_KM, power=1.0, c
             adv *= tf / ta                               # keep S-PROG's total: only the distribution moves
         eps = 0.02 * tf / f.size + 1e-6
         r = np.clip((blur(adv) + eps) / (blur(f) + eps), 1.0 / clip, clip) ** power
+        wc = np.clip(blur(cov) / norm, 0.0, 1.0) ** 2   # the factor only counts where the source was seen
+        r = wc * r + (1.0 - wc)
         r = cv2.resize(r.astype(np.float32), (cx * c, cy * c), interpolation=cv2.INTER_LINEAR)
         r = np.pad(r, ((0, ny - cy * c), (0, nx - cx * c)), mode="edge")
         b = np.where(gf < 0, 0, gf) * r
@@ -701,7 +713,7 @@ class Region:
         if prev_t == last_t:
             return len(new)
         fc = None
-        motion, pure = {}, None
+        motion, pure, pure_small = {}, None, None
         if HAVE_PYSTEPS and self.SPROG_DOWN:
             with self.lock:
                 near = lambda dt, tol: next((self.obs[t] for t in sorted(self.obs, key=lambda t: abs(last_t - dt - t))
@@ -711,6 +723,11 @@ class Region:
             if all(g is not None for g in seq + mot):
                 try:
                     pure = sprog_nowcast(seq, mot, FC_STEPS, self.SPROG_DOWN, thr=self.SPROG_THR, motion_out=motion)
+                    d = self.RAW_DOWN  # the uncorrected S-PROG, kept small for the shadow "sprog0"
+                    pure_small = {last_t + (i + 1) * STEP_MS: cv2.resize(np.asarray(g, np.float32), (g.shape[1] // d, g.shape[0] // d),
+                                  interpolation=cv2.INTER_AREA).astype(np.float16) for i, g in enumerate(pure)}
+                    if LOCAL_AMOUNT:  # every region keeps its rain amount (local_amount, 16.11.2026)
+                        pure = local_amount(pure, last, motion, self.KM_PER_PX, keep=False)
                     fc = advect_blend(pure, last, motion)  # no break at "now" (ADV_FADE_MIN)
                 except Exception as e:  # never lose the forecast: fall back to the simple method
                     log(f"{self.name} S-PROG failed, using simple nowcast: {e}")
@@ -730,14 +747,11 @@ class Region:
             raw = {last_t + (i + 1) * STEP_MS: g.astype(np.float16) for i, g in enumerate(small)}  # = fc, at 1/d
             cells = blend_new_cells(self.model, small, last_t, km_per_px=self.KM_PER_PX * d)  # changes `small` in place
             cells = {last_t + (i + 1) * STEP_MS: g.astype(np.float16) for i, g in enumerate(cells)}
-        d = self.RAW_DOWN
-        pure_small = None if pure is None else {
-            last_t + (i + 1) * STEP_MS: cv2.resize(np.asarray(g, np.float32), (g.shape[1] // d, g.shape[0] // d),
-                                                   interpolation=cv2.INTER_AREA).astype(np.float16) for i, g in enumerate(pure)}
+        pure = None
         with self.lock:
             self.fc_raw = raw
             self.fc_cells = cells  # verification shadow "cells": with the model's new showers (served until 11.11.)
-            self.fc_pure = pure_small  # S-PROG as before 10.11. (no advection blend): verification shadow "sprog0"
+            self.fc_pure = pure_small  # S-PROG without advection blend and amount control: verification shadow "sprog0"
             self.fc = {last_t + (i + 1) * STEP_MS: g.astype(np.float16) for i, g in enumerate(fc)}
             self.ref = last_t
         self.after_forecast()
