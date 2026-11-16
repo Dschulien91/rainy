@@ -27,11 +27,18 @@ import rainy_server as rs
 RUNS = int(sys.argv[1]) if len(sys.argv) > 1 else 6
 EVERY = float(sys.argv[2]) if len(sys.argv) > 2 else 1.0
 ALL = {"thr 0.10 (old)": dict(thr=0.1), "thr 0.05": dict(thr=0.05), "thr 0.03": dict(thr=0.03),
-       "thr 0.03 pm-mean": dict(thr=0.03, probmatch="mean"), "thr 0.10 pm-mean": dict(thr=0.1, probmatch="mean")}
+       "thr 0.03 pm-mean": dict(thr=0.03, probmatch="mean"), "thr 0.10 pm-mean": dict(thr=0.1, probmatch="mean"),
+       # 16.11.: local amount control after S-PROG (rainy_server.local_amount), window sigma in km / power
+       "served": dict(thr=0.03), "local150": dict(thr=0.03, local=(150, 1.0)), "local80": dict(thr=0.03, local=(80, 1.0)),
+       "local300": dict(thr=0.03, local=(300, 1.0)), "local150h": dict(thr=0.03, local=(150, 0.5))}
 VARIANTS = ({k: ALL[k] for k in sys.argv[3].split(",")} if len(sys.argv) > 3 else
             {k: ALL[k] for k in ("thr 0.10 (old)", "thr 0.05", "thr 0.03")})
 REGIONS = {"Germany": (5.9, 15.0, 47.3, 55.0), "Alps CH/AT": (6.0, 16.5, 45.8, 47.8), "Czechia": (12.1, 18.9, 48.6, 51.0),
            "England": (-5.7, 1.8, 50.0, 55.5), "Italy N": (7.0, 13.5, 43.5, 45.8)}
+if rs.NA:  # the North America instance (same script: docker run ... deploy-api-na python tune_eu.py ...)
+    REGIONS = {"Northeast": (-80.0, -67.0, 38.0, 47.5), "Southeast": (-91.0, -75.0, 25.0, 36.5),
+               "Midwest": (-97.0, -80.0, 37.0, 49.0), "Plains/Texas": (-106.0, -94.0, 26.0, 40.0),
+               "West": (-125.0, -110.0, 32.0, 49.0), "S Canada": (-100.0, -60.0, 49.0, 55.0)}
 LEADS = (30, 60, 120)
 THS = (0.05, 0.3, 1.0)
 rs.EuropeOpera.DESPOKE = False  # raw images in any order: the filter needs them in sequence
@@ -70,7 +77,11 @@ for k in range(RUNS):
             fc = {lead: last for lead in LEADS}
         else:  # one variant at a time, only the scored steps kept (three full forecasts at once ran out of memory)
             motion = {}
+            kw = dict(kw)
+            loc = kw.pop("local", None)
             pure = rs.sprog_nowcast(seq, mot, rs.FC_STEPS, eu.SPROG_DOWN, motion_out=motion, **kw)
+            if loc:
+                pure = rs.local_amount(pure, last, motion, eu.KM_PER_PX, sigma_km=loc[0], power=loc[1])
             full = rs.advect_blend(pure, last, motion)
             fc = {lead: full[lead // 5 - 1] for lead in LEADS}
             del pure, full

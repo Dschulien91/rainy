@@ -355,6 +355,20 @@ def record(ts, opera, nat, who=None, layers=(), each=None, shadow=()):
             os.remove(fp)
 
 
+FCA_DIR = os.path.join(LOG_DIR, "fcalert")  # the alerts' input at the gauges, per run (verify_alerts_eu.py)
+
+
+def record_alert(ref, share, peak):
+    """share: (1 + forecast steps, gauges) uint8 wet share of the alert circle x250 (255 = no data), row 0 = the
+    picture at ref, then every 5-minute step; peak: the circle's highest rate (mm/h), same shape."""
+    os.makedirs(FCA_DIR, exist_ok=True)
+    np.savez_compressed(os.path.join(FCA_DIR, f"{int(ref)}.npz"), share=share, peak=peak)
+    old = time.time() * 1000 - KEEP_DAYS * 86400_000
+    for fp in glob.glob(os.path.join(FCA_DIR, "*.npz")):
+        if int(os.path.basename(fp)[:-4]) < old:
+            os.remove(fp)
+
+
 def record_fc(ref, values, more=None):
     """values: (1 + len(FC_LEADS), gauges) - the picture at the run's time `ref`, then the forecast per lead.
     more: {variant: (len(FC_LEADS), gauges)} - other forecasts of the same run ("pure" = S-PROG alone, "cells" = with

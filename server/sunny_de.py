@@ -873,7 +873,8 @@ class SunnyDE:
         flow = self._motion(prev[0].astype(np.float32), k1, prev[1]) if prev else None
         base = fill_nan(k1)
         known = np.isfinite(k1).astype(np.float32)
-        out = {"sat": {}, "satold": {}, "sharp": {}, "kpers": {}, "pers": {}, "model": {}, "nwp": {}}
+        out = {"sat": {}, "satold": {}, "sharp": {}, "kpers": {}, "pers": {}, "model": {}, "nwp": {}, "shblur": {},
+               "model90": {}}
         disp = {}
         for lead in FC_LEADS:
             ts = ref + lead * 60_000
@@ -891,7 +892,8 @@ class SunnyDE:
                 ksharp = np.where(kn > 0.5, kk, np.nan).astype(np.float32)
             if lead in LEADS:  # the old blur, for the shadow "satold"
                 kold = np.where(kn > 0.5, cv2.GaussianBlur(kk, (0, 0), BLUR * math.sqrt(lead / 10)), np.nan).astype(np.float32)
-            kk = cv2.GaussianBlur(kk, (0, 0), max(0.3, BLUR * math.sqrt(lead / 10) * min(1.0, lead / SHARP_MIN)))
+            sig = max(0.3, BLUR * math.sqrt(lead / 10) * min(1.0, lead / SHARP_MIN))
+            kk = cv2.GaussianBlur(kk, (0, 0), sig)
             kk = np.where(kn > 0.5, kk, np.nan).astype(np.float32)
             s = share_from_k(kk, e)
             out["sat"][ts] = s
@@ -899,6 +901,11 @@ class SunnyDE:
             if lead in LEADS:  # shadows only where they are scored
                 out["satold"][ts] = share_from_k(kold, e)
                 out["sharp"][ts] = share_from_k(ksharp, e)
+                # shadow "shblur" (16.11.2026): the served "sat" blurs k and then turns it into a sun share - the share
+                # is not linear in k, so broken fields lose sun with the lead (Germany grid sunny area x0.90 at +120,
+                # station bias -0.07). Here the SHARE is blurred instead: the local sun fraction stays as moved.
+                sh = out["sharp"][ts]
+                out["shblur"][ts] = np.where(np.isfinite(sh), cv2.GaussianBlur(fill_nan(sh), (0, 0), sig), np.nan).astype(np.float32)
                 out["kpers"][ts] = share_from_k(k1, e)
                 if obs is not None:
                     out["pers"][ts] = obs.astype(np.float32)
@@ -908,6 +915,10 @@ class SunnyDE:
                     w = 1.0 if lead <= MODEL_START else 1.0 - min(1.0, (lead - MODEL_START) / (MODEL_END - MODEL_START)) * (1 - MODEL_END_W)
                     out["model"][ts] = np.where(np.isfinite(s), w * s + (1 - w) * m, np.nan).astype(np.float32)
                     out["nwp"][ts] = np.where(np.isfinite(s), m, np.nan).astype(np.float32)
+                    # shadow "model90" (16.11.2026): "model" fixed the stations at +120 but was x1.32 too sunny on the
+                    # grid - the model only from +90, weight 0.25 at +120
+                    w9 = 1.0 - max(0.0, min(1.0, (lead - 90) / 30)) * 0.25
+                    out["model90"][ts] = np.where(np.isfinite(s), w9 * s + (1 - w9) * m, np.nan).astype(np.float32)
         return out, disp
 
     # ---------- update ----------

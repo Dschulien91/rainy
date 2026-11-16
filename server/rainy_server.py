@@ -105,7 +105,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v1.43"
+VERSION = "server-v1.44"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -479,6 +479,56 @@ def advect_blend(fc, last, motion, fade_min=ADV_FADE_MIN):
     return out
 
 
+# The S-PROG forecast moves rain BETWEEN REGIONS (16.11.2026): its probability matching imposes the whole domain's
+# intensity distribution of the last image on the forecast field, so large stratiform areas keep high ranks and grow
+# (Germany x1.23 / x1.42 of the later image at +60 / +120, Czechia x1.5 / x1.85; at the gauges x1.4-1.5) while decaying
+# showers shrink (England x0.35, Alps x0.6) - the whole domain stays at ~0.95. local_amount() puts each region's
+# amount back: the reference is the last image moved along the motion (Lagrangian persistence, which keeps every
+# region's rain where it travels), compared to the forecast in a wide Gaussian window (sigma LOCAL_PM_KM); the
+# forecast is scaled by that ratio (to the power `power`, clipped), the domain total stays S-PROG's.
+LOCAL_PM_KM = 150.0
+
+
+def local_amount(fc, last, motion, km_per_px, sigma_km=LOCAL_PM_KM, power=1.0, clip=3.0):
+    """fc: S-PROG steps (float16, NODATA outside); last: the newest analysis; motion: sprog_nowcast(motion_out=...).
+    Returns the steps with every region's rain amount set to the advected last image's (scaled to S-PROG's total)."""
+    vel, down = motion.get("velocity"), motion.get("down", 1)
+    if vel is None or not len(fc):
+        return fc
+    last = np.asarray(last, np.float32)
+    ny, nx = last.shape
+    c = max(1, int(round(16.0 / km_per_px)))           # factor grid ~16 km
+    src = _coarse(np.where(last < 0, 0, last), c)
+    src[src < 0] = 0
+    cy, cx = src.shape
+    u = cv2.resize(np.nan_to_num(vel[0]).astype(np.float32), (cx, cy), interpolation=cv2.INTER_LINEAR) * down / c
+    v = cv2.resize(np.nan_to_num(vel[1]).astype(np.float32), (cx, cy), interpolation=cv2.INTER_LINEAR) * down / c
+    gx, gy = np.meshgrid(np.arange(cx, dtype=np.float32), np.arange(cy, dtype=np.float32))
+    sig = max(1.0, sigma_km / (c * km_per_px))
+    blur = lambda a: cv2.GaussianBlur(a, (0, 0), sig, borderType=cv2.BORDER_CONSTANT)
+    out = []
+    for i, g in enumerate(fc):
+        gf = np.asarray(g, np.float32)
+        f = _coarse(np.where(gf < 0, 0, gf)[: cy * c, : cx * c], c)
+        f[f < 0] = 0
+        adv = cv2.remap(src, gx - u * (i + 1), gy - v * (i + 1), cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT,
+                        borderValue=0)
+        tf, ta = float(f.sum()), float(adv.sum())
+        if tf <= 0 or ta <= 0:
+            out.append(g)
+            continue
+        adv *= tf / ta                                   # keep S-PROG's total: only the distribution moves
+        eps = 0.02 * tf / f.size + 1e-6
+        r = np.clip((blur(adv) + eps) / (blur(f) + eps), 1.0 / clip, clip) ** power
+        r = cv2.resize(r.astype(np.float32), (cx * c, cy * c), interpolation=cv2.INTER_LINEAR)
+        r = np.pad(r, ((0, ny - cy * c), (0, nx - cx * c)), mode="edge")
+        b = np.where(gf < 0, 0, gf) * r
+        b[b < 0.05] = 0
+        b[gf < 0] = NODATA
+        out.append(b.astype(np.float16))
+    return out
+
+
 # ---------- our own nowcast for Germany ----------
 class DeModelArea:
     """The German radar grid as a ModelRain region: model points only where the map shows the radar."""
@@ -843,6 +893,55 @@ class EuropeOpera(Region):
                            for name, gs in more.items() if all(g is not None for g in gs)})
         except Exception as e:
             log(f"fcgauge failed: {e}")
+        try:
+            self.record_alert_inputs()
+        except Exception as e:
+            log(f"fcalert failed: {e}")
+
+    def record_alert_inputs(self):
+        """The rain alerts' input at every gauge (16.11.2026: alerts verified outside Germany - verify_alerts_eu.py):
+        per run, for the picture and every 5-minute forecast step, the wet share of the RADIUS_KM circle (>= alerts.WET,
+        the real alert rule's quantity) and the rate alerts.series reports (max of the 3x3 mean at the place and the
+        circle's 75th percentile) -> verify_log/<instance>/fcalert/<ref>.npz. Same circle as alerts.series."""
+        import alerts
+        import check_national_gauges as cng
+        px = self.gauges()
+        with self.lock:
+            ref = self.ref
+            grids = [self.obs.get(ref)] + [self.fc.get(ref + (i + 1) * STEP_MS) for i in range(FC_STEPS)]
+        if px is None or ref is None or ref % 600_000 or any(g is None for g in grids):
+            return
+        col, row, ok = px
+        r = max(1, int(round(alerts.RADIUS_KM / self.KM_PER_PX)))
+        o = np.arange(-r, r + 1)
+        dx, dy = np.meshgrid(o, o)
+        disc = dx ** 2 + dy ** 2 <= r * r
+        dx, dy = dx[disc], dy[disc]
+        o3 = np.array([-1, 0, 1])
+        ex, ey = (a.ravel() for a in np.meshgrid(o3, o3))
+        ny, nx = grids[0].shape
+        col, row = np.asarray(col), np.asarray(row)
+        cc = np.clip(col[:, None] + dx[None], 0, nx - 1)
+        rr = np.clip(row[:, None] + dy[None], 0, ny - 1)
+        c3 = np.clip(col[:, None] + ex[None], 0, nx - 1)
+        r3 = np.clip(row[:, None] + ey[None], 0, ny - 1)
+        share = np.full((len(grids), len(col)), 255, np.uint8)
+        peak = np.full((len(grids), len(col)), np.nan, np.float16)
+        use = np.asarray(ok, bool)
+        for i, g in enumerate(grids):
+            g = np.asarray(g, np.float32)
+            v = g[rr, cc]
+            good = v >= 0
+            nval = good.sum(axis=1)
+            valid = use & (nval >= 0.5 * v.shape[1])   # alerts.series: skipped when mostly outside the radar
+            sh = ((v >= alerts.WET) & good).sum(axis=1) / np.maximum(1, nval)
+            vm = np.where(good, v, np.nan)
+            p75 = np.nanpercentile(np.where(valid[:, None], vm, 0), 75, axis=1)
+            e3 = g[r3, c3]
+            m3 = np.where(e3 >= 0, e3, 0).sum(axis=1) / np.maximum(1, (e3 >= 0).sum(axis=1))
+            share[i, valid] = np.round(sh[valid] * 250).astype(np.uint8)
+            peak[i, valid] = np.maximum(m3, p75)[valid]
+        cng.record_alert(ref, share, peak)
 
     def __init__(self):
         super().__init__()
