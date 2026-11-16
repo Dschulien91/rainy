@@ -212,10 +212,10 @@ class SynopFeed:
                     self.log(f"synop: {n} European reports in {time.time() - t0:.0f} s")
             except Exception as e:
                 self.log(f"synop failed: {e}")
-            try:  # Poland's gauges serve only their newest value: kept here (check_national_gauges.gauges_pl)
-                cng.poll_poland(self.fetch)
+            try:  # gauges that serve only their newest value (pl, gl, si): kept for check_national_gauges' readers
+                cng.poll_latest_networks(self.fetch, self.log)
             except Exception as e:
-                self.log(f"poland gauges failed: {e}")
+                self.log(f"latest-value gauges failed: {e}")
             time.sleep(300)
 
 

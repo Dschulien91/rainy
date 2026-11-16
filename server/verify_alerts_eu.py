@@ -71,7 +71,7 @@ REL_BINS = (0.0, 0.1, 0.3, 0.5, 0.7, 0.9, 1.0001)
 STEP = 300_000                 # forecast step (rainy_server.STEP_MS)
 WET10, WET60 = 0.05, 0.1       # mm per 10 min / per hour counted as rain at the gauge
 SAME = 30 * 60_000             # dedupe: same event
-HOURLY_NETS = {"sy", "pt"}     # Europe: hourly amounts only (spread over six 10-min bins in the archive)
+HOURLY_NETS = {"sy", "pt", "ct"}     # Europe: hourly amounts only (spread over six 10-min bins in the archive)
 
 
 def window(t0):
@@ -434,14 +434,14 @@ def main():
         hr = [k for k in keys if k in HOURLY_NETS or k.startswith("sy-")]
         groups = [(cng.NAMES.get(k, k), (k,)) for k in dense]
         if sum(k in dense for k in ("it", "iv", "ie")) > 1:
-            groups.append(("Italy (all regions)", tuple(k for k in ("it", "iv", "ie") if k in dense)))
+            groups.append(("Italy (all regions)", tuple(k for k in ("it", "iv", "ie", "bz", "tn") if k in dense)))
         groups.append(("All 10-minute networks", tuple(dense)))
         section("10-minute gauges: hit = >= 0.05 mm in a 10-min interval overlapping the predicted start +- 15 min", groups)
         reliability("all 10-minute networks", ten)
         if a.rel_groups:
             for k in dense:
                 reliability(cng.NAMES.get(k, k), np.array([x == k for x in gkey]))
-        hgroups = [(cng.NAMES["pt"] if k == "pt" else f"{synop.NAMES.get(k[3:], k[3:])} (SYNOP)", (k,)) for k in hr]
+        hgroups = [(cng.NAMES[k] if k in ("pt", "ct") else f"{synop.NAMES.get(k[3:], k[3:])} (SYNOP)", (k,)) for k in hr]
         syn = tuple(k for k in hr if k.startswith("sy-"))
         if syn:
             hgroups.append(("All SYNOP stations", syn))

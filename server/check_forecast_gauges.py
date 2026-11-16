@@ -107,7 +107,8 @@ countries = sorted({group(s) for s in st})
 dense = [c for c in countries if not c.startswith("sy-")]
 syn = [c for c in countries if c.startswith("sy-")]
 groups = [(cng.NAMES[c], (c,)) for c in dense]
-groups += [("Italy (all regions)", ("it", "iv", "ie")), ("All dense gauge networks", tuple(dense))]
+groups += [("Italy (all regions)", ("it", "iv", "ie", "bz", "tn")), ("Belgium (all networks)", ("be", "bw", "bf")),
+           ("Spain (Galicia + Catalonia)", ("gl", "ct")), ("All dense gauge networks", tuple(dense))]
 # SYNOP (16.11.2026): one hourly amount per station -> hours tables only; the countries without an open 10-min network
 groups += [(f"{synop.NAMES.get(c[3:], c[3:])} (SYNOP)", (c,)) for c in syn]
 groups += [("All SYNOP stations", tuple(syn))]
@@ -120,7 +121,7 @@ for name, cs in groups:
         if not r:
             continue
         a = np.array([x[:-2] for x in r], np.float32)
-        if not cs[0].startswith("sy-") and cs != ("pt",):  # hourly amounts: hours tables only
+        if not cs[0].startswith("sy-") and cs not in (("pt",), ("ct",)):  # hourly amounts: hours tables only
             cng.table(f"{name}, +{lead} min", a[:, 0], {c[0]: a[:, i + 1] for i, c in enumerate(cols)})
         h = hourly(r)
         if len(h):

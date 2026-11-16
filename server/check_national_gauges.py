@@ -34,8 +34,31 @@ Gauges (independent of all radar data), each list open data without an account:
   hu  HungaroMet open data (odp.met.hu, free with the source named: HungaroMet ODP terms of use), automatic
       stations, 10-minute sums (r), one small zipped CSV per 10 minutes (the last ~24 h kept), ~260 gauges, ~20 min
       behind.
-  Not used: Poland (IMGW's open API holds only the newest 10-minute value, no history), Slovakia (SHMU's open server
-  has 1-minute gauge data but no station positions), Norway, Denmark, the Netherlands (identifying header or key).
+  pl  Poland, IMGW telemetry: only the newest 10-minute sum per gauge -> polled (poll_latest_networks)
+  pt  Portugal, IPMA: every station's last 24 h, hourly amounts
+  sy  European SYNOP stations, hourly amounts
+  Added 16.11.2026 (all keyless; time stamps are the END of the interval unless noted, converted to UTC):
+  sc  Scotland, SEPA KiWIS (timeseries.sepa.org.uk, Open Government Licence), ~300 gauges, 15-MINUTE totals (spread
+      as "ie"), stamps in UTC, ~15 min behind; one range request for all gauges (getTimeseriesValues by ts_path)
+  be  Belgium, RMI AWS (opendata.meteo.be, open data), 14 stations, 10-minute sums, UTC, ~10 min behind
+  bw  Belgium, Wallonia SPW hydrometrie KiWIS, ~90 gauges, 5-MINUTE sums (paired into 10 min, as "iv"), stamps with
+      their offset (+01:00), ~10 min behind; one range request
+  bf  Belgium, Flanders VMM waterinfo KiWIS, ~47 gauges, 15-minute totals (spread as "ie"), +01:00, ~15 min behind
+  gl  Spain, MeteoGalicia (servizos.meteogalicia.gal), ~160 stations, 10-minute sums, UTC, ~10 min behind: only the
+      newest value per station -> polled (poll_latest_networks)
+  ct  Spain, Meteocat XEMA via the Catalan open data portal (Socrata nzvn-apee, Meteocat terms: free with the source
+      named), ~185 stations, 30-MINUTE sums stamped at the START of the half hour in UTC (dataset description), ~30-60
+      min behind; spread evenly over the three 10-minute steps (only the hourly tables are sharp)
+  bz  Italy, South Tyrol (Province of Bolzano meteo API, CC0), 60 gauges, 5-minute sums, stamps "CET"/"CEST", ~10 min
+      behind; one request per gauge
+  tn  Italy, Trentino (dati.meteotrentino.it), ~100 gauges, 15-minute sums of yesterday and today in LOCAL time
+      without zone (the offset is read from the newest stamp against the clock); one request per gauge
+  si  Slovenia, ARSO automatic stations (meteo.arso.gov.si, one file of all stations' newest values), ~100 gauges,
+      10-minute sums (some 30-minute), UTC -> polled (poll_latest_networks)
+  dk  Denmark, DMI metObs API (opendataapi.dmi.dk, keyless since 2025, CC BY 4.0), ~105 gauges, precip_past10min,
+      UTC, a few minutes behind; one range request
+  Not used: Slovakia (SHMU's open server has 1-minute gauge data but no station positions), Norway, the Netherlands
+  (identifying header or key), Liguria (OMIRL: the meaning and time base of its station values are not documented).
 "Shadow" layers (national.Layer.SHADOW: loaded, noted here, not in the picture) get their own tables: where such a
 candidate has data, OPERA alone and the own picture against "only <shadow>" - the evidence for promoting it.
 New lists are appended to stations.json (the order of the older files stays valid; they are shorter).
@@ -83,13 +106,29 @@ ENGLAND_MEASURE = "-rainfall-tipping_bucket_raingauge-t-15_min-mm"
 HUNGARY = "https://odp.met.hu/weather/weather_reports/synoptic/hungary/10_minutes/csv"
 POLAND = "https://danepubliczne.imgw.pl/api/data/meteo"   # IMGW telemetry: the newest 10-min sum per station only
 PORTUGAL = "https://api.ipma.pt/open-data/observation/meteorology/stations"  # IPMA: every station's last 24 h, hourly
+# KiWIS servers (base, datasource, time series path); their stamps are the ends of the intervals (checked 16.11.2026
+# against the co-located RMI gauges: Uccle 5-min Wallonia vs RMI 10-min r = 0.999 at no shift, Flanders likewise)
+SCOTLAND = ("https://timeseries.sepa.org.uk/KiWIS/KiWIS", 0, "1/*/RE/15m.Total")
+WALLONIA = ("https://hydrometrie.wallonie.be/services/KiWIS/KiWIS", 0, "DGH/*/Precip/5m.CmdTotal.P")
+FLANDERS = ("https://download.waterinfo.be/tsmdownload/KiWIS/KiWIS", 1, "AOW_PLUVIO/*/N/15m.Total")
+BELGIUM = "https://opendata.meteo.be/service/aws/ows?service=WFS&version=2.0.0&request=GetFeature&outputFormat=csv"
+GALICIA = "https://servizos.meteogalicia.gal/mgrss/observacion"
+CATALONIA = "https://analisi.transparenciacatalunya.cat/resource"
+SOUTH_TYROL = "https://geoservices.buergernetz.bz.it/services/meteo/v1"
+TRENTINO = "https://dati.meteotrentino.it/service.asmx"
+SLOVENIA = "https://meteo.arso.gov.si/uploads/probase/www/observ/surface/text/sl/observationAms_si_latest.xml"
+DENMARK = "https://opendataapi.dmi.dk/v2/metObs/collections/observation/items?parameterId=precip_past10min"
 NAMES = {"de": "Germany (DWD gauges)", "at": "Austria (TAWES gauges)", "ch": "Switzerland (MeteoSwiss gauges)",
          "it": "Italy, Lombardy (ARPA Lombardia gauges)", "iv": "Italy, Veneto (ARPAV gauges)",
          "cz": "Czechia (CHMI gauges)", "ie": "Italy, Emilia-Romagna (ARPAE gauges)",
          "se": "Sweden (SMHI gauges)", "fi": "Finland (FMI gauges)", "en": "England (Environment Agency gauges)",
          "hu": "Hungary (HungaroMet gauges)",
          "pl": "Poland (IMGW gauges)", "pt": "Portugal (IPMA stations, hourly)",
-         "sy": "Europe, SYNOP stations (hourly amounts only; per country in check_forecast_gauges.py)"}
+         "sy": "Europe, SYNOP stations (hourly amounts only; per country in check_forecast_gauges.py)",
+         "sc": "Scotland (SEPA gauges)", "be": "Belgium (RMI stations)", "bw": "Belgium, Wallonia (SPW gauges)",
+         "bf": "Belgium, Flanders (VMM gauges)", "gl": "Spain, Galicia (MeteoGalicia stations)",
+         "ct": "Spain, Catalonia (Meteocat stations, 30-min)", "bz": "Italy, South Tyrol (Province of Bolzano gauges)",
+         "tn": "Italy, Trentino (Meteotrentino gauges)", "si": "Slovenia (ARSO stations)", "dk": "Denmark (DMI gauges)"}
 
 
 # ---------- gauge lists ----------
@@ -265,25 +304,298 @@ def _list_pt(fetch):
              float(f["geometry"]["coordinates"][0])) for f in d if 36.5 <= f["geometry"]["coordinates"][1] <= 42.5]
 
 
-def poll_poland(fetch):
-    """IMGW serves only each gauge's newest 10-minute sum (times in UTC): the OPERA instance reads it every 5 minutes
-    (synop.SynopFeed.loop) into <ROOT>/synop/pl_<day>.jsonl - gauges_pl reads those."""
+_WRITTEN = {}  # network -> {(id, t, mm)} this process already archived (a poll repeats values until they change)
+
+
+def _archive_latest(net, rows):
+    """rows (id, end of the 10 minutes in ms, mm) -> <ROOT>/synop/<net>_<UTC day>.jsonl (one JSON line per value;
+    the reader takes the last line of a gauge and time). synop.SynopFeed removes the files after its KEEP_DAYS."""
+    seen = _WRITTEN.setdefault(net, set())
+    now = time.time() * 1000
+    old = now - 2 * 86400_000  # dead stations keep their last value for years: not kept
+    if len(seen) > 300_000:
+        seen -= {k for k in seen if k[1] < old}
     lines = {}
-    for x in json.loads(fetch(POLAND, timeout=60)):
-        try:
-            t = _ms(x["opad_10min_data"], "%Y-%m-%d %H:%M:%S")
-            mm = float(x["opad_10min"])
-        except (KeyError, TypeError, ValueError):
-            continue
-        if t % 600_000 == 0 and mm >= 0:
-            lines.setdefault(time.strftime("%Y%m%d", time.gmtime(t / 1000)), set()).add(
-                json.dumps({"id": str(x["kod_stacji"]), "t": t, "mm": mm}))
+    for sid, t, mm in rows:
+        if t % 600_000 == 0 and old <= t <= now + 600_000 and mm >= 0 and (sid, t, mm) not in seen:
+            seen.add((sid, t, mm))
+            lines.setdefault(time.strftime("%Y%m%d", time.gmtime(t / 1000)), []).append(
+                json.dumps({"id": sid, "t": t, "mm": mm}))
     d = os.path.join(ROOT, "synop")
     os.makedirs(d, exist_ok=True)
     for day, ls in lines.items():
-        with open(os.path.join(d, f"pl_{day}.jsonl"), "a") as f:
+        with open(os.path.join(d, f"{net}_{day}.jsonl"), "a") as f:
             f.write("\n".join(sorted(ls)) + "\n")
     return sum(len(v) for v in lines.values())
+
+
+def poll_poland(fetch):
+    """IMGW serves only each gauge's newest 10-minute sum (times in UTC): polled every 5 minutes
+    (poll_latest_networks) into <ROOT>/synop/pl_<day>.jsonl - gauges_pl reads those."""
+    rows = []
+    for x in json.loads(fetch(POLAND, timeout=60)):
+        try:
+            rows.append((str(x["kod_stacji"]), _ms(x["opad_10min_data"], "%Y-%m-%d %H:%M:%S"), float(x["opad_10min"])))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return _archive_latest("pl", rows)
+
+
+def _galicia_latest(fetch):
+    """MeteoGalicia's newest 10-minute rain sum per station (PP_SUM_1.5m; instanteLecturaUTC = the END of the 10
+    minutes in UTC: on 16.11.2026 15:35 UTC stations already reported 15:30). Only values marked valid (code 1)."""
+    raw = fetch(f"{GALICIA}/ultimos10minEstacionsMeteo.action?idParam=PP_SUM_1.5m", timeout=60)
+    for x in json.loads(raw.decode("latin-1"))["listUltimos10min"]:
+        for m in x.get("listaMedidas") or []:
+            try:
+                if m["codigoParametro"] == "PP_SUM_1.5m" and m.get("lnCodigoValidacion") == 1:
+                    yield str(x["idEstacion"]), _ms(x["instanteLecturaUTC"][:19], "%Y-%m-%dT%H:%M:%S"), float(m["valor"])
+            except (KeyError, TypeError, ValueError):
+                continue
+
+
+def poll_galicia(fetch):
+    return _archive_latest("gl", list(_galicia_latest(fetch)))
+
+
+def _list_gl(fetch):
+    have = {sid for sid, _, _ in _galicia_latest(fetch)}
+    d = json.loads(fetch(f"{GALICIA}/listaEstacionsMeteo.action", timeout=60).decode("latin-1"))
+    return sorted(("gl", str(s["idEstacion"]), float(s["lat"]), float(s["lon"])) for s in d["listaEstacionsMeteo"]
+                  if str(s["idEstacion"]) in have and s.get("lat") and s.get("lon"))
+
+
+def _slovenia_rows(raw):
+    """(id, lat, lon, start ms, end ms, mm) of ARSO's file of all automatic stations' newest values (validStart /
+    validEnd in UTC, rr_val = the precipitation sum of that interval: 10 minutes, at some stations 30)."""
+    import re
+    x = raw.decode("utf-8", "replace")
+    for block in re.findall(r"<metData>(.*?)</metData>", x, re.S):
+        f = {k: v.strip() for k, v in re.findall(r"<(domain_meteosiId|domain_lat|domain_lon|validStart|validEnd|rr_val)>"
+                                                 r"([^<]*)</\1>", block)}
+        try:
+            yield (f["domain_meteosiId"].strip("_"), float(f["domain_lat"]), float(f["domain_lon"]),
+                   _ms(f["validStart"], "%d.%m.%Y %H:%M UTC"), _ms(f["validEnd"], "%d.%m.%Y %H:%M UTC"), float(f["rr_val"]))
+        except (KeyError, ValueError):
+            continue
+
+
+_NEWEST = {}  # network -> the newest end time a poll found (ms)
+
+
+def poll_slovenia(fetch):
+    """The file (~0.8 MB) is fetched only when a newer 10 minutes should be out (13 min after the newest one seen);
+    a 30-minute sum is spread evenly over its three 10-minute steps."""
+    now = time.time() * 1000
+    if now < _NEWEST.get("si", 0) + 13 * 60_000:
+        return 0
+    rows = []
+    for sid, _, _, t0, t1, mm in _slovenia_rows(fetch(SLOVENIA, timeout=60)):
+        n = (t1 - t0) // 600_000
+        if t1 % 600_000 == 0 and n in (1, 3) and mm >= 0:
+            rows += [(sid, t1 - k * 600_000, mm / n) for k in range(n)]
+            _NEWEST["si"] = max(_NEWEST.get("si", 0), min(t1, now))
+    return _archive_latest("si", rows)
+
+
+def _list_si(fetch):
+    return sorted({("si", sid, lat, lon) for sid, lat, lon, _, _, _ in _slovenia_rows(fetch(SLOVENIA, timeout=60))})
+
+
+def poll_latest_networks(fetch, log=print):
+    """The networks that serve only each gauge's newest value, kept in <ROOT>/synop/<net>_<day>.jsonl. Called every 5
+    minutes by the OPERA instance; one request per network (Slovenia's larger file every ~10 minutes)."""
+    n = {}
+    for net, fn in (("pl", poll_poland), ("gl", poll_galicia), ("si", poll_slovenia)):
+        try:
+            n[net] = fn(fetch)
+        except Exception as e:
+            log(f"{net} gauges (latest values) failed: {e}")
+    return n
+
+
+# ---------- the KiWIS servers (Scotland, Wallonia, Flanders): one request for all gauges ----------
+def _iso_ms(text):
+    """ms of an ISO time with its zone ("Z", "+01:00"); without one it is taken as UTC."""
+    d = datetime.fromisoformat(text.strip().replace("Z", "+00:00"))
+    return int((d if d.tzinfo else d.replace(tzinfo=timezone.utc)).timestamp() * 1000)
+
+
+def _utc_iso(ms):
+    return datetime.fromtimestamp(ms / 1000, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _kiwis(src, request, fetch=None, **q):
+    base, ds, path = src
+    q = urllib.parse.urlencode({"service": "kisters", "type": "queryServices", "datasource": ds, "format": "json",
+                                "request": request, "ts_path": path, **q}, safe="/*,:")
+    return json.loads((fetch or _get)(f"{base}?{q}", timeout=180))
+
+
+def _kiwis_list(net, src, fetch):
+    """Every time series of the path with a value in the last week; id = its ts_id (the range request answers by it)."""
+    week = time.time() * 1000 - 7 * 86400_000
+    out = {}
+    for s in _kiwis(src, "getTimeseriesValueLayer", fetch, metadata="true"):
+        try:
+            lat, lon = float(s["station_latitude"]), float(s["station_longitude"])
+            if s.get("timestamp") and _iso_ms(s["timestamp"]) > week and lat and lon:
+                out[str(s["ts_id"])] = (lat, lon)
+        except (KeyError, TypeError, ValueError):
+            continue
+    return [(net, sid, lat, lon) for sid, (lat, lon) in sorted(out.items())]
+
+
+def _kiwis_values(src, ids, since, until, label):
+    """{ts_id: {end of the interval ms: mm}} of the listed series from `since` to `until` (one request)."""
+    if not ids:
+        return {}
+    try:
+        d = _kiwis(src, "getTimeseriesValues", None, **{"from": _utc_iso(since), "to": _utc_iso(until),
+                                                       "returnfields": "Timestamp,Value"})
+    except Exception as e:
+        print(f"  ({label} gauges: {e})")
+        return {}
+    want, out = set(ids), {}
+    for s in d:
+        sid = str(s.get("ts_id"))
+        if sid not in want:
+            continue
+        for row in s.get("data") or []:
+            try:
+                v = row[1]
+                if isinstance(v, (int, float)) and v >= 0:
+                    out.setdefault(sid, {})[_iso_ms(row[0])] = float(v)
+            except (IndexError, TypeError, ValueError):
+                continue
+    return out
+
+
+def _list_sc(fetch):
+    return _kiwis_list("sc", SCOTLAND, fetch)
+
+
+def _list_bw(fetch):
+    return _kiwis_list("bw", WALLONIA, fetch)
+
+
+def _list_bf(fetch):
+    return _kiwis_list("bf", FLANDERS, fetch)
+
+
+def _belgium(fetch, typename, cql=None, props=None):
+    """Rows of RMI's WFS as CSV (the 10-minute layer must be filtered: unfiltered it answers 502)."""
+    import csv
+    url = f"{BELGIUM}&typenames={typename}"
+    if props:
+        url += f"&propertyName={props}"
+    if cql:
+        url += "&CQL_FILTER=" + urllib.parse.quote(cql)
+    return list(csv.DictReader(io.StringIO((fetch or _get)(url, timeout=120).decode("utf-8", "replace"))))
+
+
+def _list_be(fetch):
+    """RMI's automatic stations in operation; the_geom is "POINT (lat lon)"."""
+    import re
+    out = []
+    for r in _belgium(fetch, "aws:aws_station"):
+        p = re.findall(r"-?\d+(?:\.\d+)?", r.get("the_geom", ""))
+        if not r.get("date_end") and len(p) == 2:
+            out.append(("be", r["code"], float(p[0]), float(p[1])))
+    return sorted(out)
+
+
+def _denmark(since, until, fetch=None):
+    """(station, lat, lon, end of the 10 minutes ms, mm) of DMI's precip_past10min (observed = the end, UTC), Denmark only
+    (the API also serves Greenland and the Faroes)."""
+    url, n = f"{DENMARK}&datetime={_utc_iso(since)}/{_utc_iso(until)}&limit=300000", 0
+    while url and n < 20:
+        d = json.loads((fetch or _get)(url, timeout=180))
+        feats = d.get("features", [])
+        for f in feats:
+            try:
+                p, (lon, lat) = f["properties"], f["geometry"]["coordinates"][:2]
+                if 54.4 < lat < 58 and 7.8 < lon < 15.4 and p["value"] is not None and p["value"] >= 0:
+                    yield p["stationId"], float(lat), float(lon), _iso_ms(p["observed"]), float(p["value"])
+            except (KeyError, TypeError, ValueError):
+                continue
+        url = next((l["href"] for l in d.get("links", []) if l.get("rel") == "next"), None) if len(feats) >= 300000 else None
+        n += 1
+
+
+def _list_dk(fetch):
+    now = int(time.time() * 1000)
+    pos = {sid: (lat, lon) for sid, lat, lon, _, _ in _denmark(now - 3 * 3600_000, now, fetch)}
+    return [("dk", sid, lat, lon) for sid, (lat, lon) in sorted(pos.items())]
+
+
+def _catalonia(fetch, where, select):
+    """Rows of a Meteocat dataset on the Catalan open data portal (Socrata), 50000 per page."""
+    out, k = [], 0
+    while k < 20:
+        q = urllib.parse.urlencode({"$where": where, "$select": select, "$order": ":id", "$limit": 50000,
+                                    "$offset": k * 50000})
+        rows = json.loads((fetch or _get)(f"{CATALONIA}/nzvn-apee.json?{q}", timeout=180))
+        out += rows
+        if len(rows) < 50000:
+            break
+        k += 1
+    return out
+
+
+def _list_ct(fetch):
+    """The XEMA stations in operation (yqwd-vj5e) that sent precipitation (variable 35) in the last 6 hours."""
+    since = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(time.time() - 6 * 3600))
+    have = {r["codi_estacio"] for r in _catalonia(fetch, f"codi_variable='35' AND data_lectura >= '{since}'", "codi_estacio")}
+    st = json.loads(fetch(f"{CATALONIA}/yqwd-vj5e.json?$limit=5000", timeout=60))
+    return sorted(("ct", s["codi_estacio"], float(s["latitud"]), float(s["longitud"])) for s in st
+                  if s.get("codi_estacio") in have and s.get("latitud") and s.get("longitud"))
+
+
+def _list_bz(fetch):
+    """South Tyrol: the stations with a precipitation sensor (type N); the station file carries LAT / LONG."""
+    rain = {s["SCODE"] for s in json.loads(fetch(f"{SOUTH_TYROL}/sensors", timeout=60)) if s.get("TYPE") == "N"}
+    out = []
+    for f in json.loads(fetch(f"{SOUTH_TYROL}/stations", timeout=60))["features"]:
+        p = f["properties"]
+        if p.get("SCODE") in rain and p.get("LAT") and p.get("LONG"):
+            out.append(("bz", p["SCODE"], float(p["LAT"]), float(p["LONG"])))
+    return sorted(set(out))
+
+
+def _trentino_rows(raw):
+    """[(local time as if UTC, ms; mm)] of one Meteotrentino station file: 15-minute sums of yesterday and today."""
+    import re
+    x = raw.decode("utf-8", "replace")
+    out = []
+    for t, v in re.findall(r"<precipitazione[^>]*>\s*<data>([^<]+)</data>\s*<pioggia>([^<]*)</pioggia>", x):
+        try:
+            if float(v) >= 0:
+                out.append((_ms(t[:19], "%Y-%m-%dT%H:%M:%S"), float(v)))
+        except ValueError:
+            continue
+    return out
+
+
+def _trentino_station(sid, fetch=None):
+    try:
+        return _trentino_rows((fetch or _get)(f"{TRENTINO}/ultimiDatiStazione?codice={sid}", timeout=60))
+    except Exception:
+        return []
+
+
+def _list_tn(fetch):
+    """Meteotrentino's stations in operation (no end date) whose file holds precipitation (one request each)."""
+    import re
+    x = fetch(f"{TRENTINO}/listaStazioni", timeout=60).decode("utf-8", "replace")
+    cand = []
+    for a in re.findall(r"<anagrafica>(.*?)</anagrafica>", x, re.S):
+        f = dict(re.findall(r"<(codice|latitudine|longitudine)>([^<]*)</", a))
+        if "<fine />" in a and f.get("codice") and f.get("latitudine") and f.get("longitudine"):
+            cand.append((f["codice"], float(f["latitudine"]), float(f["longitudine"])))
+    with ThreadPoolExecutor(3) as ex:
+        has = list(ex.map(lambda c: bool(_trentino_station(c[0], fetch)), cand))
+    return sorted(("tn", sid, lat, lon) for (sid, lat, lon), h in zip(cand, has) if h)
 
 
 def _list_sy(fetch):
@@ -298,13 +610,17 @@ def _list_sy(fetch):
 
 
 LISTS = {"pl": _list_pl, "pt": _list_pt, "de": _list_de, "at": _list_at, "ch": _list_ch, "it": _list_it, "iv": _list_iv, "cz": _list_cz, "ie": _list_ie,
-         "se": _list_se, "fi": _list_fi, "en": _list_en, "hu": _list_hu, "sy": _list_sy}
+         "se": _list_se, "fi": _list_fi, "en": _list_en, "hu": _list_hu, "sy": _list_sy,
+         # 16.11.2026 - new networks are only ever APPENDED to natobs/stations.json (station_list), in this order
+         "sc": _list_sc, "be": _list_be, "bw": _list_bw, "bf": _list_bf, "gl": _list_gl, "ct": _list_ct,
+         "bz": _list_bz, "tn": _list_tn, "si": _list_si, "dk": _list_dk}
 
 
 # ---------- recording (inside the server) ----------
 def station_list(fetch, log):
     """[(country, id, lat, lon)]; kept in natobs/stations.json so every file refers to the same order. A country
-    that is not in the file yet is appended (at the next server start when its list could not be read)."""
+    that is not in the file yet is appended (at the next server start when its list could not be read) - the gauges
+    already in the file never move (natobs, fcgauge and fcalert store arrays in this order)."""
     path = os.path.join(OBS_DIR, "stations.json")
     try:
         with open(path) as f:
@@ -684,20 +1000,176 @@ def gauges_hu(ids, since, until):
     return out
 
 
-def gauges_pl(ids, since, until):
+def _read_latest(net, ids, since, until):
+    """What poll_latest_networks kept for this network (<ROOT>/synop/<net>_<day>.jsonl; the last line wins)."""
     want, out = set(ids), {}
     for day in range(int(since // 86400_000), int(until // 86400_000) + 1):
-        fp = os.path.join(ROOT, "synop", f"pl_{time.strftime('%Y%m%d', time.gmtime(day * 86400))}.jsonl")
+        fp = os.path.join(ROOT, "synop", f"{net}_{time.strftime('%Y%m%d', time.gmtime(day * 86400))}.jsonl")
         if not os.path.exists(fp):
             continue
-        for line in open(fp):
-            try:
-                r = json.loads(line)
-            except ValueError:
-                continue
-            if r["id"] in want and since <= r["t"] <= until:
-                out.setdefault(r["id"], {})[r["t"]] = r["mm"]
+        with open(fp) as f:
+            for line in f:
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                if r["id"] in want and since <= r["t"] <= until:
+                    out.setdefault(r["id"], {})[r["t"]] = r["mm"]
     return out
+
+
+def gauges_pl(ids, since, until):
+    return _read_latest("pl", ids, since, until)
+
+
+def gauges_gl(ids, since, until):
+    return _read_latest("gl", ids, since, until)
+
+
+def gauges_si(ids, since, until):
+    return _read_latest("si", ids, since, until)
+
+
+def _pairs5(five):
+    """{end of 5 minutes: mm} -> {end of 10 minutes (:00, :10, ...): mm} where both halves are known."""
+    return {t: v + five[t - 300_000] for t, v in five.items() if t % 600_000 == 0 and t - 300_000 in five}
+
+
+def gauges_sc(ids, since, until):
+    """SEPA's 15-minute totals (stamps = the end, UTC), spread as "ie"."""
+    return _spread15(_kiwis_values(SCOTLAND, ids, since - 900_000, until + 900_000, "Scottish"))
+
+
+def gauges_bf(ids, since, until):
+    """VMM's 15-minute totals (stamps = the end, +01:00), spread as "ie"."""
+    return _spread15(_kiwis_values(FLANDERS, ids, since - 900_000, until + 900_000, "Flemish"))
+
+
+def gauges_bw(ids, since, until):
+    """SPW's 5-minute sums (stamps = the end, +01:00; 0.1 mm tips) paired into 10 minutes."""
+    out = {sid: _pairs5(f) for sid, f in _kiwis_values(WALLONIA, ids, since - 600_000, until, "Walloon").items()}
+    return {sid: g for sid, g in out.items() if g}
+
+
+def gauges_be(ids, since, until):
+    """RMI's 10-minute sums (timestamp = the end of the 10 minutes, UTC without a zone: on 16.11.2026 15:29 UTC the
+    newest was 15:20, from 8 of 14 stations)."""
+    if not ids:
+        return {}
+    iso = lambda ms: datetime.fromtimestamp(ms / 1000, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+    try:
+        rows = _belgium(None, "aws:aws_10min", f"timestamp > '{iso(since - 600_000)}' AND timestamp <= '{iso(until)}'",
+                        "code,timestamp,precip_quantity")
+    except Exception as e:
+        print(f"  (Belgian RMI gauges: {e})")
+        return {}
+    want, out = set(ids), {}
+    for r in rows:
+        try:
+            if r["code"] in want and r.get("precip_quantity") not in (None, "") and float(r["precip_quantity"]) >= 0:
+                out.setdefault(r["code"], {})[_ms(r["timestamp"][:19], "%Y-%m-%dT%H:%M:%S")] = float(r["precip_quantity"])
+        except (KeyError, ValueError):
+            continue
+    return out
+
+
+def gauges_dk(ids, since, until):
+    if not ids:
+        return {}
+    try:
+        rows = list(_denmark(since - 600_000, until))
+    except Exception as e:
+        print(f"  (Danish gauges: {e})")
+        return {}
+    want, out = set(ids), {}
+    for sid, _, _, t, v in rows:
+        if sid in want and since <= t <= until:
+            out.setdefault(sid, {})[t] = v
+    return out
+
+
+def gauges_ct(ids, since, until):
+    """Meteocat's half-hour sums: data_lectura is the START of the half hour in UTC ("records labelled at the front,
+    time in UT" - the dataset's column description); base "HO" = a whole hour. Spread evenly over the 10-minute steps."""
+    if not ids:
+        return {}
+    iso = lambda ms: datetime.fromtimestamp(ms / 1000, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+    try:
+        rows = _catalonia(None, f"codi_variable='35' AND data_lectura >= '{iso(since - 3600_000)}' AND "
+                                f"data_lectura <= '{iso(until)}'", "codi_estacio,data_lectura,valor_lectura,codi_base")
+    except Exception as e:
+        print(f"  (Catalan gauges: {e})")
+        return {}
+    want, out = set(ids), {}
+    for r in rows:
+        try:
+            n = 6 if r.get("codi_base") == "HO" else 3
+            t1, v = _ms(r["data_lectura"][:19], "%Y-%m-%dT%H:%M:%S") + n * 600_000, float(r["valor_lectura"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if r["codi_estacio"] in want and v >= 0 and t1 % 600_000 == 0:
+            for k in range(n):
+                out.setdefault(r["codi_estacio"], {})[t1 - k * 600_000] = v / n
+    return out
+
+
+def gauge_bz(sid, since, until):
+    """One South Tyrol gauge: 5-minute sums, stamped "...CET" / "...CEST" (local time; date_from / date_to are local
+    too, so the window asked for is widened by 2 hours)."""
+    loc = lambda ms: time.strftime("%Y%m%d%H%M", time.gmtime(ms / 1000))
+    try:
+        d = json.loads(_get(f"{SOUTH_TYROL}/timeseries?station_code={sid}&sensor_code=N&output_format=JSON"
+                            f"&date_from={loc(since - 2 * 3600_000)}&date_to={loc(until + 3 * 3600_000)}", timeout=60))
+    except Exception:
+        return {}
+    five = {}
+    for r in d if isinstance(d, list) else []:
+        try:
+            s, v = r["DATE"], float(r["VALUE"])
+            off = {"CET": 1, "CEST": 2}[s[19:]]
+            t = _ms(s[:19], "%Y-%m-%dT%H:%M:%S") - off * 3600_000
+        except (KeyError, TypeError, ValueError):
+            continue
+        if v >= 0 and since - 600_000 <= t <= until:
+            five[t] = v
+    return _pairs5(five)
+
+
+def gauges_bz(ids, since, until):
+    with ThreadPoolExecutor(3) as ex:
+        return {sid: g for sid, g in zip(ids, ex.map(lambda s: gauge_bz(s, since, until), ids)) if g}
+
+
+def _eu_summer(ms):
+    """Central European summer time at this UTC instant (last Sunday of March 01 UTC .. last Sunday of October)."""
+    import calendar
+    y = time.gmtime(ms / 1000).tm_year
+    last_sun = lambda m: max(d for d in range(25, 32) if calendar.weekday(y, m, d) == 6)
+    a = calendar.timegm((y, 3, last_sun(3), 1, 0, 0)) * 1000
+    b = calendar.timegm((y, 10, last_sun(10), 1, 0, 0)) * 1000
+    return a <= ms < b
+
+
+def gauges_tn(ids, since, until):
+    """Meteotrentino: 15-minute sums (stamp = the end; 0.2 mm tips) in local time WITHOUT a zone. Whether that is
+    UTC+1 all year (solar time, as Lombardy and Veneto) or Italian civil time is read from the data: the newest stamp
+    of all gauges against the clock (~15-30 min behind: UTC+1 -> 30-45 min ahead, UTC+2 -> 90-105 min ahead).
+    One request per gauge (3 workers): each answers yesterday and today."""
+    with ThreadPoolExecutor(3) as ex:
+        raw = dict(zip(ids, ex.map(_trentino_station, ids)))
+    newest = max((t for rows in raw.values() for t, _ in rows), default=None)
+    if newest is None:
+        return {}
+    ahead = (newest - time.time() * 1000) / 3600_000
+    civil = 1.25 < ahead < 2.5  # the stamps run on summer time -> Italian civil time (CET / CEST by date)
+    fifteen = {}
+    for sid, rows in raw.items():
+        for t, v in rows:
+            off = 2 if civil and _eu_summer(t - 2 * 3600_000) else 1
+            u = t - off * 3600_000
+            if since - 900_000 <= u <= until + 900_000:
+                fifteen.setdefault(sid, {})[u] = v
+    return _spread15(fifteen)
 
 
 def gauges_pt(ids, since, until):
@@ -734,7 +1206,9 @@ def gauges_sy(ids, since, until):
 
 
 GAUGES = {"pl": gauges_pl, "pt": gauges_pt, "de": gauges_de, "at": gauges_at, "ch": gauges_ch, "it": gauges_it, "iv": gauges_iv, "cz": gauges_cz,
-          "ie": gauges_ie, "se": gauges_se, "fi": gauges_fi, "en": gauges_en, "hu": gauges_hu, "sy": gauges_sy}
+          "ie": gauges_ie, "se": gauges_se, "fi": gauges_fi, "en": gauges_en, "hu": gauges_hu, "sy": gauges_sy,
+          "sc": gauges_sc, "be": gauges_be, "bw": gauges_bw, "bf": gauges_bf, "gl": gauges_gl, "ct": gauges_ct,
+          "bz": gauges_bz, "tn": gauges_tn, "si": gauges_si, "dk": gauges_dk}
 
 
 # ---------- the gauge archive: the sources keep hours to days, a model is built on weeks ----------
