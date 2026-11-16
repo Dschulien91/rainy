@@ -1,4 +1,4 @@
-# Builds the Schach-Coach Android app (chess-coach/) and publishes the APK as a build artifact and as the
+# Builds the Schach-Coach Android app. Inactive here: GitHub only runs workflows from .github/workflows/ at the repository root.
 # pre-release "schach-coach-latest", so it can be downloaded straight to the phone.
 name: Schach-Coach APK
 

@@ -39,14 +39,18 @@ Bedenkzeit pro Zug („nur 1 Sekunde überlegt“) und ein „Nächster Fehler�
 
 ## Installation
 
-Die APK baut GitHub Actions bei jedem Push (Workflow `.github/workflows/chess-coach-apk.yml`):
+Alles zur App liegt nur in `chess-coach/`, das rainy-Projekt selbst wird nicht verändert.
+Deshalb ist der APK-Build (`ci/build-apk.yml`, ein GitHub-Actions-Workflow) hier **nicht aktiv**: GitHub führt
+Workflows nur aus `.github/workflows/` im Wurzelverzeichnis eines Repositorys aus.
 
-1. Auf GitHub unter **Releases → „Schach-Coach (neuester Build)“** `schach-coach.apk` auf dem Handy herunterladen
-   (oder unter Actions → letzter Lauf → Artifact `schach-coach-apk`).
-2. Öffnen und „Installation aus dieser Quelle zulassen“ bestätigen.
-3. Chess.com-Benutzernamen eingeben – fertig.
+Am einfachsten: `chess-coach/` in ein eigenes Repository kopieren, `ci/build-apk.yml` dort nach
+`.github/workflows/` legen (die Pfade darin von `chess-coach/android` auf `android` ändern) – dann baut GitHub bei
+jedem Push die APK und stellt sie unter Releases → „Schach-Coach (neuester Build)“ bereit. Alternativ lokal mit
+Android Studio `chess-coach/android` öffnen und *Build → APK* wählen.
 
-Updates einfach drüber installieren: alle Builds sind mit demselben Schlüssel signiert, die Partien bleiben erhalten.
+Auf dem Handy die APK öffnen und „Installation aus dieser Quelle zulassen“ bestätigen, dann den
+Chess.com-Benutzernamen eingeben. Updates einfach drüber installieren: alle Builds sind mit demselben Schlüssel
+signiert, die Partien bleiben erhalten.
 
 ## Akku
 
@@ -70,6 +74,7 @@ chess-coach/
     js/app.js         Oberfläche, Analyse-Warteschlange, Sync
     vendor/           chess.js, Stockfish 19 lite (stockfish.js), Figuren (cburnett)
   android/          WebView-Hülle (Java): Assets, Chess.com-Proxy, Vorlesen, Teilen, Hintergrund-Check
+  ci/build-apk.yml  GitHub-Actions-Workflow für die APK (hier inaktiv, siehe Installation)
 ```
 
 Im Browser testen: `cd chess-coach/web && python3 -m http.server 8000`, dann `http://localhost:8000` öffnen.
