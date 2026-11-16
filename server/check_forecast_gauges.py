@@ -120,7 +120,7 @@ for name, cs in groups:
         if not r:
             continue
         a = np.array([x[:-2] for x in r], np.float32)
-        if not cs[0].startswith("sy-"):
+        if not cs[0].startswith("sy-") and cs != ("pt",):  # hourly amounts: hours tables only
             cng.table(f"{name}, +{lead} min", a[:, 0], {c[0]: a[:, i + 1] for i, c in enumerate(cols)})
         h = hourly(r)
         if len(h):

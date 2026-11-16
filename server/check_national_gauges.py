@@ -81,11 +81,14 @@ FINLAND = ("https://opendata.fmi.fi/wfs?service=WFS&version=2.0.0&request=getFea
 ENGLAND = "https://environment.data.gov.uk/flood-monitoring"
 ENGLAND_MEASURE = "-rainfall-tipping_bucket_raingauge-t-15_min-mm"
 HUNGARY = "https://odp.met.hu/weather/weather_reports/synoptic/hungary/10_minutes/csv"
+POLAND = "https://danepubliczne.imgw.pl/api/data/meteo"   # IMGW telemetry: the newest 10-min sum per station only
+PORTUGAL = "https://api.ipma.pt/open-data/observation/meteorology/stations"  # IPMA: every station's last 24 h, hourly
 NAMES = {"de": "Germany (DWD gauges)", "at": "Austria (TAWES gauges)", "ch": "Switzerland (MeteoSwiss gauges)",
          "it": "Italy, Lombardy (ARPA Lombardia gauges)", "iv": "Italy, Veneto (ARPAV gauges)",
          "cz": "Czechia (CHMI gauges)", "ie": "Italy, Emilia-Romagna (ARPAE gauges)",
          "se": "Sweden (SMHI gauges)", "fi": "Finland (FMI gauges)", "en": "England (Environment Agency gauges)",
          "hu": "Hungary (HungaroMet gauges)",
+         "pl": "Poland (IMGW gauges)", "pt": "Portugal (IPMA stations, hourly)",
          "sy": "Europe, SYNOP stations (hourly amounts only; per country in check_forecast_gauges.py)"}
 
 
@@ -251,6 +254,38 @@ def _list_hu(fetch):
     return [("hu", sid, lat, lon) for sid, (lat, lon) in sorted(pos.items())]
 
 
+def _list_pl(fetch):
+    return [("pl", str(x["kod_stacji"]), float(x["lat"]), float(x["lon"])) for x in json.loads(fetch(POLAND, timeout=60))
+            if x.get("opad_10min_data") and x.get("lat") and x.get("lon")]
+
+
+def _list_pt(fetch):
+    d = json.loads(fetch(f"{PORTUGAL}/stations.json", timeout=60))
+    return [("pt", str(f["properties"]["idEstacao"]), float(f["geometry"]["coordinates"][1]),
+             float(f["geometry"]["coordinates"][0])) for f in d if 36.5 <= f["geometry"]["coordinates"][1] <= 42.5]
+
+
+def poll_poland(fetch):
+    """IMGW serves only each gauge's newest 10-minute sum (times in UTC): the OPERA instance reads it every 5 minutes
+    (synop.SynopFeed.loop) into <ROOT>/synop/pl_<day>.jsonl - gauges_pl reads those."""
+    lines = {}
+    for x in json.loads(fetch(POLAND, timeout=60)):
+        try:
+            t = _ms(x["opad_10min_data"], "%Y-%m-%d %H:%M:%S")
+            mm = float(x["opad_10min"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if t % 600_000 == 0 and mm >= 0:
+            lines.setdefault(time.strftime("%Y%m%d", time.gmtime(t / 1000)), set()).add(
+                json.dumps({"id": str(x["kod_stacji"]), "t": t, "mm": mm}))
+    d = os.path.join(ROOT, "synop")
+    os.makedirs(d, exist_ok=True)
+    for day, ls in lines.items():
+        with open(os.path.join(d, f"pl_{day}.jsonl"), "a") as f:
+            f.write("\n".join(sorted(ls)) + "\n")
+    return sum(len(v) for v in lines.values())
+
+
 def _list_sy(fetch):
     """The European SYNOP stations that report a 1-hour precipitation amount (synop.SynopFeed in the OPERA
     instance; not Germany - the DWD gauges are denser). Id "<country>-<WMO number>"."""
@@ -262,7 +297,7 @@ def _list_sy(fetch):
     return [("sy", f"{v[2]}-{wmo}", v[0], v[1]) for wmo, v in sorted(st.items()) if v[3] and v[2] != "de"]
 
 
-LISTS = {"de": _list_de, "at": _list_at, "ch": _list_ch, "it": _list_it, "iv": _list_iv, "cz": _list_cz, "ie": _list_ie,
+LISTS = {"pl": _list_pl, "pt": _list_pt, "de": _list_de, "at": _list_at, "ch": _list_ch, "it": _list_it, "iv": _list_iv, "cz": _list_cz, "ie": _list_ie,
          "se": _list_se, "fi": _list_fi, "en": _list_en, "hu": _list_hu, "sy": _list_sy}
 
 
@@ -635,6 +670,39 @@ def gauges_hu(ids, since, until):
     return out
 
 
+def gauges_pl(ids, since, until):
+    want, out = set(ids), {}
+    for day in range(int(since // 86400_000), int(until // 86400_000) + 1):
+        fp = os.path.join(ROOT, "synop", f"pl_{time.strftime('%Y%m%d', time.gmtime(day * 86400))}.jsonl")
+        if not os.path.exists(fp):
+            continue
+        for line in open(fp):
+            try:
+                r = json.loads(line)
+            except ValueError:
+                continue
+            if r["id"] in want and since <= r["t"] <= until:
+                out.setdefault(r["id"], {})[r["t"]] = r["mm"]
+    return out
+
+
+def gauges_pt(ids, since, until):
+    """IPMA's hourly precipitation ("precAcumulada", the hour ending at the stamp, UTC), spread over its six 10-minute
+    steps - only the hourly tables are meaningful."""
+    d = json.loads(_get(f"{PORTUGAL}/observations.json", timeout=120))
+    want, out = set(ids), {}
+    for stamp, sts in d.items():
+        t = _ms(stamp, "%Y-%m-%dT%H:%M")
+        if not since - 3600_000 <= t <= until:
+            continue
+        for sid, v in (sts or {}).items():
+            mm = (v or {}).get("precAcumulada")
+            if sid in want and mm is not None and mm >= 0:
+                for k in range(6):
+                    out.setdefault(sid, {})[t - k * 600_000] = mm / 6
+    return out
+
+
 def gauges_sy(ids, since, until):
     """SYNOP 1-hour amounts, spread evenly over the hour's six 10-minute steps - only the HOURLY tables are
     meaningful for this network (the 10-minute ones see a smooth hour)."""
@@ -651,7 +719,7 @@ def gauges_sy(ids, since, until):
     return out
 
 
-GAUGES = {"de": gauges_de, "at": gauges_at, "ch": gauges_ch, "it": gauges_it, "iv": gauges_iv, "cz": gauges_cz,
+GAUGES = {"pl": gauges_pl, "pt": gauges_pt, "de": gauges_de, "at": gauges_at, "ch": gauges_ch, "it": gauges_it, "iv": gauges_iv, "cz": gauges_cz,
           "ie": gauges_ie, "se": gauges_se, "fi": gauges_fi, "en": gauges_en, "hu": gauges_hu, "sy": gauges_sy}
 
 

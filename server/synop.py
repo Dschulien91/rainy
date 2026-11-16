@@ -203,6 +203,7 @@ class SynopFeed:
         return n_rep
 
     def loop(self):
+        import check_national_gauges as cng
         while True:
             t0 = time.time()
             try:
@@ -211,6 +212,10 @@ class SynopFeed:
                     self.log(f"synop: {n} European reports in {time.time() - t0:.0f} s")
             except Exception as e:
                 self.log(f"synop failed: {e}")
+            try:  # Poland's gauges serve only their newest value: kept here (check_national_gauges.gauges_pl)
+                cng.poll_poland(self.fetch)
+            except Exception as e:
+                self.log(f"poland gauges failed: {e}")
             time.sleep(300)
 
 
