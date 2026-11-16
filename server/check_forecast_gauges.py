@@ -16,6 +16,8 @@ Per country (and Italy together, and all) and lead, on the runs both instances h
   ... S-PROG               S-PROG alone (without the advected last image in the first hour)
   ... +model               S-PROG with the weather model's new showers (OPERA instance only)
   ... persist              the picture at the run's time, unchanged (what a forecast must beat)
+  ... later pic            the picture at the forecast's valid time (since 16.11.; the radar's own error at the gauges:
+                           the forecast cannot be better than this, and an "x" far above it means the forecast inflates)
 "x" = rain amount against the gauges, CSI / POD / FAR at 0.1 / 0.3 / 1 mm/h on 10-minute pairs (the forecast for the
 time T against the gauge sums ending at T and T + 10 min, as in check_national_gauges.py) and on sums over full
 hours ("hours": six runs' forecasts with the same lead, 0.2 / 1 / 3 mm - judge light rain there).
@@ -58,13 +60,23 @@ for name in DIRS:
     cols.append((name, name, "fc"))
     cols += [(f"{name[:3]}. {EXTRA[k]}", name, k) for k in EXTRA if all(k in data[name][t] for t in refs)]
     cols.append((f"{name[:3]}. persist", name, None))
+    cols.append((f"{name[:3]}. later pic", name, "later"))
+# "later pic" (16.11.): the instance's own picture at the forecast's VALID time at the same gauges = what the forecast is
+# trained to hit. forecast x ~ later pic x -> the amount error is the picture's (radar / gain); forecast x >> later pic x
+# -> the forecast itself inflates rain at the gauges (15./16.11.: Germany x1.7-1.9 at +60 with persistence x1.1-1.3).
 rows = {}   # (country, lead) -> [(gauge mm/h, one value per column ..., gauge index, valid time)]
 n = min(len(st), *(z["fc"].shape[1] for inst in data.values() for z in inst.values()))
 for t in refs:
     for li, lead in enumerate(cng.FC_LEADS):
         T = t + lead * 60_000
-        vals = np.stack([data[inst][t]["fc"][0] if key is None else data[inst][t][key][li + (key == "fc")]
-                         for _, inst, key in cols])[:, :n]
+        def col(inst, key):
+            if key is None:
+                return data[inst][t]["fc"][0][:n]
+            if key == "later":
+                z = data[inst].get(T)
+                return z["fc"][0][:n] if z is not None else np.full(n, np.nan, np.float32)
+            return data[inst][t][key][li + (key == "fc")][:n]
+        vals = np.stack([col(inst, key) for _, inst, key in cols])
         ok = np.isfinite(vals).all(0)
         for k in np.flatnonzero(ok):
             q = truth.get(st[k][0], {}).get(st[k][1], {})

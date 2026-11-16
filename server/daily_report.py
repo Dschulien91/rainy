@@ -55,10 +55,11 @@ JOBS = [
 RUNS = {"fcgrid": ("dwd", 288), "eugrid": ("own", 288), "sungrid": ("sat", None), "eusungrid": ("sat", None),
         "sunstation": ("sat", None), "eusunstation": ("sat", None)}
 MAX_STARTS, MAX_RAIN_AGE, MAX_SUN_AGE = 4, 20, 50
+SUB_INSTANCES = ("eun", "na")
 
 
-def _rows(name, day):
-    fp = os.path.join(LOG_DIR, f"{name}_{day}.jsonl")
+def _rows(name, day, sub=""):
+    fp = os.path.join(LOG_DIR, sub, f"{name}_{day}.jsonl")
     if not os.path.exists(fp):
         return []
     out = []
@@ -73,11 +74,18 @@ def _rows(name, day):
 def state(day):
     """The 'Zustand' section: lines, the ones needing attention marked '!!'."""
     out = []
-    starts = _rows("starts", day)
-    health = _rows("health", day)
+    # (label, rows): the de and eu instances share the root folder; the own Europe picture ("eun") and North America
+    # ("na") write into sub-folders and call themselves "eu" - until 16.11. they were missing here (a 135-start crash
+    # loop of na was invisible in this report)
+    groups = []
+    starts, health = _rows("starts", day), _rows("health", day)
     for ed in sorted({r["edition"] for r in starts + health}) or ["?"]:
-        st = [r for r in starts if r["edition"] == ed]
-        hs = [r for r in health if r["edition"] == ed]
+        groups.append((ed, [r for r in starts if r["edition"] == ed], [r for r in health if r["edition"] == ed]))
+    for sub in SUB_INSTANCES:
+        st, hs = _rows("starts", day, sub), _rows("health", day, sub)
+        if st or hs:
+            groups.append((sub, st, hs))
+    for ed, st, hs in groups:
         vs = sorted({r["v"] for r in st + hs})
         out.append(f"Instanz {ed}: {len(st)} Starts, Versionen {', '.join(vs) or '-'}"
                    + (f"   !! mehr als {MAX_STARTS} Starts: Absturzschleife oder viele Deploys" if len(st) > MAX_STARTS else ""))
@@ -87,6 +95,8 @@ def state(day):
         up = len(hs) / 288
         out.append(f"  Laufzeit: {len(hs)} von 288 Messpunkten ({100 * up:.0f} %)" + ("   !! Lücke" if up < 0.9 else ""))
         for key, label, limit in (("rain_age", "Radarbild", MAX_RAIN_AGE), ("sun_age", "Satellitenbild", MAX_SUN_AGE)):
+            if ed == "eun" and key == "sun_age":  # the own Europe picture has no sunny
+                continue
             v = [r[key] for r in hs if r.get(key) is not None]
             if v:
                 late = sum(x > limit for x in v)

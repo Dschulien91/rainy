@@ -30,6 +30,10 @@ TRUTH = {  # kind: (folder, station list, file prefix, value column)
 RAIN_CELL = (0.35, 0.5)          # thin the ~1400 rain gauges to one per cell (deg lat, lon): ~300 stations
 TRUTH_EVERY_S = 3600
 RAIN_EVERY_MS = 15 * 60_000      # rain forecasts are recorded at most every 15 min (enough for statistics)
+# Wait this long after a new DWD run for our own forecast of the same run before recording without it. Until 16.11.
+# the recorder took the run as soon as DWD's forecast was there; ours comes ~1-4 min later, so 7-10 % of the records
+# (20 % on days with restarts) had no "own" and score.py compared DWD and ours on different cases.
+OWN_WAIT_MS = 5 * 60_000
 MAP_BOX = (2.0, 46.0, 19.0, 56.0)  # lon/lat box of the small verification maps (Germany and neighbours)
 MAP_W, MAP_H = 340, 300          # ~4 km pixels
 MAP_LEADS = (0, 60, 120)
@@ -44,6 +48,7 @@ class Recorder:
         self.fetch, self.log, self.mosaic, self.clouds, self.merc = fetch, log, mosaic, clouds, merc
         self.stations = {}           # kind -> {"id": [...], "lat": array, "lon": array}
         self.cloud_ref, self.rain_key, self.rain_at = None, None, 0
+        self.own_wait = (None, 0)    # (rain_at of the last record, first try since) while waiting for our own forecast
         self.truth_at = 0
         lon = np.linspace(MAP_BOX[0], MAP_BOX[2], MAP_W)
         lat = np.linspace(MAP_BOX[3], MAP_BOX[1], MAP_H)
@@ -144,6 +149,13 @@ class Recorder:
         now = int(time.time() * 1000)
         if key == self.rain_key or now - self.rain_at < RAIN_EVERY_MS:
             return
+        de = self.mosaic.de
+        have_own = de.own_ref is not None and de.own_ref == de.ref  # our own forecast exists for this run
+        if not have_own:
+            if self.own_wait[0] != self.rain_at:  # first try of this cycle; a newer DWD run does not restart the wait
+                self.own_wait = (self.rain_at, now)
+            if now - self.own_wait[1] < OWN_WAIT_MS:
+                return  # try again in a minute: DWD's and our forecast must be recorded on the same cases
         X, Y = self._station_xy("rain")
         s = self.stations["rain"]
         d = np.array([-1500.0, 0.0, 1500.0])
@@ -161,8 +173,6 @@ class Recorder:
         share, share_own = [], []
         frames = self.mosaic.frames()
         ts, fc, rate, opera, noblend, own, maps = [], [], [], [], [], [], {}
-        de = self.mosaic.de
-        have_own = de.own_ref is not None and de.own_ref == de.ref  # our own forecast exists for this run
         eu = self.mosaic.regions["eu"]
         raw = getattr(eu, "fc_raw", None) or {}
         ec, er = (((np.asarray(v, np.float64) + 0.5) / 3 - 0.5).astype(np.float32) for v in eu.to_pixels(PX, PY))
