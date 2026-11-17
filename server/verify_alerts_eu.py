@@ -10,8 +10,14 @@ its gauges (rainy_server.EuropeOpera.record_alert_inputs, since 16.11.2026): <LO
 The columns are the instance's gauge list: Europe (both instances) = check_national_gauges.stations()
 (<ROOT>/eun/natobs/stations.json, appended only - older files have fewer columns), North America =
 <LOG_DIR>/metar/stations.json (northamerica.MetarGauges). Truth: Europe = the gauge archive <ROOT>/gaugetruth
-(10-minute sums per UTC day; "--live" adds what the sources have right now), North America = the hourly
+(10-minute sums per UTC day; "--live" adds what the sources have right now), North America = since 17.11.2026 the
+same kind of archive <LOG_DIR>/gaugetruth for ~1100 gauges (minute_gauges.py: US ASOS 5-minute reports, Canadian
+SWOB minute records; groups "USA / Canada, 10-min") and for the other gauges the hourly
 <LOG_DIR>/metar/<YYYYMMDD>.jsonl (METAR hours end at the report, ~:53; Canada's SWOB on the full hour).
+North America: a US 10-minute interval also counts as wet when a 5-minute report in it had precipitation as present
+weather (RA, DZ, SN ...; the ASOS precipitation identifier reacts long before the gauge's first 0.01 inch = 0.254 mm:
+17.11.2026, gauge wet in the 10 min after a run with >= 50 % of its circle wet: 35 % on the gauge alone, 89 % with
+the present weather - Europe's good networks 61-95 %). --gauge-only: the gauge alone.
 
 Rules (per run and gauge, as AlertEngine.evaluate):
   issue        the gauge's circle is dry in the picture (share < P_START * 0.6, else "raining now", no alert) and,
@@ -43,7 +49,8 @@ than --min-n counted alerts are listed on one line.
 
   docker exec -w /app deploy-api-eun-1 python verify_alerts_eu.py --hours 48      (own picture, Europe)
   docker exec -w /app deploy-api-eu-1 python verify_alerts_eu.py --hours 48       (OPERA, same gauges)
-  docker exec -w /app deploy-api-na-1 python verify_alerts_eu.py --hours 48 [--na] (auto when LOG_DIR ends in /na)
+  docker exec -w /app deploy-api-na-1 python verify_alerts_eu.py --hours 48 [--na] [--gauge-only] (--na: auto
+                                                                                   when LOG_DIR ends in /na)
   options: --day YYYYMMDD (runs issued that UTC day instead of --hours), --min-n 20, --live (Europe: also the
            sources' current values on top of the archive), --rel-groups (reliability per group, not only overall)
 """
@@ -120,6 +127,8 @@ def main():
     ap.add_argument("--na", action="store_true", help="North America (auto when LOG_DIR ends in /na)")
     ap.add_argument("--live", action="store_true", help="Europe: also the sources' current values (slow)")
     ap.add_argument("--rel-groups", action="store_true", help="reliability table per group, not only overall")
+    ap.add_argument("--gauge-only", action="store_true",
+                    help="North America: the gauge alone (default: also present weather with precipitation = wet)")
     a = ap.parse_args()
 
     log_dir = cng.LOG_DIR
@@ -149,7 +158,7 @@ def main():
         except (OSError, ValueError):
             st = []
         gkey = [s[0] for s in st]
-        hourly = np.ones(len(st), bool)
+        hourly = np.ones(len(st), bool)      # until the 10-minute archive says otherwise (below)
     else:
         st = cng.stations()
         if not st:  # the OPERA instance without the shared list keeps its own (rainy_server.EuropeOpera.gauges)
@@ -173,10 +182,35 @@ def main():
     def bix(t):
         return (np.asarray(t, np.int64) - t0) // TEN
 
-    tm = None                                       # 10-minute sums (gauges, bins); Europe only
+    tm = None                                       # 10-minute sums (gauges, bins)
     hours = {}                                      # gauge -> (hour ends, mm) for hourly gauges
     if na:
-        idx = {s[1]: k for k, s in enumerate(st)}
+        # the 10-minute archive (minute_gauges.py): those gauges are scored as 10-minute networks
+        tm = np.full((ns, nb), np.nan, np.float32)
+        kidx = {f"{s[0]}:{s[1]}": k for k, s in enumerate(st)}
+        for day in range(int(t0 // 86400_000), int(t1 // 86400_000) + 1):
+            fp = os.path.join(log_dir, "gaugetruth", time.strftime("%Y%m%d", time.gmtime(day * 86400)) + ".npz")
+            try:
+                z = np.load(fp)
+                ids, mm = [str(x) for x in z["ids"]], z["mm"].astype(np.float32)
+                wx = z["wx"] if not a.gauge_only and "wx" in z.files else None
+            except (OSError, ValueError, KeyError):
+                continue
+            tt = day * 86400_000 + np.arange(144, dtype=np.int64) * TEN
+            inside = (tt >= t0) & (tt <= t1)
+            for i, key in enumerate(ids):
+                k = kidx.get(key)
+                if k is None:
+                    continue
+                row = mm[i]
+                if wx is not None:   # precipitation reported: wet even without a 0.01 inch tip
+                    row = np.where(wx[i] == 1, np.fmax(row, WET10), row)
+                ok = np.isfinite(row) & inside
+                tm[k, bix(tt[ok])] = row[ok]
+        ten_na = np.isfinite(tm).any(axis=1)
+        hourly = ~ten_na
+        gkey = [f"{s[0]}10" if ten_na[k] else s[0] for k, s in enumerate(st)]
+        idx = {s[1]: k for k, s in enumerate(st) if hourly[k]}
         ser = {}
         for day in range(int(t0 // 86400_000) - 1, int(t1 // 86400_000) + 1):
             fp = os.path.join(log_dir, "metar", time.strftime("%Y%m%d", time.gmtime(day * 86400)) + ".jsonl")
@@ -424,10 +458,22 @@ def main():
 
     keys = sorted(set(gkey))
     if na:
-        names = {"us": "USA (METAR gauges)", "ca": "Canada (ECCC SWOB gauges)"}
+        names = {"us": "USA (METAR gauges, hourly)", "ca": "Canada (ECCC SWOB gauges, hourly)",
+                 "us10": "USA (ASOS 5-minute reports, 10-min sums" + (" + present weather)" if not a.gauge_only else ")"),
+                 "ca10": "Canada (SWOB minute records, 10-min sums)"}
+        dense = [k for k in keys if k.endswith("10")]
+        hr = [k for k in keys if not k.endswith("10")]
+        if dense:
+            section("10-minute gauges: hit = >= 0.05 mm in a 10-min interval overlapping the predicted start +- 15 min"
+                    + (" (US: or precipitation as present weather; --gauge-only: not)" if not a.gauge_only else ""),
+                    [(names.get(k, k), (k,)) for k in dense] + [("All North America, 10-minute gauges", tuple(dense))])
+            reliability("all 10-minute gauges", ten)
+            if a.rel_groups:
+                for k in dense:
+                    reliability(names.get(k, k), np.array([x == k for x in gkey]))
         section("HOURLY gauges - COARSER: hit = >= 0.1 mm in the hour containing the start (+ next hour if the start is "
                 "within 15 min of its end)",
-                [(names.get(k, k), (k,)) for k in keys] + [("All North America", tuple(keys))])
+                [(names.get(k, k), (k,)) for k in hr] + [("All North America, hourly gauges", tuple(hr))])
     else:
         import synop
         dense = [k for k in keys if k not in HOURLY_NETS and not k.startswith("sy-")]

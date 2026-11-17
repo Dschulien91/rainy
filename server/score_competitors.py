@@ -17,8 +17,12 @@ Join per competitor run R (a full hour; CHMI / KNMI / ECCC also :30) and lead L:
                               (all variants alike), thresholds 0.2 / 1 / 3 mm
               SYNOP ("sy", hourly amounts spread over their six 10-min steps) and Portugal: hours only (at +30 / +90 the
               centred hour IS a SYNOP hour; at +60 / +120 it is half of two).
-              North America: the METAR / SWOB hour whose centre is within 15 min of V (ECCC is read for V = :30:
-              METAR hours end ~:53, SWOB hours at :00).
+              North America: gauges of the 10-minute archive <LOG>/gaugetruth (minute_gauges.py, since 17.11.2026:
+              US ASOS 5-minute reports, Canadian SWOB minute records) as the 10-minute networks above (groups
+              "... 10-min"); the others: the METAR / SWOB hour whose centre is within 15 min of V (ECCC is read for
+              V = :30: METAR hours end ~:53, SWOB hours at :00).
+              ECCC rows written before 17.11.2026 (no "ref" field) are skipped: they hold ECCC's newest run at
+              reading time, not the named one (bench_competitors.py; --old-eccc reads them anyway).
 Only cases where every column and the truth exist are scored (the same gauges, runs and leads for all rows).
 The rows also say how late each provider's run was read ("read after", the competitor's latency upper bound).
 
@@ -82,10 +86,15 @@ def group_name(g):
     if g.startswith("sy-"):
         import synop
         return f"{synop.NAMES.get(g[3:], g[3:])} (SYNOP)"
-    return {"us": "USA (METAR gauges)", "ca": "Canada (SWOB gauges)"}.get(g) or cng.NAMES.get(g, g)
+    return {"us": "USA (METAR gauges, hourly)", "ca": "Canada (SWOB gauges, hourly)",
+            "us10": "USA (ASOS 5-minute reports, 10-min sums)",
+            "ca10": "Canada (SWOB minute records, 10-min sums)"}.get(g) or cng.NAMES.get(g, g)
 
 
 # ---------- inputs ----------
+SKIPPED = [0]   # ECCC rows of the wrong run (before the DIM_REFERENCE_TIME fix)
+
+
 def competitor_rows():
     out = []
     only = opt("--provider")
@@ -98,6 +107,9 @@ def competitor_rows():
             except ValueError:
                 continue
             if r.get("var", "rr") == "rr" and SINCE <= r["run"] < UNTIL:
+                if r["p"] == "eccc" and r.get("ref") != "dim" and "--old-eccc" not in args:
+                    SKIPPED[0] += 1
+                    continue
                 if r["p"] == "incabe" and opt("--incabe-scale"):
                     f = float(opt("--incabe-scale")) / float(r.get("scale", 1.0))
                     for kind in ("v", "pt"):
@@ -161,6 +173,25 @@ def truth_na(keys):
     return out
 
 
+def truth_na_ten():
+    """{"us:KDSM": {t: mm in the 10 minutes ending t}} from <LOG>/gaugetruth (minute_gauges.py)."""
+    out = {}
+    since, until = SINCE - 3600_000, UNTIL + 4 * 3600_000
+    for day in range(int(since // 86400_000), int(until // 86400_000) + 1):
+        fp = os.path.join(LOG, "gaugetruth", time.strftime("%Y%m%d", time.gmtime(day * 86400)) + ".npz")
+        try:
+            z = np.load(fp)
+            ids, mm = [str(x) for x in z["ids"]], z["mm"].astype(np.float32)
+        except (OSError, ValueError, KeyError):
+            continue
+        tt = day * 86400_000 + np.arange(144, dtype=np.int64) * 600_000
+        for i, key in enumerate(ids):
+            ok = np.flatnonzero(np.isfinite(mm[i]) & (tt >= since) & (tt <= until))
+            if len(ok):
+                out.setdefault(key, {}).update(zip(tt[ok].tolist(), mm[i, ok].tolist()))
+    return out
+
+
 def hour_na(ser, valid):
     """mm of the gauge hour whose centre is closest to `valid` (within 15 min)."""
     best = None
@@ -180,6 +211,9 @@ def main():
         sys.exit("no forecast runs of our instances (fcgauge) found")
     keys = {k for r in rows for k in r["ids"]}
     truth = truth_na(keys) if NA else truth_europe(keys)
+    ten = truth_na_ten() if NA else {}
+    if SKIPPED[0]:
+        print(f"({SKIPPED[0]} ECCC rows from before the run fix skipped - they hold its newest run, not the named one)")
     tag = {"European": "EU", "own": "own", "ours": ""}   # short: the table prints 12 characters per label
     labels = ["competitor"] + [x for n in INST for x in (f"ours {tag[n]}".strip(), f"persist {tag[n]}".strip())]
     data = {}     # (provider, group, lead, "pairs" | "hours") -> [values per label + [truth]]
@@ -213,13 +247,16 @@ def main():
                     continue
                 net, sid = key.split(":", 1)
                 g = group(ST[k])
-                if NA:
+                if NA and key in ten:      # 10-minute archive: as a 10-minute network
+                    q, g = ten[key], g + "10"
+                elif NA:
                     h = hour_na(truth.get(sid, {}), valid)
                     if h is not None:
                         data.setdefault((p, g, lead, "hours"), []).append(vals + [h])
                     continue
-                q = truth.get(net, {}).get(sid, {})
-                if net not in HOURLY_NETS:
+                else:
+                    q = truth.get(net, {}).get(sid, {})
+                if net not in HOURLY_NETS or g.endswith("10"):
                     two = [q.get(valid), q.get(valid + 600_000)]
                     if None not in two:
                         data.setdefault((p, g, lead, "pairs"), []).append(vals + [np.mean(two) * 6])

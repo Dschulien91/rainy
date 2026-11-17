@@ -37,8 +37,14 @@ Providers (all read anonymously through the server's fetch(); no account, no key
           geo.weather.gc.ca, layer Radar_1km_RainPrecipRate-Extrapolation (mm/h, the rain assumption everywhere;
           "Undetected" = 0, "Search returned no results" = outside), runs every 6 min to +72 min, ~20 min after their
           time, kept 3 h. One request per point and time: a fixed, spread-out sample of up to SAMPLE_PER_COUNTRY US
-          and Canadian gauges, the :00 run for +30 and the :30 run for +60 (both valid at :30, where the METAR / SWOB
-          hours are centred), <= 4 requests/s. The snow layer (Radar_1km_SnowPrecipRate-Extrapolation) is in cm/h of
+          and Canadian gauges (per 1-degree cell a gauge with 10-minute truth first, minute_gauges.py), the :00 run
+          for +30 and the :30 run for +60 (both valid at :30, where the METAR / SWOB hours are centred), <= 4
+          requests/s. The run is chosen with the WMS dimension parameter DIM_REFERENCE_TIME (17.11.2026): GeoMet
+          IGNORES a plain "reference_time=" and answers from the NEWEST run, checking "time" against that run's
+          range - rows before then (no "ref" field) hold the newest run at reading time (~:12-:18 for the "+30" of
+          :00, i.e. a lead of ~15 min, ~45 min for the "+60") and failed with "time outside valid hours" whenever a
+          run was read after a newer one covered its valid time (restarts, retries). score_competitors.py skips them.
+          The snow layer (Radar_1km_SnowPrecipRate-Extrapolation) is in cm/h of
           SNOW depth and returns values wherever there are echoes (same reflectivity, snow Z-S), not a phase-resolved
           water equivalent -> not used.
   knmi    KNMI precipitation nowcast (operational pySTEPS, deterministic, from the real-time 5-min accumulation
@@ -665,32 +671,46 @@ class Eccc(Provider):
     SAMPLE_PER_COUNTRY = 200
     PAUSE_S = 0.25
     MAX_ERRORS = 10                 # consecutive failures that end the round
+    prefer = None                   # callable -> {"network:id"} gauges with 10-minute truth (CompetitorBench, NA)
 
     def select(self, stations):
         """A fixed, spread-out sample: the stations ordered by a hash of their id (stable when the list grows), the
-        first one per 1 x 1 degree cell, then the first SAMPLE_PER_COUNTRY of those per country."""
+        first one per 1 x 1 degree cell - a gauge with 10-minute truth first (17.11.2026: scorable on 10-minute
+        pairs) - then the first SAMPLE_PER_COUNTRY of those per country."""
+        try:
+            pref = set(self.prefer()) if self.prefer else set()
+        except Exception:
+            pref = set()
         out = []
         for country in ("us", "ca"):
-            cand = sorted((s for s in stations if s[0] == country), key=lambda s: hashlib.md5(s[1].encode()).hexdigest())
+            cand = sorted((s for s in stations if s[0] == country),
+                          key=lambda s: (_key(s) not in pref, hashlib.md5(s[1].encode()).hexdigest()))
             cells, pick = set(), []
             for s in cand:
                 cell = (int(s[2] // 1), int(s[3] // 1))
                 if cell not in cells:
                     cells.add(cell)
                     pick.append(s)
+            pick.sort(key=lambda s: hashlib.md5(s[1].encode()).hexdigest())
             out += pick[:self.SAMPLE_PER_COUNTRY]
         return out
 
-    def newest_run(self):
+    def served_runs(self):
+        """(oldest, newest) run time the WMS serves (ms; 0, 0 when the capabilities have no reference_time)."""
         x = self.get(f"{self.WMS}&request=GetCapabilities&layer={self.LAYER}", timeout=60).decode("utf-8", "replace")
         m = re.search(r'<Dimension name="reference_time"[^>]*>([^<]+)</Dimension>', x)
-        return _ms_iso(m.group(1).split("/")[1]) if m else 0
+        if not m:
+            return 0, 0
+        parts = m.group(1).split("/")
+        return _ms_iso(parts[0]), _ms_iso(parts[1])
 
     def value(self, lat, lon, valid, run):
+        # DIM_REFERENCE_TIME, not reference_time: GeoMet ignores the latter and answers from the newest run (module
+        # docstring); checked 17.11.2026 - with DIM_ the runs differ at the same valid time, +72 min is the last step
         d = 0.005
         url = (f"{self.WMS}&request=GetFeatureInfo&layers={self.LAYER}&query_layers={self.LAYER}&crs=EPSG:4326"
                f"&bbox={lat - d:.4f},{lon - d:.4f},{lat + d:.4f},{lon + d:.4f}&width=3&height=3&i=1&j=1"
-               f"&info_format=text/plain&time={_iso(valid)}&reference_time={_iso(run)}")
+               f"&info_format=text/plain&time={_iso(valid)}&DIM_REFERENCE_TIME={_iso(run)}")
         text = self.get(url, timeout=30).decode("utf-8", "replace")
         if "Search returned no results" in text:
             return np.nan
@@ -703,8 +723,11 @@ class Eccc(Provider):
         return float(m.group(1))
 
     def take(self, run, stations):
-        if self.newest_run() < run:
+        oldest, newest = self.served_runs()
+        if newest < run:
             raise NotReady("run not served yet")
+        if oldest > run:
+            raise Gone("run no longer served")
         st = self.select(stations)
         if not st:
             return []
@@ -724,7 +747,8 @@ class Eccc(Provider):
                         raise RuntimeError(f"{errors} errors in a row after {done} points: {e}")
                     break
             time.sleep(self.PAUSE_S)
-        return [self.row(run, st, [lead], [lead], [vals], [vals], fp=0)]
+        # "ref": the run was chosen with DIM_REFERENCE_TIME (rows without it are the newest run, not this one)
+        return [self.row(run, st, [lead], [lead], [vals], [vals], fp=0, ref="dim")]
 
 
 EUROPE = (IncaBe, Chmi, Knmi, Meander, MetNo)   # priority order: the shortest windows first
@@ -738,6 +762,24 @@ class CompetitorBench:
         self.dir = os.path.join(log_dir, "bench")
         self._stations, self._st, self._st_at = stations, [], 0.0
         self.providers = [cls(fetch, log) for cls in (NORTH_AMERICA if na else EUROPE) if only in (None, cls.name)]
+        self.truth_dir, self._minute, self._minute_at = os.path.join(log_dir, "gaugetruth"), set(), 0.0
+        for p in self.providers:
+            if p.na:
+                p.prefer = self.minute_keys
+
+    def minute_keys(self):
+        """North America: the gauges in the 10-minute archive of the last two UTC days (minute_gauges.py), hourly."""
+        if time.time() - self._minute_at > 3600:
+            self._minute_at = time.time()
+            keys = set()
+            for back in (0, 1):
+                fp = os.path.join(self.truth_dir, time.strftime("%Y%m%d", time.gmtime(time.time() - back * 86400)) + ".npz")
+                try:
+                    keys |= {str(x) for x in np.load(fp)["ids"]}
+                except (OSError, ValueError, KeyError):
+                    pass
+            self._minute = keys or self._minute
+        return self._minute
 
     def stations(self):
         if callable(self._stations):

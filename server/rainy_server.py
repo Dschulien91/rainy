@@ -105,7 +105,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v1.53"
+VERSION = "server-v1.54"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -2003,6 +2003,13 @@ def main_eu():
         threading.Thread(target=bench_inca.IncaBench(fetch, log, eu, mosaic.merc).loop, daemon=True).start()
     else:  # the US / Canadian rain gauges (METAR, SWOB) and the model at them for the North America instance
         threading.Thread(target=eu.metar.loop, daemon=True).start()
+        if os.environ.get("NA_MINUTE_GAUGES", "1") != "0":
+            # 10-minute sums at ~1100 of those gauges (ASOS 5-minute reports via the IEM, ECCC SWOB minute records)
+            # -> verify_log/na/gaugetruth: the truth for alerts and forecast timing (minute_gauges.py, 17.11.2026)
+            import minute_gauges
+            threading.Thread(target=minute_gauges.MinuteGauges(
+                fetch, os.environ.get("VERIFY_LOG_DIR", "."), log, eu.metar.stations, eu.metar.precip_ok).loop,
+                daemon=True).start()
         import bench_competitors  # ECCC's radar extrapolation (Canada + USA, to +72 min) at a sample of our gauges
         threading.Thread(target=bench_competitors.CompetitorBench(
             fetch, log, os.environ.get("VERIFY_LOG_DIR", "."), eu.metar.stations, na=True).loop, daemon=True).start()

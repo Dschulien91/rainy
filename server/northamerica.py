@@ -144,6 +144,27 @@ def metar_rows(raw):
         yield sid, lat, lon, t, mm
 
 
+def precip_status(raw):
+    """{station: its newest report in the METAR cache says the precipitation sensor works ("AO2", no "PNO")} - the
+    5-minute reports (minute_gauges.py) carry no remarks, and a missing P group there means "nothing" only with a
+    working sensor."""
+    import csv
+    rows = csv.reader(gzip.decompress(raw).decode("utf-8", "replace").splitlines())
+    head = next(rows, None)
+    if not head or head[0] != "raw_text":
+        return {}
+    i_sid, i_t = head.index("station_id"), head.index("observation_time")
+    out, newest = {}, {}
+    for r in rows:
+        if len(r) <= max(i_sid, i_t):
+            continue
+        sid, t = r[i_sid], r[i_t]
+        if t >= newest.get(sid, ""):
+            newest[sid] = t
+            out[sid] = " AO2" in r[0] and " PNO" not in r[0]
+    return out
+
+
 # ---------- rain gauges: Canada (ECCC SWOB, 16.11.2026) ----------
 # Canadian METARs carry no precipitation amount. ECCC's surface weather observations (SWOB) do: the MSC GeoMet OGC API
 # serves every station's hourly record (open, no account); only the federal networks are kept (MSC, NAV CANADA, DND -
@@ -188,6 +209,7 @@ class MetarGauges:
         self.seen = set()
         self.ca_done = set()   # hours of SWOB already read
         self.sky = MetarSky()   # cloud cover, the station truth of sunny for the Americas (sunny_na.py)
+        self.precip_ok = {}     # station -> its newest report has "AO2" and no "PNO" (MinuteGauges reads it)
 
     def stations(self):
         import json
@@ -206,6 +228,7 @@ class MetarGauges:
         raw = self.fetch(METAR_URL, timeout=60)
         for sid, lat, lon, t, cover in metar_sky(raw):
             self.sky.add(sid, lat, lon, t, cover)
+        self.precip_ok.update(precip_status(raw))
         for sid, lat, lon, t, mm in metar_rows(raw):
             if sid not in known:
                 new_st.append(("us", sid, round(lat, 4), round(lon, 4)))

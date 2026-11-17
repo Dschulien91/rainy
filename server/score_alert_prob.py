@@ -10,7 +10,11 @@ Data (written by the running instances, nothing is fetched):
            10-minute gauges).
   fcalert  Europe instances: <LOG_DIR>/fcalert/<ref>.npz (rainy_server.record_alert_inputs, since 16.11.2026) + the
            gauge archive (check_national_gauges), 10-minute networks only.
-  North America is not scored: its truth is hourly METAR / SWOB, too coarse for a +-15 min window.
+           North America (since 17.11.2026): <LOG_DIR>/fcalert + the 10-minute archive <LOG_DIR>/gaugetruth
+           (minute_gauges.py: US ASOS 5-minute reports, Canadian SWOB minute records); only those ~1100 gauges,
+           the others have hourly METAR / SWOB truth only (too coarse for a +-15 min window). A US interval with
+           precipitation as present weather counts as wet too (the 0.01 inch gauge alone misses light rain for
+           tens of minutes: verify_alerts_eu.py); --gauge-only: the gauge alone.
   Default: de when EDITION is de (or unset), fcalert otherwise.
 
 Truth and scores (as verify_alerts.py / verify_alerts_eu.py, so the numbers compare):
@@ -31,6 +35,7 @@ Not simulated (as in the verify scripts): cooldown, MAX_PER_DAY, quiet hours, ea
 
   docker exec -w /app deploy-api-1 python score_alert_prob.py                 (Germany)
   docker exec -w /app deploy-api-eun-1 python score_alert_prob.py             (Europe, own picture; eu: OPERA)
+  docker exec -w /app deploy-api-na-1 python score_alert_prob.py [--gauge-only] (North America, 10-minute gauges)
   options: --days N (newest days only; default all for de, 2 for fcalert), --thr 0.6,0.65,0.7, --fit
            (leave-one-day-out refit: held-out reliability and the RAIN_ALERT_COEF line for the instance),
            --all-nets (Europe: also SUSPECT_NETS), --source de|fcalert
@@ -127,13 +132,20 @@ def load_de(days):
             "net": np.array(["de"] * len(ids))}
 
 
-def load_fcalert(days, all_nets):
+def load_fcalert(days, all_nets, wx=False):
     import check_national_gauges as cng
     d = cng.LOG_DIR
-    if os.path.basename(d.rstrip("/\\")) == "na":
-        sys.exit("North America: hourly gauges only, a +-15 min window cannot be scored (see the docstring)")
-    st = cng.stations()
-    if not st:
+    na = os.path.basename(d.rstrip("/\\")) == "na"
+    st = []
+    if na:   # North America: the gauge list of northamerica.MetarGauges (fcalert's columns)
+        try:
+            with open(os.path.join(d, "metar", "stations.json")) as f:
+                st = [tuple(s) for s in json.load(f)]
+        except (OSError, ValueError):
+            st = []
+    else:
+        st = cng.stations()
+    if not st and not na:
         try:
             with open(os.path.join(cng.OBS_DIR, "stations.json")) as f:
                 st = [tuple(s) for s in json.load(f)]
@@ -148,20 +160,34 @@ def load_fcalert(days, all_nets):
         sys.exit(f"no fcalert run in {fca} in the last {days:g} days")
     net = np.array([s[0] for s in st])
     use_g = ~np.isin(net, ("sy", "pt", "ct"))           # hourly networks (verify_alerts_eu.HOURLY_NETS)
-    if not all_nets:
+    if not all_nets and not na:
         use_g &= ~np.isin(net, SUSPECT_NETS)
     t0 = (refs[0] - 3 * HOUR) // HOUR * HOUR
     t1 = refs[-1] + 4 * HOUR
     tm = truth_matrix(len(st), t0, t1)
     idx = {f"{s[0]}:{s[1]}": k for k, s in enumerate(st)}
     for day in range(int(t0 // 86400_000), int(t1 // 86400_000) + 1):
+        wxd = {}
+        if wx:   # North America: the 5-minute reports' present weather (minute_gauges.py "wx")
+            try:
+                z = np.load(cng._day_file(day))
+                if "wx" in z.files:
+                    wxd = dict(zip((str(x) for x in z["ids"]), z["wx"]))
+            except (OSError, ValueError, KeyError):
+                pass
         for key, row in cng._day_load(day).items():   # one day in memory at a time
             k = idx.get(key)
             if k is None:
                 continue
+            if key in wxd:
+                row = np.where(wxd[key] == 1, np.fmax(row, WET10), row)
             tt = day * 86400_000 + np.arange(144, dtype=np.int64) * TEN
             ok = np.isfinite(row) & (tt >= t0) & (tt <= t1)
             tm[k, (tt[ok] - t0) // TEN] = row[ok]
+    if na:   # only the gauges of the 10-minute archive
+        use_g &= np.isfinite(tm).any(axis=1)
+        if not use_g.any():
+            sys.exit(f"North America: no 10-minute gauge truth in {cng.TRUTH_DIR} for these runs (minute_gauges.py)")
     S, R, issue, g = [], [], [], []
     for ref in refs:
         try:
@@ -340,9 +366,11 @@ def main():
     ap.add_argument("--thr", default="0.5,0.55,0.6,0.65,0.7,0.75")
     ap.add_argument("--fit", action="store_true", help="leave-one-day-out refit and the RAIN_ALERT_COEF line")
     ap.add_argument("--all-nets", action="store_true", help="Europe: include SUSPECT_NETS")
+    ap.add_argument("--gauge-only", action="store_true",
+                    help="North America: the gauge alone (default: also precipitation as present weather = wet)")
     a = ap.parse_args()
     src = a.source or ("de" if os.environ.get("EDITION", "de") == "de" else "fcalert")
-    d = load_de(a.days or 0) if src == "de" else load_fcalert(a.days or 2, a.all_nets)
+    d = load_de(a.days or 0) if src == "de" else load_fcalert(a.days or 2, a.all_nets, not a.gauge_only)
     add_truth(d)
     S, lead, Y = d["S"], d["lead"], d["Y"]
     el = np.isfinite(S[:, 0]) & (S[:, 0] < alerts.P_START * 0.6) & d["gdry"]
@@ -363,7 +391,8 @@ def main():
             if m.sum() >= 30:
                 cells.append(f"{nt} {np.mean(v[m] >= WET10):.0%} ({int(m.sum())})")
         print("truth check, gauge wet in the 10 min after a run with >= 50 % of its circle wet (should be high):\n  "
-              + ", ".join(cells) + ("" if a.all_nets else f"; left out: {', '.join(SUSPECT_NETS)}"))
+              + ", ".join(cells) + ("" if a.all_nets or not np.isin(d["net"], SUSPECT_NETS).any()
+                                else f"; left out: {', '.join(SUSPECT_NETS)}"))
 
     P = probabilities(d)
     title = "coefficients in use (" + ("RAIN_ALERT_COEF" if alerts.PROB_COEF != alerts.PROB_COEF_DE else "Germany default") + ")"
