@@ -10,9 +10,11 @@ Everything else is SunnyDE (sunny_de.py): k = 1 - 0.95 x cloud probability stand
 motion, the 2 h forecast, the map frames, the atlas tiles, the grid verification and the warm start run unchanged on an
 America grid (Web Mercator, 6 km cells, 135 W - 50 W, 12 N - 60 N; GOES-East sees it all, the far north-west at a
 flat angle). Verified at the stations against the METAR cloud cover (northamerica.MetarSky, rough: 1 - cover vs the sun share).
-Not yet: GOES-West (Alaska, Hawaii, the Pacific coast at a better angle), the weather-model blend.
+Not yet: GOES-West (Alaska, Hawaii, the Pacific coast at a better angle). The weather-model shadows only with
+SUNNY_NA_MODEL=1.
 """
 import io
+import os
 import re
 import time
 from datetime import datetime, timezone
@@ -59,6 +61,15 @@ class SunnyGoes(sunny_de.SunnyDE):
         """sky: northamerica.MetarSky - the METAR cloud cover as the station truth (filled by the instance's METAR loop)."""
         super().__init__(fetch, log, None, None, stations=False, area=AMERICA)
         self._idx = None
+        # Weather model (self-hosted Open-Meteo, best match = HRRR over the USA) for the model shadows, above all
+        # "satnwp" (sunny_de.NWP_*: quantile-mapped model blended in beyond +30 min). Off by default: ~65k points every
+        # 30 min are a new load on the shared Open-Meteo, and offline (tune_sun.py --region na, 16.11., 47 runs, HRRR 15-min
+        # runs as old as they were then) the HRRR did not fit the GOES cloud mask: corrected model share error at ref
+        # 0.25-0.28 (ICON-D2 vs DWD SID: median 0.14), so the skill factor keeps its weight at 0 ("satnwp" = "sat");
+        # ungated it was worse on the grid (+120 MAE .167 -> .199-.209). Only a station truth can say more.
+        om = os.environ.get("OPENMETEO_URL") if os.environ.get("SUNNY_NA_MODEL", "0") == "1" else None
+        if om:
+            self.model = sunny_de.SunModel(self.grid, om, lambda: True, log, lats=(12.0, 60.0), lons=(-135.0, -50.0), deg=0.25)
         if sky is not None:
             self.stations = sky
             self.verify = sunny_de.SunVerify(self, sky, log, prefix="na")

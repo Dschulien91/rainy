@@ -7,6 +7,8 @@ duration SD_10): MAE of the sun share and the hit rate of "sunny or not".
   python score_sun.py sat pers kpers model nwp [--hours 24 | --all | --day 20261110] [--dir verify_log] [--prefix eu] [--broken]
   (--broken: also the stations that were in broken cloud when the run started - compare "sat" with "sharp")
   (--prefix eu: the Europe instance's files eusungrid_* / eusunstation_*)
+  (weather-model blend beyond +30 min, 17.11.2026: python score_sun.py sat satnwp nwp pers - "satnwp" is the shadow;
+   with SUNNY_NWP=1 it is served as "sat" and the plain advection is "satadv"; offline test: tune_sun.py)
 The last line is the analysis itself at the stations (variant "ana", lead 0): how well the newest satellite image
 says "sun or not" where a gauge measures it - no forecast can be better than that.
 """

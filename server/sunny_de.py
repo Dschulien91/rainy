@@ -141,6 +141,57 @@ LOW_F = float(os.environ.get("SUNNY_LOW_F", "0.3"))  # env only for replays (ser
 # ICON-D2 had 90-100 % low cloud). Where k comes from IR (low sun, night) it is capped by the weather model's low cloud
 # cover: k <= 1 - LOWCC_W * low cover. Env only for replays (0 = without).
 LOWCC_W = float(os.environ.get("SUNNY_LOWCC_W", "1.0"))
+# Weather-model blend beyond +30 min (scored shadow "satnwp", 17.11.2026): the advected satellite loses skill with the
+# lead, the weather model does not, but the raw model is far too sunny (live 7 days: station bias +0.16, grid sunny area
+# x1.7) - so the "model" shadows mixed in that bias. Here the model's clear-sky index (Open-Meteo minutely_15
+# direct_normal_irradiance / clear_dni) is first quantile-mapped onto the satellite's k at ref, over the whole area
+# (the same mapping for every lead), and then mixed into the served share: (1 - w) * sat + w * model, w = 0 until
+# NWP_START min, linear to NWP_W120 at +120. NWP_LAG_MS: the satellite slot S shows the sky at ~S+7 min.
+# Offline (server/tune_sun.py, 08./15./16.11., 162 runs, ICON-D2 15-min runs as old as they were then, model sampled
+# like the live 0.1 deg points), station MAE / hit and grid MAE at +60/+90/+120:
+#   sat (served)   .128/.155/.168  hit .874/.851/.841   grid .118/.143/.163  sunny area x1.02/1.04/1.06
+#   model raw      .233/.236/.240  hit .763/.760/.754   grid .217/.221/.226  x1.67-1.72 (the live "nwp")
+#   model qm alone .140/.152/.161  hit .863/.850/.842   grid .149/.157/.166
+#   blend 30/0.55  .124/.143/.152  hit .878/.856/.859   grid .120/.142/.158  x1.02/1.04/1.01
+# Weights: w 0.1-0.8 at each lead and five schedules; stations want more model (best w ~0.5-0.6 at +120), the grid less
+# (~0.3); 30/0.55 is the best of both. Blending in k instead of the share was as good on the grid but x1.16 too sunny;
+# the model's Lagrangian trend added to the advected k (+0.5 / +1.0) was worse (+120 station MAE .176 / .201). Other
+# motion fields (flow smoothing 5 / 20, finer flow grid, DIS, mean of 3 pairs, 60 min pair, semi-Lagrangian
+# trajectories) all scored within +-0.003 of the served one - the motion is not what limits +60..+120.
+# SUNNY_NWP=1 serves it (the map's k is blended alike); the plain advection then stays scored as "satadv".
+NWP_START = float(os.environ.get("SUNNY_NWP_START", "30"))
+NWP_W120 = float(os.environ.get("SUNNY_NWP_W120", "0.55"))
+NWP_LAG_MS = 7 * 60_000
+SUNNY_NWP = os.environ.get("SUNNY_NWP", "0") == "1"
+# The model's skill today: the corrected model's sun share at ref against the analysis (daylight pixels, mean abs.
+# error, median 0.14 in the test). The weight is scaled by clip(1 - (error - NWP_SKILL_A) / NWP_SKILL_B, 0, 1): full
+# below 0.10, none above 0.20. Offline that turned the blend's one bad day (08.11.: +120 station MAE .121 -> .133) into
+# no harm (.121) and was better on all leads (+60/+90/+120 station .124/.143/.148 hit .877/.855/.874, grid
+# .117/.138/.152, sunny area x1.02/1.03/0.96). With ICON-EU (the Europe instance's model; archived runs 3-6 h old)
+# the ungated blend was worse on 08.11. (+120 .128 -> .197), gated it helped overall (+120 station .177 -> .161, hit
+# .832 -> .867, grid .168 -> .160). ICON-D2-RUC (hourly, not on the local Open-Meteo) was a little better than ICON-D2.
+NWP_SKILL_A, NWP_SKILL_B = 0.10, 0.10
+
+
+def nwp_weight(lead):
+    """Weather-model weight in the "satnwp" blend at a lead (minutes)."""
+    return 0.0 if lead <= NWP_START else NWP_W120 * min(1.0, (lead - NWP_START) / max(1e-6, 120.0 - NWP_START))
+
+
+def quantile_map(src, ref, n=50_000):
+    """A function x -> ref's value at x's mid-rank in src (src, ref: 1-d samples of the same pixels), or None when
+    there are too few. Mid-ranks keep ties (a model's many k = 0 pixels) at the middle of their range."""
+    if len(src) < 500:
+        return None
+    sel = np.linspace(0, len(src) - 1, min(n, len(src))).astype(np.int64)
+    s, r = np.sort(np.asarray(src, np.float32)[sel]), np.sort(np.asarray(ref, np.float32)[sel])
+    m = len(s)
+
+    def f(x):
+        x = np.asarray(x, np.float32)
+        p = np.searchsorted(s, x, side="left") + np.searchsorted(s, x, side="right")
+        return np.where(np.isfinite(x), r[np.clip(p // 2, 0, m - 1)], np.nan).astype(np.float32)
+    return f
 
 
 def clear_dni(elev):
@@ -296,6 +347,7 @@ class SunModel:
         self.lock = threading.Lock()
         self.times = self.share = None   # (T,) ms at the middle of each 15 min interval; (T, nlat, nlon)
         self.low_times = self.low = None  # hourly low cloud cover 0..1 (T, nlat, nlon), for fog under "clear" IR
+        self.dni = None                   # direct normal irradiance W/m2 (T, nlat, nlon), same times as share (NWP blend)
         self.at = 0.0
         self.lats = np.arange(lats[0], lats[1] + 1e-6, deg)
         self.lons = np.arange(lons[0], lons[1] + 1e-6, deg)
@@ -319,7 +371,7 @@ class SunModel:
             body = urllib.parse.urlencode({
                 "latitude": ",".join(f"{v:.2f}" for v in la[i:i + MODEL_BATCH]),
                 "longitude": ",".join(f"{v:.2f}" for v in lo[i:i + MODEL_BATCH]),
-                "minutely_15": "sunshine_duration", "past_minutely_15": str(past_steps),
+                "minutely_15": "sunshine_duration,direct_normal_irradiance", "past_minutely_15": str(past_steps),
                 "forecast_minutely_15": str(forecast_steps),
                 "hourly": "cloud_cover_low", "past_hours": str(past_steps // 4 + 2),
                 "forecast_hours": str(forecast_steps // 4 + 2), "timeformat": "unixtime",
@@ -332,28 +384,36 @@ class SunModel:
             if times is None:
                 times = np.array(d[0]["minutely_15"]["time"], np.int64) * 1000 - 450_000  # value = previous 15 min
                 vals = np.zeros((len(times), len(la)), np.float32)
+                dni = np.full((len(times), len(la)), np.nan, np.float32)
             if low_times is None:
                 low_times = np.array(d[0]["hourly"]["time"], np.int64) * 1000  # instantaneous value at the full hour
                 low = np.full((len(low_times), len(la)), np.nan, np.float32)
             for j, e in enumerate(d):
                 vals[:, i + j] = [min(1.0, (v or 0.0) / 900.0) for v in e["minutely_15"]["sunshine_duration"]]
+                if e["minutely_15"].get("direct_normal_irradiance"):
+                    dni[:, i + j] = [np.nan if v is None else v for v in e["minutely_15"]["direct_normal_irradiance"]]
                 low[:, i + j] = [np.nan if v is None else v / 100.0 for v in e["hourly"]["cloud_cover_low"]]
         share = np.full((len(times), len(self.lats) * len(self.lons)), np.nan, np.float32)
         share[:, self.points] = vals
         share = share.reshape(len(times), len(self.lats), len(self.lons))
+        dni_g = np.full((len(times), len(self.lats) * len(self.lons)), np.nan, np.float32)
+        dni_g[:, self.points] = dni
+        dni_g = dni_g.reshape(len(times), len(self.lats), len(self.lons))
         low_g = np.full((len(low_times), len(self.lats) * len(self.lons)), np.nan, np.float32)
         low_g[:, self.points] = low
         low_g = low_g.reshape(len(low_times), len(self.lats), len(self.lons))
         with self.lock:
-            self.times, self.share = times, share
+            self.times, self.share, self.dni = times, share, dni_g
             self.low_times, self.low = low_times, low_g
         self.at = time.time()
         return len(la)
 
     def field(self, ts, what="share"):
-        """Model sunshine share ("share") or low cloud cover ("low"), 0..1 on the sunny grid at ts; None outside."""
+        """Model sunshine share ("share"), low cloud cover ("low", 0..1) or direct normal irradiance ("dni", W/m2) on
+        the sunny grid at ts; None outside."""
         with self.lock:
-            times, share = (self.times, self.share) if what == "share" else (self.low_times, self.low)
+            times, share = {"share": (self.times, self.share), "low": (self.low_times, self.low),
+                            "dni": (self.times, self.dni)}[what]
         if share is None or not times[0] <= ts <= times[-1]:
             return None
         k = min(int(np.searchsorted(times, ts, side="right")) - 1, len(times) - 2)
@@ -874,8 +934,9 @@ class SunnyDE:
         base = fill_nan(k1)
         known = np.isfinite(k1).astype(np.float32)
         out = {"sat": {}, "satold": {}, "sharp": {}, "kpers": {}, "pers": {}, "model": {}, "nwp": {}, "shblur": {},
-               "model90": {}}
+               "model90": {}, "satnwp": {}, "satadv": {}}
         disp = {}
+        qm, skill = self._nwp_qm(ref, k1)  # the model's k -> the satellite's distribution at ref; weight factor
         for lead in FC_LEADS:
             ts = ref + lead * 60_000
             e = self.elev(ts)
@@ -898,6 +959,22 @@ class SunnyDE:
             s = share_from_k(kk, e)
             out["sat"][ts] = s
             disp[ts] = self._display(kk, e)
+            if SUNNY_NWP and lead in LEADS:
+                out["satadv"][ts] = s  # the plain advection, scored while the blend is served
+            w = nwp_weight(lead) * skill
+            if qm is not None and (lead in LEADS or (SUNNY_NWP and w > 0)):
+                mk = self._model_k(ts) if w > 0 else None
+                mq = qm(mk) if mk is not None else None
+                if w <= 0:
+                    out["satnwp"][ts] = s
+                elif mq is not None:
+                    ok = np.isfinite(mq) & np.isfinite(s)
+                    sn = np.where(ok, (1 - w) * s + w * share_from_k(mq, e), s).astype(np.float32)
+                    if lead in LEADS:
+                        out["satnwp"][ts] = sn
+                    if SUNNY_NWP:  # served: the share as blended, the map from the k blended alike
+                        out["sat"][ts] = sn
+                        disp[ts] = self._display(np.where(ok, (1 - w) * kk + w * mq, kk).astype(np.float32), e)
             if lead in LEADS:  # shadows only where they are scored
                 out["satold"][ts] = share_from_k(kold, e)
                 out["sharp"][ts] = share_from_k(ksharp, e)
@@ -920,6 +997,34 @@ class SunnyDE:
                     w9 = 1.0 - max(0.0, min(1.0, (lead - 90) / 30)) * 0.25
                     out["model90"][ts] = np.where(np.isfinite(s), w9 * s + (1 - w9) * m, np.nan).astype(np.float32)
         return out, disp
+
+    def _model_k(self, ts):
+        """The weather model's clear-sky index for the satellite slot ts on the sunny grid (NaN at night), or None."""
+        d = self.model.field(ts + NWP_LAG_MS, "dni") if self.model else None
+        if d is None:
+            return None
+        e = self.elev(ts + NWP_LAG_MS)
+        return np.where(e >= SUN_ELEV, np.clip(d / clear_dni(e), 0, K_MAX), np.nan).astype(np.float32)
+
+    def _nwp_qm(self, ref, k1):
+        """(quantile mapping of the model's k onto the satellite's k at ref over the shown area's daylight pixels, the
+        model's weight factor from its error at ref), or (None, 0) without a usable model."""
+        if not self.model or self.model.dni is None or not np.isfinite(self.model.dni).any():
+            return None, 0.0
+        m0 = self._model_k(ref)
+        if m0 is None:
+            return None, 0.0
+        e0 = self.elev(ref)
+        msk = np.isfinite(m0) & np.isfinite(k1) & (e0 >= DAY_ELEV) & (self.inside() > 0.5)
+        qm = quantile_map(m0[msk], k1[msk])
+        if qm is None:
+            return None, 0.0
+        s0, a0 = share_from_k(qm(m0), e0), share_from_k(k1, e0)
+        sel = np.isfinite(s0) & np.isfinite(a0) & (e0 >= SCORE_ELEV) & (self.inside() > 0.5)
+        if sel.sum() < 500:
+            return None, 0.0
+        err = float(np.abs(s0[sel] - a0[sel]).mean())
+        return qm, float(np.clip(1.0 - (err - NWP_SKILL_A) / NWP_SKILL_B, 0.0, 1.0))
 
     # ---------- update ----------
     def _jump(self, ts, share, back=(1, 2)):
