@@ -7,7 +7,8 @@ and ECCC twice), as a user would have got it: the provider's run at a full hour,
 score_competitors.py joins these rows with OUR forecast of the same run time at the same gauges (verify_log/fcgauge,
 the instances' record_fc) and the gauge truth (verify_log/gaugetruth, metar/) and prints the scores per country.
 
-Providers (all read anonymously through the server's fetch(); no account, no key - KNMI: its public anonymous key):
+Providers (all read anonymously with the neutral User-Agent "Mozilla/5.0"; no account, no key - KNMI: its public
+anonymous key):
   metno   MET Norway radar nowcast (the one Yr shows; Nordic composite NO/SE/FI + DK/Baltic edges), CC BY 4.0.
           THREDDS radarnowcasting/yrwms-nordic...nordiclcc-1000.<YYYYMMDDTHHMM00Z>.nc: CF NetCDF4, lwe_precipitation_rate
           (mm/h, instantaneous), Lambert conformal 1 km 1694 x 2134, 24 steps 0..+115 min every 5 min, a new run every
@@ -62,19 +63,57 @@ Providers (all read anonymously through the server's fetch(); no account, no key
           the API's temporary download URL of the run's file, then the file (S3). At most one take per 15 min (runs
           :00 and :30); a 429 (the shared 50/min are often gone for a minute) is retried twice 30 s later, then
           429 / 403 back off for 15 min .. 2 h (logged).
+  dwdrv   DWD RADVOR RV (17.11.2026; the nowcast DWD's WarnWetter app shows; Germany + borders, 1 km, 1100 x 1200
+          polar stereographic DE1200), opendata.dwd.de/weather/radar/composite/rv/composite_rv_<YYYYMMDD_HHMM>.tar,
+          DWD open data (CC BY 4.0 / GeoNutzV, "Quelle: Deutscher Wetterdienst"). A run every 5 min, on the server
+          ~4 min after its time; tar of 25 ODIM HDF5 files (+0 .. +120 every 5 min, ~13 MB), each the precipitation
+          SUM (ACRR, mm, uint32 x 0.001 - 0.001, 4294967295 = no data) of the 5 min ENDING at run + lead (checked
+          with dataset1/what enddate/endtime) -> x 12 = mm/h. Stored AS PUBLISHED (the app's own map multiplies RV
+          by GAIN_RV 1.5; not here: the competitor is what DWD shows). Runs :00 and :30 (~26 MB/h); "pub" = the
+          file's Last-Modified. +0 (DWD's analysis) is recorded too. The grid benchmark against DWD's own radar
+          (fcverify.py "dwd") stays; this one measures RV at the gauges, next to the other providers.
+  buienradar  Buienradar's 2-hour rain forecast per coordinate, the same as its app / website shows (NL / BE and
+          surroundings; the service answers 404 "location must be inside the Netherlands or Belgium" further out),
+          gadgets.buienradar.nl/data/raintext/?lat=..&lon=.. (the URL their free-data page's gps.buienradar.nl/getrr.php
+          redirects to). Terms (buienradar.nl/overbuienradar/gratis-weerdata, read 17.11.2026): free for
+          NON-COMMERCIAL use with attribution "Buienradar.nl"; apps / commercial use need their permission; the site
+          also states "Geen tekst- en datamining" - kept as an internal benchmark only, nothing is republished.
+          24 lines "NNN|HH:MM" (Dutch local time, 5-min slots from the next slot on): mm/h = 10^((NNN - 109) / 32),
+          0 = dry. No issue time is given: the slot labelled R + L is taken as the forecast for R + L, read 3-9 min
+          after R ("slot0" = the first slot of the first answer = their "now"). One request per point: a fixed
+          spread-out sample of SAMPLE gauges (one per ~17 km cell, 10-minute networks first), 0.6 s apart, runs
+          :00 and :30 (~240 requests/h); 429 / 403 -> back off 15 min .. 2 h.
+  meteoswiss  MeteoSwiss local forecast (the MeteoSwiss app's point forecast: INCA nowcast blended into ICON-CH1/2
+          and ECMWF), open data (OGD, CC BY 4.0, "Source: MeteoSwiss"), STAC collection
+          ch.meteoschweiz.ogd-local-forecasting: <YYYYMMDD>-ch/vnut12.lssw.<YYYYMMDDHH00>.rre150h0.csv, hourly runs,
+          on the server ~2 min after the hour, precipitation SUM of the hour ENDING at "Date" (checked 17.11.2026
+          against SwissMetNet 10-min sums: stamp 09:00 ~ gauges 08-09 UTC). Only the station points (point_type_id 1,
+          the file's first ~6 MB of ~32 MB) are read, with an HTTP Range request. Our Swiss gauges are matched by
+          their abbreviation, others within 1.5 km of a station point. Lead +30 = the hour R .. R+1 h, +90 = R+1 h ..
+          R+2 h (each centred on the lead; row "win": 60 -> scored on hours only). "pub" = Last-Modified.
+  inca    GeoSphere Austria INCA nowcast (dataset nowcast-v1-15min-1km, CC BY 4.0, 45.5-49.5 N / 8.1-17.7 E:
+          Austria, S Germany, E Switzerland, S Czechia, W Hungary, Slovenia, N Italy) at a spread-out sample of up
+          to SAMPLE gauges of every network in its domain (bench_inca.py scores it separately at the Austrian TAWES
+          gauges only). Point time series API, CHUNK points per request; runs every 15 min, served ~30 min after
+          their time (its first step is then run + 30), the last 6 runs kept - the named run is chosen with
+          forecast_offset and checked by reference_time. 15-min sums stamped at their end (as bench_inca.py): the
+          two around the lead = (L-15, L+15] x 2 = mm/h. Runs :00 and :30, ~12 requests/h.
 
 Each provider value at a gauge is the mean over a box of +-FOOT_KM around it ("v"; our fcgauge value is the 5 x 5 mean
-of the 2-km grid = ~10 x 10 km) and the cell under the gauge ("pt"). ECCC has only the point.
+of the 2-km grid = ~10 x 10 km) and the cell under the gauge ("pt"). ECCC, Buienradar, MeteoSwiss and INCA have only
+the point (fp 0, v = pt).
 Rows: <log_dir>/bench/<provider>_<YYYYMMDD of the run>.jsonl, ONE LINE PER RUN (the gauge ids once, not per lead):
   {"p": provider, "run": run ms, "got": ms when read, "fp": box half-width km, "leads": [30, 60, ...] nominal minutes,
    "dt": [30, 60, ...] the provider's actual step, "ids": ["network:id", ...], "v": [[mm/h or null per id] per lead],
-   "pt": [[...] per lead]}   (+ "var": "cloud" for MEANDER's cloud cover, values 0..1; KNMI: lead 0 too, and "pub" =
-   ms when KNMI published the file)
+   "pt": [[...] per lead]}   (+ "var": "cloud" for MEANDER's cloud cover, values 0..1; KNMI / DWD RV: lead 0 too;
+   "pub" = ms when the provider published the file (KNMI, DWD RV, MeteoSwiss); "win": minutes each value averages
+   when >= 60 (MeteoSwiss); "slot0" (Buienradar))
 
 Server: CompetitorBench(fetch, log, log_dir, stations, na=False).loop() in its own thread - one download at a time,
 every request with a timeout, every take with a time budget, a failing provider is retried within its window and
 never blocks the others for longer than its budget.
-Test without the server:  python bench_competitors.py --once metno|incabe|chmi|knmi|meander|eccc [--stations f.json] [--dir d]
+Test without the server:  python bench_competitors.py --once metno|incabe|chmi|knmi|meander|dwdrv|buienradar|meteoswiss|inca|eccc
+                          [--stations f.json] [--dir d]
 """
 import calendar
 import hashlib
@@ -117,6 +156,64 @@ def _iso(ms, fmt="%Y-%m-%dT%H:%M:%SZ"):
 
 def _ms_iso(text):
     return int(datetime.strptime(text[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc).timestamp() * 1000)
+
+
+def _ms_any(text):
+    """ISO time with or without seconds / offset ("2026-11-17T09:30+00:00", "...T09:30:00Z") -> ms."""
+    d = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    return int((d if d.tzinfo else d.replace(tzinfo=timezone.utc)).timestamp() * 1000)
+
+
+def _ms_http(text):
+    """HTTP date (Last-Modified) -> ms, or None."""
+    if not text:
+        return None
+    from email.utils import parsedate_to_datetime
+    try:
+        return int(parsedate_to_datetime(text).timestamp() * 1000)
+    except (TypeError, ValueError):
+        return None
+
+
+def _http(url, headers=None, timeout=40):
+    """One GET with the same neutral User-Agent as the server's fetch() ("Mozilla/5.0") plus optional technical
+    headers (Range) - nothing that identifies us -> (body, response headers)."""
+    import urllib.request
+    h = {"User-Agent": "Mozilla/5.0"}
+    h.update(headers or {})
+    with urllib.request.urlopen(urllib.request.Request(url, headers=h), timeout=timeout) as r:
+        return r.read(), r.headers
+
+
+def _eu_offset_h(ms):
+    """Central European local time - UTC in hours at `ms` (EU summer time: last Sunday of March 01:00 UTC to the last
+    Sunday of October 01:00 UTC). No tz database needed (the container may not have one)."""
+    y = time.gmtime(ms / 1000).tm_year
+
+    def last_sunday(m):
+        d = calendar.monthrange(y, m)[1]
+        return calendar.timegm((y, m, d - (calendar.weekday(y, m, d) + 1) % 7, 1, 0, 0)) * 1000
+    return 2 if last_sunday(3) <= ms < last_sunday(10) else 1
+
+
+def _spread(stations, cell_lat, cell_lon, n, prefer=()):
+    """A fixed, spread-out sample (stable when the list grows): the stations ordered by a hash of their id, the first
+    one per cell_lat x cell_lon degree cell - a gauge of the `prefer` networks (10-minute sums) first - then the
+    first n of those in hash order."""
+    def h(s):
+        return hashlib.md5(f"{s[0]}:{s[1]}".encode()).hexdigest()
+    cells, pick = set(), []
+    for s in sorted(stations, key=lambda s: (s[0] not in prefer, h(s))):
+        cell = (int(s[2] // cell_lat), int(s[3] // cell_lon))
+        if cell not in cells:
+            cells.add(cell)
+            pick.append(s)
+    return sorted(pick, key=h)[:n]
+
+
+# networks with 10-minute sums (check_national_gauges.py): scorable on 10-min pairs, not only on hours
+TEN_MIN_NETS = ("de", "at", "ch", "it", "iv", "cz", "ie", "se", "fi", "en", "hu", "pl", "sc", "be", "bw", "bf", "gl",
+                "bz", "tn", "si", "dk")
 
 
 def _key(s):
@@ -217,6 +314,7 @@ class Provider:
     START_MIN, END_MIN = 10, 50   # window after the run time in which it is taken
     RETRY_S = 120
     BUDGET_S = 300
+    BACKOFF_S = (900, 1800, 3600, 7200)   # after 429 / 403 answers in a row (_back_off)
     na = False
 
     def __init__(self, fetch, log):
@@ -225,6 +323,7 @@ class Provider:
         self.next_try = 0.0
         self.deadline = None
         self.requests = 0
+        self.hold_until, self.strikes = 0.0, 0
 
     def runs(self, now_ms):
         """Run times whose window is open now, newest first."""
@@ -237,7 +336,7 @@ class Provider:
         return sorted(out, reverse=True)
 
     def due(self, now_ms):
-        if time.time() < self.next_try:
+        if time.time() < max(self.next_try, self.hold_until):
             return None
         return next((r for r in self.runs(now_ms) if r not in self.done), None)
 
@@ -246,6 +345,24 @@ class Provider:
             raise OverBudget(f"{self.name}: take ran over its {self.BUDGET_S} s budget")
         self.requests += 1
         return self.fetch(url, timeout=timeout, tries=tries)
+
+    def get_h(self, url, headers=None, timeout=60):
+        """Like get(), with technical request headers (Range) and the response headers (Last-Modified)."""
+        if self.deadline and time.time() > self.deadline:
+            raise OverBudget(f"{self.name}: take ran over its {self.BUDGET_S} s budget")
+        self.requests += 1
+        return _http(url, headers, timeout)
+
+    def _back_off(self, e):
+        """An HTTP error: 429 (too many requests) / 403 (refused) -> stay away for 15 min .. 2 h (logged) and raise
+        NotReady; any other code is raised as it is."""
+        if getattr(e, "code", None) in (403, 429):
+            wait = self.BACKOFF_S[min(self.strikes, len(self.BACKOFF_S) - 1)]
+            self.strikes += 1
+            self.hold_until = time.time() + wait
+            self.log(f"competitor {self.name}: HTTP {e.code}, backing off {wait // 60} min")
+            raise NotReady(f"HTTP {e.code}")
+        raise e
 
     def select(self, stations):
         """The gauges inside the provider's domain: list of station tuples."""
@@ -751,7 +868,324 @@ class Eccc(Provider):
         return [self.row(run, st, [lead], [lead], [vals], [vals], fp=0, ref="dim")]
 
 
-EUROPE = (IncaBe, Chmi, Knmi, Meander, MetNo)   # priority order: the shortest windows first
+class DwdRv(Provider):
+    """DWD's RADVOR RV nowcast from open data (see the module docstring)."""
+    name = "dwdrv"
+    BASE = "https://opendata.dwd.de/weather/radar/composite/rv/"
+    OFFSETS = (0, 30)
+    START_MIN, END_MIN = 4, 40      # on the server ~4 min after its time; the directory keeps the files for hours
+    RETRY_S = 60
+    BUDGET_S = 240
+    LEADS = (0,) + LEADS            # +0 = DWD's analysis at the run time (not a forecast; for the amounts)
+
+    def select(self, stations):
+        return [s for s in stations if 45.7 <= s[2] <= 55.85 and 1.5 <= s[3] <= 18.7]
+
+    def take(self, run, stations):
+        import h5py
+        import pyproj
+        st = self.select(stations)
+        if not st:
+            return []
+        try:
+            raw, hdr = self.get_h(self.BASE + _iso(run, "composite_rv_%Y%m%d_%H%M.tar"), timeout=120)
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                raise NotReady("no file yet (404)")
+            self._back_off(e)
+        pub = _ms_http(hdr.get("Last-Modified"))
+        tar = tarfile.open(fileobj=io.BytesIO(raw))
+        files = {m.name.rsplit("_", 1)[1].split("-")[0]: m for m in tar.getmembers() if m.isfile()}
+        lat, lon = np.array([s[2] for s in st]), np.array([s[3] for s in st])
+        v = np.full((len(self.LEADS), len(st)), np.nan, np.float32)
+        p = v.copy()
+        fr = fc = None
+        for i, lead in enumerate(self.LEADS):
+            m = files.get(f"{lead:03d}")
+            if m is None:
+                continue
+            with h5py.File(io.BytesIO(tar.extractfile(m).read()), "r") as f:
+                what = f["what"].attrs
+                if f"{what['date'].decode()}{what['time'].decode()}" != _iso(run, "%Y%m%d%H%M%S"):
+                    raise Gone("run time inside the file differs")
+                dw = f["dataset1/what"].attrs     # the 5-min interval of this step ends at run + lead
+                if f"{dw['enddate'].decode()}{dw['endtime'].decode()}" != _iso(run + lead * MIN_MS, "%Y%m%d%H%M%S"):
+                    raise Gone(f"step {lead} ends at {dw['enddate'].decode()} {dw['endtime'].decode()}")
+                if fr is None:
+                    w = f["where"].attrs
+                    proj = pyproj.Proj(w["projdef"].decode())
+                    ux, uy = proj(float(w["UL_lon"]), float(w["UL_lat"]))
+                    x, y = proj(lon, lat)
+                    fc = (x - ux) / float(w["xscale"]) - 0.5      # ODIM corners are the outer corners
+                    fr = (uy - y) / float(w["yscale"]) - 0.5
+                    h = int(round(FOOT_KM / (float(w["xscale"]) / 1000)))
+                a = f["dataset1/data1/what"].attrs
+                d = f["dataset1/data1/data"][()]
+                mm = np.maximum(d.astype(np.float32) * float(a["gain"]) + float(a["offset"]), 0.0)
+                mm[d == int(a["undetect"])] = 0.0
+                mm[d == int(a["nodata"])] = np.nan
+                v[i], p[i] = sample(mm * 12.0, fr, fc, h, h)      # mm per 5 min -> mm/h
+        ok = np.isfinite(p[0])          # inside the radar coverage at the run time
+        st = [s for s, o in zip(st, ok) if o]
+        if not st:
+            return []
+        return [self.row(run, st, self.LEADS, self.LEADS, v[:, ok], p[:, ok], pub=pub)]
+
+
+class Buienradar(Provider):
+    """Buienradar's rain forecast per coordinate (raintext), one request per sampled gauge (module docstring)."""
+    name = "buienradar"
+    URL = "https://gadgets.buienradar.nl/data/raintext/?lat={lat:.2f}&lon={lon:.2f}"
+    OFFSETS = (0, 30)
+    START_MIN, END_MIN = 3, 9       # the list starts at the next 5-min slot: read early, +120 is its last line
+    RETRY_S = 30
+    BUDGET_S = 240
+    SAMPLE = 120                    # gauges per take (~1 s each)
+    PAUSE_S = 0.6
+    MAX_ERRORS = 8
+    BOX = (49.45, 53.65, 2.45, 7.3)   # NL / BE / LU and the German border strip (their radar's best area)
+
+    def select(self, stations):
+        la0, la1, lo0, lo1 = self.BOX
+        return _spread([s for s in stations if la0 <= s[2] <= la1 and lo0 <= s[3] <= lo1], 0.15, 0.25, self.SAMPLE,
+                       TEN_MIN_NETS)
+
+    @staticmethod
+    def parse(text, got):
+        """'NNN|HH:MM' lines (local Dutch time, 5-min steps) -> {UTC ms: mm/h}. The documented conversion:
+        mm/h = 10 ^ ((NNN - 109) / 32), 0 = dry."""
+        lines = [x.split("|") for x in text.split() if "|" in x]
+        if not lines:
+            return {}
+        off = _eu_offset_h(got) * H_MS
+        hh, mm = map(int, lines[0][1].split(":"))
+        day = (got + off) // 86400_000 * 86400_000
+        cand = [day + d * 86400_000 + hh * H_MS + mm * MIN_MS - off for d in (-1, 0, 1)]
+        t0 = min(cand, key=lambda t: abs(t - got))
+        if abs(t0 - got) > 30 * MIN_MS:
+            raise ValueError(f"first slot {lines[0][1]} is far from the read time")
+        out = {}
+        for k, (val, label) in enumerate(lines):
+            t = t0 + k * 5 * MIN_MS
+            if _iso(t + off, "%H:%M") != label.strip():
+                raise ValueError(f"slot {k} is {label}, expected {_iso(t + off, '%H:%M')}")
+            n = int(val)
+            out[t] = 0.0 if n <= 0 else round(10 ** ((n - 109) / 32.0), 3)
+        return out
+
+    def take(self, run, stations):
+        st = self.select(stations)
+        if not st:
+            return []
+        vals = np.full((len(LEADS), len(st)), np.nan, np.float32)
+        errors = done = 0
+        first = None
+        for k, s in enumerate(st):
+            try:
+                text = self.get(self.URL.format(lat=s[2], lon=s[3]), timeout=20).decode("utf-8", "replace")
+                ser = self.parse(text, int(time.time() * 1000))
+                if ser and first is None:
+                    first = min(ser)
+                for i, lead in enumerate(LEADS):
+                    vals[i, k] = ser.get(run + lead * MIN_MS, np.nan)
+                errors, done = 0, done + 1
+            except OverBudget:
+                break
+            except urllib.error.HTTPError as e:
+                if e.code == 404:       # "location must be inside the Netherlands or Belgium"
+                    continue
+                if e.code in (403, 429):
+                    try:
+                        self._back_off(e)
+                    except NotReady:
+                        if done < len(st) // 2:
+                            raise
+                        break
+                errors += 1
+            except Exception as e:
+                errors += 1
+                if errors >= self.MAX_ERRORS:
+                    if done < len(st) // 2:
+                        raise RuntimeError(f"{errors} errors in a row after {done} points: {e}")
+                    break
+            time.sleep(self.PAUSE_S)
+        ok = np.isfinite(vals).any(axis=0)
+        if not ok.any():
+            raise NotReady("no values")
+        st = [s for s, o in zip(st, ok) if o]
+        # "slot0": the first slot of the first answer = the provider's "now" when it was read (no issue time given)
+        return [self.row(run, st, LEADS, LEADS, vals[:, ok], vals[:, ok], fp=0, slot0=first)]
+
+
+class MeteoSwiss(Provider):
+    """MeteoSwiss' local forecast (the MeteoSwiss app's), hourly precipitation at its station points."""
+    name = "meteoswiss"
+    BASE = "https://data.geo.admin.ch/ch.meteoschweiz.ogd-local-forecasting/"
+    META = BASE + "ogd-local-forecasting_meta_point.csv"
+    OFFSETS = (0,)
+    START_MIN, END_MIN = 3, 50      # the run "HH00" is on the server at ~HH:02
+    RETRY_S = 120
+    BUDGET_S = 180
+    RANGE = 7_500_000               # the station points (point_type_id 1) fill the file's first ~6 MB (of ~32 MB)
+    HOURS = ((30, 60), (90, 120))   # nominal lead -> the hour ENDING at run + that many minutes (centred on the lead)
+    MATCH_KM = 1.5                  # a gauge that is not a MeteoSwiss station: the station point this close
+    BOX = (45.8, 47.85, 5.9, 10.55)
+
+    def __init__(self, fetch, log):
+        super().__init__(fetch, log)
+        self.points, self.points_day = None, None
+
+    def station_points(self):
+        """{point_id: (lat, lon, abbr)} of the station points, read once a day."""
+        day = int(time.time() // 86400)
+        if self.points is None or self.points_day != day:
+            import csv
+            text = self.get(self.META, timeout=60).decode("latin-1")
+            pts = {}
+            for r in csv.DictReader(io.StringIO(text), delimiter=";"):
+                if r.get("point_type_id") == "1":
+                    try:
+                        pts[r["point_id"]] = (float(r["point_coordinates_wgs84_lat"]),
+                                              float(r["point_coordinates_wgs84_lon"]), r["station_abbr"].strip().upper())
+                    except (KeyError, ValueError):
+                        pass
+            self.points, self.points_day = pts, day
+        return self.points
+
+    def match(self, stations):
+        """[(station, point_id)]: Swiss gauges by their abbreviation ("ch:smn:sma" -> SMA), others by distance."""
+        pts = self.station_points()
+        by_abbr = {a: pid for pid, (_, _, a) in pts.items() if a}
+        ids = list(pts)
+        plat = np.array([pts[i][0] for i in ids])
+        plon = np.array([pts[i][1] for i in ids])
+        la0, la1, lo0, lo1 = self.BOX
+        out = []
+        for s in stations:
+            if not (la0 <= s[2] <= la1 and lo0 <= s[3] <= lo1):
+                continue
+            pid = by_abbr.get(s[1].split(":")[-1].upper()) if s[0] == "ch" else None
+            if pid is None:
+                d = np.hypot((plat - s[2]) * 111.2, (plon - s[3]) * 111.2 * np.cos(np.radians(s[2])))
+                j = int(np.argmin(d))
+                if d[j] <= self.MATCH_KM:
+                    pid = ids[j]
+            if pid is not None:
+                out.append((s, pid))
+        return out
+
+    def take(self, run, stations):
+        pairs = self.match(stations)
+        if not pairs:
+            return []
+        url = f"{self.BASE}{_iso(run, '%Y%m%d')}-ch/vnut12.lssw.{_iso(run, '%Y%m%d%H%M')}.rre150h0.csv"
+        try:
+            raw, hdr = self.get_h(url, headers={"Range": f"bytes=0-{self.RANGE - 1}"}, timeout=90)
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                raise NotReady("no file yet (404)")
+            self._back_off(e)
+        pub = _ms_http(hdr.get("Last-Modified"))
+        want = {pid for _, pid in pairs}
+        stamps = {run + end * MIN_MS: i for i, (_, end) in enumerate(self.HOURS)}
+        val = {}
+        complete = False
+        for line in raw.decode("latin-1").splitlines()[1:]:
+            f = line.split(";")
+            if len(f) < 4:
+                continue
+            if f[1] != "1":             # the postal-code points follow: every station was read
+                complete = True
+                break
+            if f[0] in want:
+                try:
+                    t = calendar.timegm(time.strptime(f[2], "%Y%m%d%H%M")) * 1000
+                    if t in stamps:
+                        val[(f[0], stamps[t])] = float(f[3])
+                except ValueError:
+                    pass
+        if not complete:
+            self.log(f"competitor meteoswiss: the first {self.RANGE // 1_000_000} MB did not hold all stations "
+                     "(raise RANGE)")
+        v = np.full((len(self.HOURS), len(pairs)), np.nan, np.float32)
+        for k, (_, pid) in enumerate(pairs):
+            for i in range(len(self.HOURS)):
+                v[i, k] = val.get((pid, i), np.nan)
+        ok = np.isfinite(v).any(axis=0)
+        if not ok.any():
+            raise Gone("no values for this run's hours")
+        st = [s for (s, _), o in zip(pairs, ok) if o]
+        # "win": each value is the mean rate of the 60 min centred on its lead (an hourly sum) - scored on hours only
+        return [self.row(run, st, [h[0] for h in self.HOURS], [h[0] for h in self.HOURS], v[:, ok], v[:, ok], fp=0,
+                         pub=pub, win=60)]
+
+
+class Inca(Provider):
+    """GeoSphere Austria's INCA nowcast at the gauges of its whole domain (Austria and its neighbours)."""
+    name = "inca"
+    API = "https://dataset.api.hub.geosphere.at/v1/timeseries/forecast/nowcast-v1-15min-1km"
+    OFFSETS = (0, 30)
+    START_MIN, END_MIN = 33, 85     # a run is served ~30 min after its time; the last 6 runs (90 min) are kept
+    RETRY_S = 120
+    BUDGET_S = 240
+    CHUNK = 140                     # points per request (5 requests/s and 240/h per address allowed)
+    SAMPLE = 700                    # gauges per take: 5 requests (+1 for the run list)
+    BOX = (45.55, 49.43, 8.15, 17.70)
+
+    def select(self, stations):
+        la0, la1, lo0, lo1 = self.BOX
+        return _spread([s for s in stations if la0 <= s[2] <= la1 and lo0 <= s[3] <= lo1], 0.1, 0.15, self.SAMPLE,
+                       TEN_MIN_NETS)
+
+    def _json(self, url):
+        try:
+            return json.loads(self.get(url, timeout=60))
+        except urllib.error.HTTPError as e:
+            self._back_off(e)
+
+    def take(self, run, stations):
+        meta = self._json(f"{self.API}/metadata")
+        refs = [_ms_any(t) for t in meta.get("available_forecast_reftimes", [])]   # newest first
+        if not refs or run > refs[0]:
+            raise NotReady("run not served yet")
+        if run not in refs:
+            raise Gone("run no longer served")
+        st = self.select(stations)
+        if not st:
+            return []
+        v = np.full((len(LEADS), len(st)), np.nan, np.float32)
+        for i in range(0, len(st), self.CHUNK):
+            part = st[i:i + self.CHUNK]
+            q = "&".join(f"lat_lon={s[2]:.4f},{s[3]:.4f}" for s in part)
+            off = refs.index(run)
+            d = self._json(f"{self.API}?parameters=rr&output_format=geojson&forecast_offset={off}&{q}")
+            if _ms_any(d["reference_time"]) != run:      # a new run came in between: offset off by one
+                refs = [_ms_any(t) for t in self._json(f"{self.API}/metadata")["available_forecast_reftimes"]]
+                if run not in refs:
+                    raise Gone("run no longer served")
+                d = self._json(f"{self.API}?parameters=rr&output_format=geojson&forecast_offset={refs.index(run)}&{q}")
+                if _ms_any(d["reference_time"]) != run:
+                    raise Gone(f"asked for {_iso(run)}, got {d['reference_time']}")
+            ts = {_ms_any(t): k for k, t in enumerate(d["timestamps"])}
+            for j, f in enumerate(d["features"]):           # in the order asked
+                data = f["properties"]["parameters"]["rr"]["data"]
+                for a, lead in enumerate(LEADS):
+                    # 15-min sums stamped at their END (as bench_inca.py): the two around the lead = (L-15, L+15]
+                    two = [data[ts[t]] if t in ts else None for t in (run + lead * MIN_MS, run + (lead + 15) * MIN_MS)]
+                    if None not in two:
+                        v[a, i + j] = (two[0] + two[1]) * 2.0  # mm per 30 min -> mm/h
+            time.sleep(1)
+        ok = np.isfinite(v).any(axis=0)
+        st = [s for s, o in zip(st, ok) if o]
+        if not st:
+            return []
+        return [self.row(run, st, LEADS, LEADS, v[:, ok], v[:, ok], fp=0)]
+
+
+# priority order: the shortest windows first (Buienradar must be read within minutes of the run time)
+# Buienradar is implemented but not run: its site says "Geen tekst- en datamining" (no text and data mining) -
+# only with the owner's explicit decision (add it back in front: its answer window is the shortest).
+EUROPE = (IncaBe, Chmi, DwdRv, MeteoSwiss, Knmi, Meander, Inca, MetNo)
 NORTH_AMERICA = (Eccc,)
 
 
@@ -835,6 +1269,7 @@ class CompetitorBench:
                         self.log(f"competitor {p.name} {_iso(run, '%H:%M')}: given up ({e})")
                         continue
                     p.done.add(run)
+                    p.strikes = 0
                     self.write(rows)
                     rr = next((r for r in rows if r.get("var") is None), None)
                     if rr:
@@ -862,7 +1297,11 @@ FAKE_EUROPE = [
     ("sy", "nl-06260", 52.1000, 5.1800), ("sy", "lu-06590", 49.6200, 6.2000), ("de", "01078", 51.2960, 6.7690),
     ("de", "05906", 49.5063, 8.5584), ("cz", "0-203-0-11518", 50.1000, 14.2600), ("cz", "0-203-0-11723", 49.1500, 16.6900),
     ("sy", "cz-11782", 49.6900, 18.1100), ("hu", "12843", 47.4300, 19.1800), ("hu", "12982", 46.2500, 20.0900),
-    ("sy", "hu-12882", 47.4900, 21.6100), ("sy", "hu-12843", 47.4300, 19.1800)]
+    ("sy", "hu-12882", 47.4900, 21.6100), ("sy", "hu-12843", 47.4300, 19.1800),
+    ("ch", "smn:sma", 47.3779, 8.5656), ("ch", "smn:gve", 46.2475, 6.1278), ("ch", "smn:lug", 46.0042, 8.9603),
+    ("ch", "smn:ber", 46.9907, 7.4640), ("at", "11035", 48.2486, 16.3564), ("at", "11320", 47.2603, 11.3842),
+    ("de", "03379", 48.1632, 11.5429), ("sy", "nl-06240", 52.3170, 4.7900), ("sy", "nl-06280", 53.1250, 6.5850),
+    ("be", "6447", 50.7969, 4.3578), ("de", "02667", 50.8646, 7.1575)]
 FAKE_NA = [
     ("ca", "CA-YYZ", 43.68, -79.63), ("ca", "CA-YUL", 45.47, -73.74), ("ca", "CA-YVR", 49.19, -123.18),
     ("ca", "CA-YHZ", 44.88, -63.51), ("ca", "CA-YYC", 51.11, -114.02), ("us", "KSEA", 47.44, -122.31),

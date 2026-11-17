@@ -4,8 +4,11 @@ especially at +120 min?"
 
 Join per competitor run R (a full hour; CHMI / KNMI / ECCC also :30) and lead L:
   competitor  the provider's value at R + L (box mean +-5 km, like ours; --point: the cell under the gauge; ECCC has
-              only the point). MET Norway's "+120" is its +115 step; MEANDER's values are 30-min means centred on L
-              (+120: the last 15 min); KNMI's are the 5-min sum ending at R + L x 12 (its stored +0 is not scored).
+              only the point; so do Buienradar, MeteoSwiss and INCA). MET Norway's "+120" is its +115 step;
+              MEANDER's values are 30-min means centred on L (+120: the last 15 min); KNMI's and DWD RV's are the 5-min
+              sum ending at R + L x 12 (their stored +0 is not scored); INCA's the two 15-min sums around L x 2;
+              Buienradar's its 5-min slot labelled R + L; MeteoSwiss's (only +30 / +90) the hourly sum of the hour
+              centred on L -> scored on "hours" only (row field "win": 60).
   ours        each instance's forecast (verify_log/fcgauge = "European" (OPERA), verify_log/eun/fcgauge = "own";
               North America: verify_log/na/fcgauge) of the newest run r with R - 15 min <= r <= R (normally r = R:
               both note runs at full 10 min) at the same nominal lead L. "age" = R - r is printed (--exact: r = R only).
@@ -61,7 +64,9 @@ MIN_N = int(opt("--min", 20))
 KIND = "pt" if "--point" in args else "v"
 HOURLY_NETS = {"sy", "pt", "us", "ca"}
 PROVIDERS = {"metno": "MET Norway radar nowcast (Yr)", "incabe": "RMI INCA-BE", "chmi": "CHMI COTREC",
-             "knmi": "KNMI pySTEPS nowcast", "meander": "HungaroMet MEANDER", "eccc": "ECCC radar extrapolation"}
+             "knmi": "KNMI pySTEPS nowcast", "meander": "HungaroMet MEANDER", "eccc": "ECCC radar extrapolation",
+             "dwdrv": "DWD RADVOR RV (WarnWetter)", "buienradar": "Buienradar (app / website)",
+             "meteoswiss": "MeteoSwiss local forecast (app, hourly)", "inca": "GeoSphere INCA nowcast"}
 
 if NA:
     LOG = cng.LOG_DIR if os.path.basename(cng.LOG_DIR.rstrip("/\\")) == "na" else os.path.join(cng.LOG_DIR, "na")
@@ -256,7 +261,8 @@ def main():
                     continue
                 else:
                     q = truth.get(net, {}).get(sid, {})
-                if net not in HOURLY_NETS or g.endswith("10"):
+                # rows with "win" >= 60 (MeteoSwiss: hourly sums) are scored on the hours only
+                if (net not in HOURLY_NETS or g.endswith("10")) and r.get("win", 0) < 60:
                     two = [q.get(valid), q.get(valid + 600_000)]
                     if None not in two:
                         data.setdefault((p, g, lead, "pairs"), []).append(vals + [np.mean(two) * 6])

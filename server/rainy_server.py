@@ -105,7 +105,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v1.54"
+VERSION = "server-v1.55"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -1988,7 +1988,8 @@ def main_eu():
         threading.Thread(target=tile_gap_loop, daemon=True).start()
         synop_start()
         # competitors' open nowcasts at our gauges (bench_competitors.py, 16.11.2026: MET Norway / Yr, RMI INCA-BE,
-        # CHMI COTREC, HungaroMet MEANDER) - score_competitors.py
+        # CHMI COTREC, HungaroMet MEANDER, KNMI; 17.11.2026: DWD RV, MeteoSwiss, GeoSphere INCA)
+        # - score_competitors.py
         import bench_competitors
         import check_national_gauges as cng
         threading.Thread(target=bench_competitors.CompetitorBench(
