@@ -9,6 +9,8 @@ Rules (agreed design):
     severe thunderstorm warnings still come through), one upgrade if it gets heavier
   - "rain at the place" is judged over a ~5 km circle (share of wet pixels), which removes most false alarms
     from showers that pass just beside the place
+  - optional (env RAIN_ALERT_PROB=1, default off): the start comes from a probability calibrated against rain
+    gauges instead of the share threshold, and only P >= RAIN_ALERT_P_MIN (default 0.65) alerts (see PROB_COEF_DE)
 Accounts (v0.76): alerts need a login (server/auth.py). Every subscription is one device of a user: it stores the
 user id and the hash of the device's session. The settings (places, own location on/off, lead time, heads-up,
 thunder, quiet hours) belong to the account and are the same on all of the user's devices (apply_user, called when
@@ -53,6 +55,9 @@ TEXT = {
            "upgrade": ("⛈ Jetzt starker Regen erwartet – {place}", "Ab ca. {when}, {dur}.{chance}"),
            "reminder": ("⏰ {lv} in {mins} Min. – {place}", "Erinnerung: ab ca. {when}, {dur}.{chance}"),
            "main": ("{icon} {lv} in {mins} Min. – {place}", "Ab ca. {when}, {dur}.{chance}"),
+           # probabilistic trigger (RAIN_ALERT_PROB): the calibrated probability in the title
+           "main_p": ("{icon} {lv} wahrscheinlich ({p} %) in ~{mins} Min. – {place}", "Ab ca. {when}, {dur}."),
+           "early_p": ("{icon} {lv} wahrscheinlich ({p} %) in ca. 1 Std. – {place}", "Voraussichtlich ab ca. {when}, {dur}. Wir melden uns kurz vorher noch einmal."),
            "raining": ("🌧 Jetzt regnet es – {place}", "Erinnerung von vorhin."),
            "allclear": ("🌤 Entwarnung – {place}", "Der angekündigte Niederschlag kommt voraussichtlich doch nicht (nächste 2 Std.)."),
            "thunder_now": "Jetzt bis ca. {to}", "thunder_from": "Ab ca. {fr} bis ca. {to}",
@@ -65,6 +70,8 @@ TEXT = {
            "upgrade": ("⛈ Heavy rain now expected – {place}", "From about {when}, {dur}.{chance}"),
            "reminder": ("⏰ {lv} in {mins} min – {place}", "Reminder: from about {when}, {dur}.{chance}"),
            "main": ("{icon} {lv} in {mins} min – {place}", "From about {when}, {dur}.{chance}"),
+           "main_p": ("{icon} {lv} likely ({p} %) in ~{mins} min – {place}", "From about {when}, {dur}."),
+           "early_p": ("{icon} {lv} likely ({p} %) in about 1 h – {place}", "Expected from about {when}, {dur}. We will remind you shortly before."),
            "raining": ("🌧 It is raining now – {place}", "Reminder from earlier."),
            "allclear": ("🌤 All clear – {place}", "The expected precipitation is unlikely to come after all (next 2 h)."),
            "thunder_now": "Now until about {to}", "thunder_from": "From about {fr} until about {to}",
@@ -80,6 +87,73 @@ MAX_PLACES = 20
 # with more rainy days). (lead up to min, [light < 1 mm/h, moderate, heavy >= 4 mm/h]) - shown as "ca. X %".
 HIT_RATE = ((30, (30, 60, 70)), (45, (20, 60, 70)), (60, (20, 45, 55)), (90, (15, 40, 50)), (999, (15, 25, 35)))
 MAX_REMINDERS = 10
+
+# ---------- probabilistic trigger (17.11.2026; behind RAIN_ALERT_PROB, default OFF) ----------
+# Instead of "share >= P_START for MIN_STEPS steps", every forecast step gets a calibrated probability that the place
+# gets rain (a gauge measures >= 0.05 mm in a 10-minute interval overlapping the step's time +- 15 min, the
+# verify_alerts.py hit window), and the alert starts at the first step with P >= P_ALERT. The shown percentage is
+# that P. Inputs are what AlertEngine.series already gives - the wet share of the RADIUS_KM circle per step:
+#   a  = min(share of the step, share of the next step)       (the old rule's quantity)
+#   m  = max share of the steps -15 .. +15 min                (time tolerance; before the first forecast step the
+#   u  = mean share of the same steps                          share now is used, after the last one the last step)
+#   s0 = share now (picture), L = lead in hours, aL / mL / uL = a * L, m * L, u * L
+# P = 1 / (1 + exp(-(c0 + c . x))); P = 0 where m < 0.05 (no rain near the place at that time) or lead < 2.5 min.
+# Coefficients: logistic regression on the Germany recorder (DWD forecast, ~300 DWD gauges, 12.-16.11.2026,
+# 248k step rows): leave-one-day-out reliability within ~0.03 for P 0.1-0.9 at all leads; transfers to the Europe
+# instances' 10-minute gauges with reliable truth (score_alert_prob.py). Rate / intensity added nothing (BSS +0.001)
+# and is defined differently per instance, so it is not an input. Scores and refits: server/score_alert_prob.py.
+# The 60 min heads-up then needs P >= P_EARLY (instead of the circle share); the push title carries the percentage
+# (TEXT main_p / early_p).
+# Env (per instance): RAIN_ALERT_PROB=1 switches it on; RAIN_ALERT_P_MIN (default 0.65) is the alert threshold;
+# RAIN_ALERT_COEF = 9 comma-separated numbers (c0 and the 8 above) replaces the Germany coefficients.
+PROB_FEATURES = ("a", "m", "u", "s0", "L", "aL", "mL", "uL")
+PROB_COEF_DE = (-2.2922, 0.5505, 1.4973, 2.0608, 1.1381, 0.3235, -0.6901, -0.6314, 0.4475)
+
+
+def _env_coef(v, default):
+    try:
+        c = tuple(float(x) for x in v.split(","))
+        return c if len(c) == len(PROB_FEATURES) + 1 else default
+    except (AttributeError, ValueError):
+        return default
+
+
+def _env_float(v, default, lo=0.05, hi=0.95):
+    try:
+        x = float(v)
+        return x if lo <= x <= hi else default
+    except (TypeError, ValueError):
+        return default
+
+
+PROB_ON = os.environ.get("RAIN_ALERT_PROB", "").strip().lower() in ("1", "on", "true", "yes")
+P_ALERT = _env_float(os.environ.get("RAIN_ALERT_P_MIN"), 0.65)
+PROB_COEF = _env_coef(os.environ.get("RAIN_ALERT_COEF"), PROB_COEF_DE)
+
+
+def prob_features(share_fc, share_now, lead_min):
+    """Inputs of the probability per forecast step (vectorized). share_fc (N, K) wet share of the circle per forecast
+    step (NaN = 0), share_now (N,), lead_min (N, K) -> (N, K, len(PROB_FEATURES)) float32."""
+    F = np.nan_to_num(np.asarray(share_fc, np.float32), nan=0.0)
+    s0 = np.nan_to_num(np.asarray(share_now, np.float32), nan=0.0).reshape(-1, 1)
+    k = F.shape[1]
+    nxt = np.concatenate([F[:, 1:], F[:, -1:]], axis=1)
+    a = np.minimum(F, nxt)
+    pad = np.concatenate([np.repeat(s0, 3, axis=1), F, np.repeat(F[:, -1:], 3, axis=1)], axis=1)
+    win = np.stack([pad[:, j:j + k] for j in range(7)], axis=2)  # steps -3 .. +3 (5 min each)
+    m, u = win.max(axis=2), win.mean(axis=2)
+    L = np.asarray(lead_min, np.float32) / 60
+    return np.stack([a, m, u, np.repeat(s0, k, axis=1), L, a * L, m * L, u * L], axis=2)
+
+
+def rain_probability(share_fc, share_now, lead_min, coef=None):
+    """Calibrated probability of rain at the place around each forecast step (see above), shape (N, K)."""
+    c = np.asarray(PROB_COEF if coef is None else coef, np.float64)
+    X = prob_features(share_fc, share_now, lead_min)
+    p = 1 / (1 + np.exp(-(c[0] + X @ c[1:])))
+    return np.where((X[..., 1] >= 0.05) & (np.asarray(lead_min) >= 2.5), p, 0.0)
+
+
 QUIET_FROM, QUIET_TO = 22 * 60, 7 * 60  # default quiet hours (minutes after local midnight)
 SWEEP_S = 600  # how often subscriptions of ended sessions are removed
 # Sending: pywebpush encrypts each message (~3 ms CPU) and waits for the push service (~50-150 ms), so messages go
@@ -341,8 +415,10 @@ class AlertEngine:
         return None
 
     @staticmethod
-    def evaluate(series, now_ms, cfg, st):
-        """Decide what to send for one place. Returns (kind, info) or (None, info); updates the state dict st."""
+    def evaluate(series, now_ms, cfg, st, prob=None):
+        """Decide what to send for one place. Returns (kind, info) or (None, info); updates the state dict st.
+        prob: use the probabilistic trigger (None = as RAIN_ALERT_PROB says)."""
+        prob = PROB_ON if prob is None else prob
         obs = [s for s in series if not s[1]]
         fc = [s for s in series if s[1]]
         info = {}
@@ -351,19 +427,31 @@ class AlertEngine:
             if p >= P_START * 0.6:
                 st["last_wet"] = max(st.get("last_wet", 0), ts)
         raining_now = bool(obs) and obs[-1][2] >= P_START * 0.6
-        # first forecast step where rain sets in and lasts at least MIN_STEPS
-        start = next((i for i in range(len(fc) - MIN_STEPS + 1) if all(fc[i + k][2] >= P_START for k in range(MIN_STEPS))), None)
+        pr = None
+        if prob and fc:
+            # first forecast step whose calibrated rain probability reaches P_ALERT
+            pr = rain_probability([[s[2] for s in fc]], [obs[-1][2] if obs else 0.0],
+                                  [[(s[0] - now_ms) / 60_000 for s in fc]])[0]
+            start = next((i for i in range(len(fc)) if pr[i] >= P_ALERT), None)
+        else:
+            # first forecast step where rain sets in and lasts at least MIN_STEPS
+            start = next((i for i in range(len(fc) - MIN_STEPS + 1) if all(fc[i + k][2] >= P_START for k in range(MIN_STEPS))), None)
         if start is None:
             return None, {"raining_now": raining_now}
-        end = next((i for i in range(start, len(fc)) if fc[i][2] < P_START * 0.6), len(fc))
+        # the event lasts until the circle dries up (probabilistic: counted from the first wet step at or after the start)
+        core = start if pr is None else next((i for i in range(start, len(fc)) if fc[i][2] >= P_START * 0.6), start)
+        end = max(start + 1, next((i for i in range(core, len(fc)) if fc[i][2] < P_START * 0.6), len(fc)))
         event = fc[start:end]
         peak = max(s[3] for s in event)
         lead = (fc[start][0] - now_ms) / 60_000
         lv = level(peak)
         info = {"start_ts": fc[start][0], "lead_min": round(lead), "minutes": (end - start) * 5, "open_end": end == len(fc),
-                "prob": probability(lead, peak),
-                "peak": round(peak, 1), "level": lv[2], "certainty": round(min(s[2] for s in fc[start:start + MIN_STEPS]), 2),
+                "prob": probability(lead, peak) if pr is None else int(round(float(pr[start]) * 20) * 5),
+                "peak": round(peak, 1), "level": lv[2],
+                "certainty": round(min(s[2] for s in fc[start:start + MIN_STEPS]) if pr is None else float(pr[start]), 2),
                 "raining_now": raining_now}
+        if pr is not None:
+            info["p_model"] = round(float(pr[start]), 3)  # also selects the probability texts (message)
         if raining_now:
             return None, info
         same_event = abs(st.get("event_ts", 0) - fc[start][0]) <= 30 * 60_000
@@ -405,8 +493,12 @@ class AlertEngine:
         if word:  # same strength levels, other precipitation: "Starker Schnee" / "Heavy snow", ...
             lv = lv.replace(T["rain_word"].capitalize(), word.capitalize()).replace(T["rain_word"], word)
         chance = T["chance"].format(p=info["prob"]) if info.get("prob") else ""
-        title_f, body_f = T[kind if kind in ("early", "upgrade", "reminder") else "main"]
-        fill = {"icon": icon, "lv": lv, "place": place, "when": when, "dur": dur, "chance": chance, "mins": mins}
+        key = kind if kind in ("early", "upgrade", "reminder") else "main"
+        if info.get("p_model") is not None and key in ("main", "early"):
+            key, chance = key + "_p", ""  # probabilistic trigger: the percentage goes into the title
+        title_f, body_f = T[key]
+        fill = {"icon": icon, "lv": lv, "place": place, "when": when, "dur": dur, "chance": chance, "mins": mins,
+                "p": info.get("prob")}
         return title_f.format(**fill), body_f.format(**fill)
 
     # ---------- sending ----------

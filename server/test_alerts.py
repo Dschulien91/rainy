@@ -3,6 +3,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import alerts  # noqa: E402
 from alerts import AlertEngine  # noqa: E402
 
 MIN = 60_000
@@ -23,9 +24,9 @@ def series(rain_from=None, rain_to=None, rate=1.0, share=0.9, wet_obs=()):
     return out
 
 
-def run(name, s, st=None, cfg=CFG, now=NOW, expect=None):
+def run(name, s, st=None, cfg=CFG, now=NOW, expect=None, prob=False):
     st = {} if st is None else st
-    kind, info = AlertEngine.evaluate(s, now, cfg, st)
+    kind, info = AlertEngine.evaluate(s, now, cfg, st, prob=prob)
     msg = AlertEngine.message(kind, info, "Hamburg", cfg["tz"]) if kind else None
     ok = "ok  " if kind == expect else "FAIL"
     print(f"{ok} {name}: {kind} {msg or ''}")
@@ -63,4 +64,34 @@ results.append(run("quiet 22:00-07:00 at 08:00 -> alert", series(20, 60), cfg={*
 results.append(run("quiet 23:00-08:30 (over midnight) at 08:00 -> nothing", series(20, 60), cfg={**Q, "quietFrom": 1380, "quietTo": 510}, expect=None)[1])
 results.append(run("quiet 08:00-08:00 (empty window) -> alert", series(20, 60), cfg={**Q, "quietFrom": 480, "quietTo": 480}, expect="main")[1])
 results.append(run("quiet hours off -> alert", series(20, 60), cfg={**Q, "quiet": False, "quietFrom": 450, "quietTo": 540}, expect="main")[1])
+
+# probabilistic trigger (RAIN_ALERT_PROB, off by default): the same rules, the start from the calibrated probability
+print("\nprobabilistic trigger (P_ALERT %.2f)" % alerts.P_ALERT)
+results.append(alerts.PROB_ON == bool(os.environ.get("RAIN_ALERT_PROB")))  # off unless switched on
+results.append(run("P: dry, no rain coming", series(), expect=None, prob=True)[1])
+results.append(run("P: certain rain in 15 min -> main", series(15, 60, rate=3, share=1.0), expect="main", prob=True)[1])
+k, info = AlertEngine.evaluate(series(15, 60, rate=3, share=1.0), NOW, CFG, {}, prob=True)
+t, b = AlertEngine.message(k, info, "Hamburg", "Europe/Berlin")
+results.append(info["prob"] >= 65 and info["prob"] % 5 == 0 and f"wahrscheinlich ({info['prob']} %)" in t
+               and "Wahrscheinlichkeit" not in b)
+results.append(f"likely ({info['prob']} %)" in AlertEngine.message(k, info, "Hamburg", "Europe/Berlin", "en")[0])
+print(f"     text: {t} / {b}")
+results.append(run("P: marginal share 0.55 in 20 min -> nothing", series(20, 60, share=0.55), expect=None, prob=True)[1])
+results.append(run("   (the same with the old rule -> main)", series(20, 60, share=0.55), expect="main")[1])
+results.append(run("P: weak share (shower beside the place) -> nothing", series(20, 60, share=0.3), expect=None, prob=True)[1])
+results.append(run("P: short drizzle 5 min -> nothing", series(20, 25, share=1.0), expect=None, prob=True)[1])
+results.append(run("P: already raining -> nothing", series(0, 60, share=1.0, wet_obs=(0, -5)), expect=None, prob=True)[1])
+results.append(run("P: rained 30 min ago (cooldown) -> nothing", series(15, 60, share=1.0, wet_obs=(-30,)), expect=None, prob=True)[1])
+results.append(run("P: heavy certain rain in ~55 min -> early", series(50, 120, rate=12, share=1.0), expect="early", prob=True)[1])
+results.append(run("P: certain light rain in 60 min -> nothing yet", series(60, 120, share=1.0), expect=None, prob=True)[1])
+st, ok = run("P: event: main alert", series(15, 60, rate=3, share=1.0), expect="main", prob=True)
+results.append(ok)
+results.append(run("P: event: 5 min later -> no repeat", series(10, 55, rate=3, share=1.0), st=st, now=NOW + 5 * MIN, expect=None, prob=True)[1])
+# the probability itself: higher with more of the circle wet, lower with the lead, 0 far from any rain, never 1
+P = alerts.rain_probability([[1.0] * 24, [0.6] * 24, [0.0] * 24], [0.0] * 3, [list(range(5, 125, 5))] * 3)
+results.append(bool(P[0, 3] > P[1, 3] > 0 and P[0, 3] > P[0, 20] and P[2].max() == 0 and P.max() < 1))
+# env values: broken ones fall back to the defaults
+results.append(alerts._env_coef("1,2", alerts.PROB_COEF_DE) == alerts.PROB_COEF_DE and alerts._env_float("2", 0.65) == 0.65
+               and alerts._env_coef(",".join(["0.5"] * 9), None) == (0.5,) * 9 and alerts._env_float("0.7", 0.65) == 0.7)
 print(f"\n{sum(results)}/{len(results)} passed")
+sys.exit(0 if all(results) else 1)

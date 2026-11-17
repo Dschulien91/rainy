@@ -33,6 +33,7 @@ services:
       SMTP_USER: ${SMTP_USER:-}
       SMTP_PASS: ${SMTP_PASS:-}
       MAIL_FROM: ${MAIL_FROM:-rainy <hey@hellorainy.com>}
+      RAIN_ALERT_PROB: "1"      # push start from a probability calibrated at DWD gauges, alert only at P >= 0.65 (17.11.: FAR 15-30 min 0.47 -> 0.28, POD 0.53 -> 0.30, shown 68 % = came true 69 %)
       # never set RAINY_DEV here: it enables fake test scenarios (server/devtools.py)
     volumes:
       - model-log:/app/model_log           # model snapshots for verify_blend.py
