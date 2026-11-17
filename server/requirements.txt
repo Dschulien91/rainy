@@ -8,3 +8,4 @@ pysteps
 pywebpush
 tzdata
 eccodes
+omfiles==1.2.0  # Open-Meteo .om files: the rapid-update weather models for the shadow "nwp" (nwp_blend.py)

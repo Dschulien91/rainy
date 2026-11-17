@@ -105,7 +105,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v1.50"
+VERSION = "server-v1.51"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -492,6 +492,10 @@ LOCAL_PM_KM = 150.0
 # 0.90, Czechia 0.90 / 0.99 -> 1.05 / 1.19; cell-by-cell CSI unchanged (+-0.01). The uncorrected S-PROG stays the
 # scored shadow "sprog0" (= the old served forecast from +60 on). LOCAL_AMOUNT=0 switches it off.
 LOCAL_AMOUNT = os.environ.get("LOCAL_AMOUNT", "1") == "1"
+# Rapid-update weather models (DWD ICON-D2-RUC, Meteo-France AROME-PI; NOAA HRRR for North America) blended into the
+# forecast for +45..+120 min - scored shadow "nwp" only, not served (nwp_blend.py, offline test tune_blend.py).
+# NWP_BLEND=0 switches it off; never in the own-picture instance (EU_NATIONAL, CPU for the public instances).
+NWP_BLEND = os.environ.get("NWP_BLEND", "1") != "0"
 
 
 def local_amount(fc, last, motion, km_per_px, sigma_km=LOCAL_PM_KM, power=1.0, clip=3.0, keep=True):
@@ -862,8 +866,18 @@ class Region:
             raw = {last_t + (i + 1) * STEP_MS: g.astype(np.float16) for i, g in enumerate(small)}  # = fc, at 1/d
             cells = blend_new_cells(self.model, small, last_t, km_per_px=self.KM_PER_PX * d)  # changes `small` in place
             cells = {last_t + (i + 1) * STEP_MS: g.astype(np.float16) for i, g in enumerate(cells)}
+        nwp = None
+        if getattr(self, "nwp", None) is not None:  # shadow "nwp": the served forecast with the rapid-update models
+            try:
+                d = self.RAW_DOWN
+                shrink = lambda g: cv2.resize(np.asarray(g, np.float32), (g.shape[1] // d, g.shape[0] // d),
+                                              interpolation=cv2.INTER_AREA)
+                nwp = self.nwp.shadow([shrink(g) for g in fc], shrink(last), last_t)
+            except Exception as e:
+                log(f"{self.name} nwp shadow failed: {e}")
         pure = None
         with self.lock:
+            self.fc_nwp = nwp  # verification shadow "nwp" (fcverify.RegionVerify), at 1 / RAW_DOWN
             self.fc_raw = raw
             self.fc_cells = cells  # verification shadow "cells": with the model's new showers (served until 11.11.)
             self.fc_pure = pure_small  # S-PROG without advection blend and amount control: verification shadow "sprog0"
@@ -964,7 +978,7 @@ class EuropeOpera(Region):
             with self.lock:
                 self.obs, self.fc, self.ref = obs, fc, ref
                 self.filled = set(meta["filled"]) & set(obs)
-                self.fc_raw = self.fc_cells = self.fc_pure = None
+                self.fc_raw = self.fc_cells = self.fc_pure = self.fc_nwp = None
             self.saved_filled = set(self.filled)
             log(f"{self.name}: continuing with the run of {datetime.fromtimestamp(ref / 1000, timezone.utc):%H:%MZ} "
                 f"from before the restart ({len(obs)} images)")
@@ -1963,6 +1977,10 @@ def main_eu():
     if os.environ.get("EU_MODEL_BLEND", "1") != "0":  # only the verification shadow "cells" needs the weather model
         eu.model = ModelRain(eu)
         threading.Thread(target=model_loop, args=(eu.model,), daemon=True).start()
+    if NWP_BLEND and not EU_NATIONAL:  # the newest rapid-update model runs for the shadow "nwp" (nwp_blend.py)
+        import nwp_blend
+        eu.nwp = nwp_blend.NwpLive(eu, "na" if NA else "eu", eu.RAW_DOWN, log, lock=SPROG_LOCK)
+        threading.Thread(target=eu.nwp.loop, daemon=True).start()
     threading.Thread(target=EU_VERIFY.loop, daemon=True).start()
     if not EU_NATIONAL and not NA:  # measurements that are needed once, not per instance: in the OPERA instance
         threading.Thread(target=gauge_archive_loop, daemon=True).start()
