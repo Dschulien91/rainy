@@ -473,11 +473,11 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=1.23"></script>
-<script src="lang/en.js?v=1.23"></script>
+<script src="lang/de.js?v=1.24"></script>
+<script src="lang/en.js?v=1.24"></script>
 <script>
 "use strict";
-const VERSION = "v1.23";
+const VERSION = "v1.24";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -641,7 +641,8 @@ const MAP_STYLE = (() => {
   try { st = JSON.parse(localStorage.getItem("rainy.style")) || {}; } catch {}
   return { sat: st.sat === "photo" ? "photo" : "clouds", theme: ["light", "dark", "auto"].includes(st.theme) ? st.theme : "dark", // dark by default (07.11.)
     rain: st.rain === "eu" ? "eu" : "mix", area: ["de", "na"].includes(st.area) ? st.area : "eu", eusrc: st.eusrc === "opera" ? "opera" : "nat" /* own Europe picture by default (user, 14.11.2026) */, render: st.render === "img" ? "img" : "gl", // WebGL by default (10.11.); pictures without WebGL
-    fc: (new URLSearchParams(location.search).get("fc") || st.fc) === "own" ? "own" : "dwd", design: ["liberty", "bright", "fiord", "earth"].includes(st.design) ? st.design : "plain" };
+    fc: (new URLSearchParams(location.search).get("fc") || st.fc) === "own" ? "own" : "dwd", design: ["liberty", "bright", "fiord", "earth"].includes(st.design) ? st.design : "plain",
+    warn: st.warn === "on" ? "on" : "off" /* warnings + lightning on the map and the warning line: off by default (user, 18.11.2026) */ };
 })();
 // Edition: "de" = first public version (Germany: rain radar 2 h + 24 h / 3 days; sunny 2 h from the server's DWD satellite
 // sunshine (server/sunny_de.py) + 24 h / 3 days from the weather model; the Europe/USA radar is hidden and everything
@@ -655,6 +656,9 @@ const DE_ONLY = EDITION === "de";
 // Europe is the default area since v0.98 (12.11., user decision); "Deutschland" chosen in the settings stays, ?area=de / ?area=eu override
 // Area "na" = North America (beta, 15.11.2026): NOAA MRMS radar with our nowcast from the instance behind /na/. It
 // runs the Europe area's whole pipeline (same tiles, timeline, settings), so EU_AREA is true for it as well.
+// Official warnings, DWD thunderstorm areas and lightning (settings "Warnungen & Blitze"): hidden unless switched on.
+// The server keeps collecting the warnings to check our own forecast against them (server/warn_check.py).
+const WARN_ON = MAP_STYLE.warn === "on";
 const NA_AREA = DE_ONLY && (new URLSearchParams(location.search).get("area") || MAP_STYLE.area) === "na";
 const EU_AREA = DE_ONLY && ((new URLSearchParams(location.search).get("area") || MAP_STYLE.area) === "eu" || NA_AREA);
 if (NA_AREA) Object.assign(FALLBACK, { lat: 40.7128, lon: -74.006, name: "New York" });
@@ -1635,6 +1639,7 @@ async function loadThunderPoint(loc) {
 // MeteoAlarm copy (district level). Level 2 yellow, 3 orange, 4 red; level 1 (minor notes) is not shown.
 const WARN_BASES = !API_BASE ? [] : NA_AREA ? [`${API_BASE}/na`] : EU_AREA ? [API_BASE, `${API_BASE}/eu`] : [API_BASE];
 async function loadWarningsPoint(loc) {
+  if (!WARN_ON) { state.warnings = []; return; }
   const q = `lat=${loc.lat.toFixed(2)}&lon=${loc.lon.toFixed(2)}&lang=${LANG}`;
   const res = await Promise.all(WARN_BASES.map((b) => getJSON(`${b}/api/warnings/point?${q}`).catch(() => null)));
   const dwd = res[0] && res[0].warnings.some((w) => w.source === "dwd"), out = [];
@@ -1921,7 +1926,7 @@ function placeWarnings() {
     .sort((a, b) => b.level - a.level || (a.onset > now) - (b.onset > now) || a.onset - b.onset);
 }
 function renderWarnPill() {
-  const line = document.getElementById("warnline"), list = placeWarnings(), w = list[0];
+  const line = document.getElementById("warnline"), list = WARN_ON ? placeWarnings() : [], w = list[0];
   line.hidden = !w;
   if (!w) { document.getElementById("warnCard").classList.remove("show"); return; }
   const when = w.onset <= Date.now() ? t("warn.until", { time: fmtWhen(w.expires) }) : t("warn.from", { time: fmtWhen(w.onset) });
@@ -1957,7 +1962,7 @@ map.getPane("warnings").style.pointerEvents = "none";
 let warnAreaLayer = null, warnAreaKey = "", warnAreaAt = 0, warnAreaTimer = 0;
 const warnRenderer = L.canvas({ pane: "warnings", padding: 0.3 });
 async function loadWarnAreas() {
-  if (!WARN_BASES.length) return;
+  if (!WARN_ON || !WARN_BASES.length) return;
   const b = map.getBounds(), r = (v, f) => f(v / 2) * 2;
   const box = [Math.max(-180, r(b.getWest(), Math.floor)), Math.max(-84, r(b.getSouth(), Math.floor)),
     Math.min(180, r(b.getEast(), Math.ceil)), Math.min(84, r(b.getNorth(), Math.ceil))].join(",");
@@ -1990,7 +1995,7 @@ map.createPane("thunder").style.zIndex = 360;
 map.getPane("thunder").style.pointerEvents = "none";
 let warnLayer = null, lightningLayer = null;
 async function loadThunderLayers() {
-  if (!API_BASE) return;
+  if (!API_BASE || !WARN_ON) return;
   try {
     const areas = await getJSON(`${API_BASE}/api/thunder/areas`);
     if (warnLayer) warnLayer.remove();
@@ -3334,6 +3339,7 @@ function showSettings() {
     <div class="sec">${t("settings.map")}</div>
     <div class="row"><span>${t("settings.design")}</span>${seg("design", Object.entries(MAP_DESIGNS).map(([k, d]) => [k, d.label]))}</div>
     <div class="row"><span>${t("settings.colors")}</span>${seg("theme", [["auto", t("settings.themeAuto")], ["light", t("settings.themeLight")], ["dark", t("settings.themeDark")]])}</div>
+    ${API_BASE ? `<div class="row"><span>${t("settings.warn")}</span>${seg("warn", [["off", t("settings.warnOff")], ["on", t("settings.warnOn")]])}</div>` : ""}
     ${DE_ONLY ? "" : `<div class="row"><span>${t("settings.clouds")}</span>${seg("sat", [["clouds", t("settings.cloudsStandard")], ["photo", t("settings.cloudsPhoto")]])}</div>
     <div class="row"><span>${t("settings.rain")}</span>${seg("rain", [["mix", t("settings.rainMix")], ["eu", t("settings.rainEu")]])}</div>`}
     ${DE_ONLY && API_BASE ? `<div class="row"><span>${t("settings.area")}</span>${seg("area", [["de", t("settings.areaDe")], ["eu", t("settings.areaEu") + BETA_MARK], ["na", t("settings.areaNa") + BETA_MARK]])}</div>` : ""}
@@ -3352,8 +3358,8 @@ function showSettings() {
     a.places.splice(+b.dataset.rm, 1);
     update(); renderPlace(); showSettings();
   }));
-  card.querySelectorAll("[data-sat], [data-theme], [data-rain], [data-fc], [data-design], [data-area], [data-render], [data-eusrc]").forEach((b) => b.addEventListener("click", () => {
-    const key = ["sat", "theme", "rain", "fc", "design", "area", "render", "eusrc"].find((k) => b.dataset[k] != null), next = { ...MAP_STYLE, [key]: b.dataset[key] };
+  card.querySelectorAll("[data-sat], [data-theme], [data-rain], [data-fc], [data-design], [data-area], [data-render], [data-eusrc], [data-warn]").forEach((b) => b.addEventListener("click", () => {
+    const key = ["sat", "theme", "rain", "fc", "design", "area", "render", "eusrc", "warn"].find((k) => b.dataset[k] != null), next = { ...MAP_STYLE, [key]: b.dataset[key] };
     if (next[key] === MAP_STYLE[key]) return;
     try { localStorage.setItem("rainy.style", JSON.stringify(next)); } catch {}
     flushSync(true); // keepalive request: survives the reload
