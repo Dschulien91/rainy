@@ -87,6 +87,8 @@ services:
       PORT: "8771"
       EDITION: eu
       EU_NATIONAL: "1"
+      NWP_BLEND: "1"           # rapid-update model blend also in the own picture (default Europe view), served like api-eu
+      NWP_SERVE: "1"
       EU_MODEL_BLEND: "0"
       SUNNY_DE: "0"
       PRERENDER: "0"

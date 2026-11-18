@@ -105,7 +105,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v1.56"
+VERSION = "server-v1.57"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -1990,7 +1990,8 @@ def main_eu():
     if os.environ.get("EU_MODEL_BLEND", "1") != "0":  # only the verification shadow "cells" needs the weather model
         eu.model = ModelRain(eu)
         threading.Thread(target=model_loop, args=(eu.model,), daemon=True).start()
-    if NWP_BLEND and not EU_NATIONAL:  # the newest rapid-update model runs for the shadow "nwp" (nwp_blend.py)
+    # own-picture instance (EU_NATIONAL, the app's default Europe picture) only when NWP_BLEND=1 is set explicitly
+    if NWP_BLEND and (not EU_NATIONAL or os.environ.get("NWP_BLEND") == "1"):  # the newest rapid-update model runs for the shadow "nwp" (nwp_blend.py)
         import nwp_blend
         eu.nwp = nwp_blend.NwpLive(eu, "na" if NA else "eu", eu.RAW_DOWN, log, lock=SPROG_LOCK)
         threading.Thread(target=eu.nwp.loop, daemon=True).start()
