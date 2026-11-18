@@ -105,7 +105,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v1.57"
+VERSION = "server-v1.58"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -1870,6 +1870,12 @@ def warnings_start(regions):
     import official_warnings
     WARNINGS = official_warnings.Warnings(fetch, log, os.path.join(DATA_DIR, "warnings"), regions=regions)
     threading.Thread(target=WARNINGS.loop, daemon=True).start()
+    # 18.11.2026: the warnings check our own data (warn_check.py) - archive them and our forecasts for the daily check
+    import warn_check
+    name = "de" if EDITION == "de" else "na" if NA else "eu"
+    threading.Thread(target=warn_check.Recorder(
+        log, WARNINGS, THUNDER if EDITION == "de" else None, warn_check.RegionFc(DE if EDITION == "de" else REGIONS["eu"], name),
+        name, skip=() if EDITION == "de" else ("dwd",)).loop, daemon=True).start()  # api-eu: DWD is archived by api
 ALERTS = alerts.AlertEngine(DATA_DIR, {**REGIONS, "de": DE}, log, UA, VAPID_SUBJECT,
                             order=("de",) if EDITION == "de" else ("eu", "us"), thunder=THUNDER,
                             kind_at=lambda lat, lon, ts: ptype.NAMES[int(MOSAIC.kind(ts, *(np.array([[v]]) for v in mosaic.merc(lon, lat)))[0, 0])]

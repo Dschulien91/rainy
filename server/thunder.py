@@ -63,6 +63,11 @@ class Thunder:
         out, feats = [], []
         for f in d.get("features", []):
             p, g = f["properties"], f.get("geometry") or {}
+            # GeoServer's WFS 2.0 answers EPSG:4326 in lat/lon axis order; GeoJSON, Leaflet and inside() want lon/lat
+            # (until 18.11.2026 the order was not swapped: no place ever matched, thunder pushes never fired, and the
+            # map areas were drawn off-map)
+            flip = lambda c: [c[1], c[0]] if c and not isinstance(c[0], list) else [flip(x) for x in c]
+            g = {**g, "coordinates": flip(g.get("coordinates", []))}
             polys = g.get("coordinates", []) if g.get("type") == "MultiPolygon" else [g.get("coordinates", [])] if g.get("type") == "Polygon" else []
             rings = [poly[0] for poly in polys if poly]
             if not rings:
