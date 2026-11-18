@@ -42,6 +42,9 @@ JOBS = [
     ("Regen Europa, zellgenau", ["score_same.py", "own", "pers", "--log", "eugrid", "--strict"]),
     ("Regen Europa: Varianten im Test (cells = mit Modell-Schauern, sprog0 = ohne Mitführen des letzten Bildes)",
      ["score_same.py", "own", "cells", "sprog0", "--log", "eugrid"]),
+    # NWP_SERVE (18.11.2026): own = served with the rapid-update model blend, own0 = without it, nwp = the 4 km reference
+    ("Regen Europa: Modell-Blend (own = ausgeliefert mit Blend, own0 = ohne, nwp = 4-km-Referenz des Blends)",
+     ["score_same.py", "own", "own0", "nwp", "--log", "eugrid"]),
     ("Regen Europa, Ausschnitt wie WetterOnline", ["score_same.py", "own", "pers", "--log", "eugrid", "--area", "wo"]),
     ("Regen Europa an den österreichischen Regenmessern: eigene (own) gegen den Nowcast des österreichischen Wetterdienstes (inca) und 'bleibt so' (pers)",
      ["score_inca.py"]),

@@ -58,6 +58,7 @@ services:
     environment:
       PORT: "8771"
       EDITION: eu
+      NWP_SERVE: "1"           # serve the rapid-update model blend (ICON-D2-RUC, AROME-PI) from +45 min (18.11.: CSI >= 1 mm/h +120 0.56 -> 0.61, amount 0.89 -> 1.02)
       EU_MODELS: icon_eu       # the model blend reads only the model on local disk
       OPENMETEO_URL: http://openmeteo:8080
       MODEL_LOG_DIR: /app/model_log

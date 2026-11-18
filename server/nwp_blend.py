@@ -28,6 +28,13 @@ Method (per forecast run at analysis time ref, on the verification grid ~4 km):
     first 30-45 min; optionally probability-matched to the w-mix of both fields' distributions (keeps the amount and
     the wet area between the two instead of the smeared union).
 All of it is measured offline first (tune_blend.py) and live as the shadow "nwp" (fcverify).
+
+Served in Europe since 18.11.2026 (env NWP_SERVE=1, set for api-eu only): live 17./18.11., ~540 runs, CSI
+>= 1 mm/h +90/+120 0.64/0.56 -> 0.66/0.61, amount x0.91/0.89 -> 0.98/1.02, +15..+60 unchanged. North America keeps it
+as a shadow (HRRR: neutral). The shadow is still computed on the 4 km grid from the un-blended forecast; serve_full
+carries it to the full-resolution grid (factor + addition per 4 km pixel, upsampled smoothly), and every consumer
+(tiles, data tiles, point series, alerts, gauges) reads that one served forecast. The un-blended forecast stays scored
+as the shadow "own0" (fcverify.RegionVerify).
 """
 import bz2
 import json
@@ -513,11 +520,74 @@ def blend_step(g, lead, t, model_at, E, opts=DEFAULT):
     return b
 
 
+# ---------- serving: the blend on the full-resolution grid (NWP_SERVE, Europe since 18.11.2026) ----------
+def serve_full(fc, small, blended, down, ref, step_ms=300_000, lo=1 / 3, hi=3.0, smooth=True, backproject=1):
+    """The served forecast with the blend, at full resolution, built so that it equals the scored shadow "nwp" on the
+    verification grid: the shadow is computed on the forecast shrunk to 1/down (`small`, the exact input of
+    NwpLive.shadow); here it is split per coarse pixel into a factor and an addition, nwp = own * R + A:
+      R = nwp / own where own is wet (>= 0.05 mm/h), clipped lo..hi (the trend term's 1/3..3); outside the wet
+        pixels R is extended smoothly from its wet neighbours (log-mean, ~2 px) - so a full-resolution rain edge
+        that reaches into a coarse dry pixel is scaled like its rain area;
+      A = nwp - own * R: zero where the factor reproduces the blend; the model's rain where own is dry (the linear
+        term's new rain, already probability-matched by blend_step), and the remainder where R was clipped.
+    Both are upsampled bilinearly (smooth=False: nearest = the shadow exactly after INTER_AREA shrinking, but 2x2
+    blocks in the map) and applied to the full-resolution steps: out = fc * R + A. Bilinear upsampling moves a little
+    rain between neighbouring coarse pixels; `backproject` rounds put that back (the coarse difference nwp - shrunk
+    out, upsampled bilinearly, added: classic iterative back-projection). Then < 0.05 -> 0, no-data kept.
+    Synthetic check (2200 x 1900, rough random fields): agreement of the shrunk result with the shadow, cells >= 0.1 /
+    >= 1 mm/h at +120: nearest 0.999 / 1.000, bilinear 0.981 / 0.992, bilinear + 1 back-projection 0.994 / 0.998.
+    fc: full-resolution steps (float16, < 0 = no radar); small: [coarse float32 steps]; blended: NwpLive.shadow's
+    {valid ms: float16}. Steps without a blend (leads before the ramps start: blended == small) stay the same object.
+    Cost (Europe, 2 km grid 2200 x 1900, 18 changed steps): see NwpLive.serve."""
+    out = list(fc)
+    for i, g in enumerate(fc):
+        n = blended.get(ref + (i + 1) * step_ms)
+        if n is None or i >= len(small):
+            continue
+        o = np.asarray(small[i], np.float32)
+        n = np.asarray(n, np.float32)
+        if n.shape != o.shape or np.array_equal(n, o.astype(np.float16).astype(np.float32)):
+            continue  # this lead is not blended (blend_step returned its input)
+        h, w = o.shape
+        cov = o >= 0
+        oc = np.where(cov, o, 0).astype(np.float32)
+        nc = np.where(cov & (n > 0), n, 0).astype(np.float32)
+        wet = oc >= 0.05
+        lr = np.zeros_like(oc)
+        lr[wet] = np.log(np.clip(nc[wet] / oc[wet], lo, hi))
+        num = cv2.GaussianBlur(lr * wet, (0, 0), 2.0)
+        den = cv2.GaussianBlur(wet.astype(np.float32), (0, 0), 2.0)
+        lr = np.where(wet, lr, np.where(den > 1e-3, num / np.maximum(den, 1e-3), 0))
+        del num, den
+        R = np.exp(lr).astype(np.float32)
+        A = np.where(cov, nc - oc * R, 0).astype(np.float32)
+        del lr, oc, nc, wet
+        H, W = g.shape
+        interp = cv2.INTER_LINEAR if smooth else cv2.INTER_NEAREST
+        up = lambda x: cv2.copyMakeBorder(cv2.resize(x, (w * down, h * down), interpolation=interp),
+                                          0, max(0, H - h * down), 0, max(0, W - w * down), cv2.BORDER_REPLICATE)[:H, :W]
+        f = np.asarray(g, np.float32)
+        res = np.maximum(f, 0)
+        res *= up(R)
+        res += up(A)
+        np.maximum(res, 0, out=res)
+        for _ in range(backproject):  # what the smooth upsampling moved between coarse pixels, put back (smoothly)
+            cr = cv2.resize(np.ascontiguousarray(res[: h * down, : w * down]), (w, h), interpolation=cv2.INTER_AREA)
+            res += up(np.where(cov, np.maximum(n, 0) - cr, 0).astype(np.float32))
+            np.maximum(res, 0, out=res)
+        res[res < 0.05] = 0
+        res[f < 0] = f[f < 0]  # no-data stays
+        out[i] = res.astype(np.float16)
+        del R, A, f, res
+    return out
+
+
 # ---------- live: the newest runs for a region (background refresh) ----------
 class NwpLive:
     """Keeps the newest run of every model of a region on the verification grid (region grid / down), refreshed every
     5 min (new runs come about hourly). shadow(fc_small, last_small, ref) -> {valid ms: float16 grid}: the scored
-    shadow "nwp". lock: held while a model grid's mapping is built (the instance's S-PROG lock: never both at once).
+    shadow "nwp" (with NWP_SERVE: also what serve() puts on the full grid). lock: held while a model grid's mapping is
+    built (the instance's S-PROG lock: never both at once).
     Memory: ~0.15 GB held (mappings + two runs of 20 steps at ~4 km), ~0.3 GB once at the start."""
 
     def __init__(self, region, region_key, down, log=print, opts=None, lock=None):
@@ -567,3 +637,11 @@ class NwpLive:
             return None
         out = blend(fc_small, ref, last, model_at, E, self.opts)
         return {ref + (i + 1) * 300_000: g.astype(np.float16) for i, g in enumerate(out)}
+
+    def serve(self, fc, fc_small, blended, ref):
+        """The full-resolution steps with the blend (serve_full; NWP_SERVE). Not under any lock: ~1 s of CPU and
+        ~0.1 GB of temporaries for a moment (one step at a time), the changed steps replace the old ones."""
+        t0 = time.time()
+        out = serve_full(fc, fc_small, blended, self.down, ref)
+        self.serve_s = time.time() - t0
+        return out

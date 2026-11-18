@@ -105,7 +105,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v1.55"
+VERSION = "server-v1.56"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -493,9 +493,14 @@ LOCAL_PM_KM = 150.0
 # scored shadow "sprog0" (= the old served forecast from +60 on). LOCAL_AMOUNT=0 switches it off.
 LOCAL_AMOUNT = os.environ.get("LOCAL_AMOUNT", "1") == "1"
 # Rapid-update weather models (DWD ICON-D2-RUC, Meteo-France AROME-PI; NOAA HRRR for North America) blended into the
-# forecast for +45..+120 min - scored shadow "nwp" only, not served (nwp_blend.py, offline test tune_blend.py).
+# forecast for +45..+120 min - scored shadow "nwp"; served only with NWP_SERVE=1 (below; nwp_blend.py, tune_blend.py).
 # NWP_BLEND=0 switches it off; never in the own-picture instance (EU_NATIONAL, CPU for the public instances).
 NWP_BLEND = os.environ.get("NWP_BLEND", "1") != "0"
+# NWP_SERVE=1 (set for api-eu only, 18.11.2026): the blend is SERVED - live 17./18.11., ~540 Europe runs, CSI >= 1 mm/h
+# +90/+120 0.64/0.56 -> 0.66/0.61, amount x0.91/0.89 -> 0.98/1.02, +15..+60 unchanged; North America neutral (shadow
+# only). The 4 km shadow is carried to the full grid (nwp_blend.serve_full) before self.fc is set, so tiles, data
+# tiles, point series, alerts and gauges all read the blended forecast; the un-blended one is the shadow "own0".
+NWP_SERVE = os.environ.get("NWP_SERVE", "0") == "1"
 
 
 def local_amount(fc, last, motion, km_per_px, sigma_km=LOCAL_PM_KM, power=1.0, clip=3.0, keep=True):
@@ -866,17 +871,24 @@ class Region:
             raw = {last_t + (i + 1) * STEP_MS: g.astype(np.float16) for i, g in enumerate(small)}  # = fc, at 1/d
             cells = blend_new_cells(self.model, small, last_t, km_per_px=self.KM_PER_PX * d)  # changes `small` in place
             cells = {last_t + (i + 1) * STEP_MS: g.astype(np.float16) for i, g in enumerate(cells)}
-        nwp = None
+        nwp = own0 = None
+        pure = None  # S-PROG's own steps: not needed any more (frees the steps serve() replaces)
         if getattr(self, "nwp", None) is not None:  # shadow "nwp": the served forecast with the rapid-update models
             try:
                 d = self.RAW_DOWN
                 shrink = lambda g: cv2.resize(np.asarray(g, np.float32), (g.shape[1] // d, g.shape[0] // d),
                                               interpolation=cv2.INTER_AREA)
-                nwp = self.nwp.shadow([shrink(g) for g in fc], shrink(last), last_t)
-            except Exception as e:
-                log(f"{self.name} nwp shadow failed: {e}")
-        pure = None
+                small = [shrink(g) for g in fc]
+                nwp = self.nwp.shadow(small, shrink(last), last_t)
+                if NWP_SERVE:  # the blend served: fc becomes the shadow carried to the full grid (nwp_blend.serve_full)
+                    own0 = {last_t + (i + 1) * STEP_MS: g.astype(np.float16) for i, g in enumerate(small)}
+                    if nwp:
+                        fc = self.nwp.serve(fc, small, nwp, last_t)
+                del small
+            except Exception as e:  # never lose the forecast: fc is only replaced once serve() has finished
+                log(f"{self.name} nwp shadow{' / serve' if NWP_SERVE else ''} failed: {e}")
         with self.lock:
+            self.fc_own0 = own0  # NWP_SERVE: verification shadow "own0" = the forecast without the blend, at 1 / RAW_DOWN
             self.fc_nwp = nwp  # verification shadow "nwp" (fcverify.RegionVerify), at 1 / RAW_DOWN
             self.fc_raw = raw
             self.fc_cells = cells  # verification shadow "cells": with the model's new showers (served until 11.11.)
@@ -1028,7 +1040,8 @@ class EuropeOpera(Region):
                 grids = [self.obs.get(ref)] + [self.fc.get(ref + m * 60_000) for m in cng.FC_LEADS]
                 # the same run's other forecasts, kept at 1 / RAW_DOWN: S-PROG alone, and with the model's new showers
                 more = {name: [d.get(ref + m * 60_000) for m in cng.FC_LEADS]
-                        for name, d in (("pure", getattr(self, "fc_pure", None)), ("cells", getattr(self, "fc_cells", None))) if d}
+                        for name, d in (("pure", getattr(self, "fc_pure", None)), ("cells", getattr(self, "fc_cells", None)),
+                                        ("own0", getattr(self, "fc_own0", None))) if d}  # own0: without the blend (NWP_SERVE)
             if ref % 600_000 or any(g is None for g in grids):  # the gauges report every 10 minutes
                 return
             d = self.RAW_DOWN

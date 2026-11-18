@@ -260,6 +260,15 @@ class RegionVerify:
     plus those showers, Region.fc_cells), "sprog0" (S-PROG before the advection blend of 10.11., Region.fc_pure),
     "nwp" (own blended with the rapid-update models ICON-D2-RUC / AROME-PI / HRRR, nwp_blend.py, Region.fc_nwp) and
     "pers" (the analysis at issue time: the baseline to beat).
+    Since the blend is served (env NWP_SERVE=1: Europe from 18.11.2026; North America keeps it as a shadow):
+      "own"   = served = the un-blended forecast with the blend carried to the full grid (nwp_blend.serve_full);
+      "own0"  = the un-blended forecast (S-PROG + local_amount + advection blend) = what "own" was before the switch,
+                Region.fc_own0 - the reference for the blend's gain ("own" vs "own0");
+      "nwp"   = the blend computed on this ~4 km grid from "own0", as before = what the shadow scored for the decision;
+                "own" vs "nwp" measures how faithfully the served full-grid field reproduces it (should be within
+                +-0.005 CSI / amount), so "nwp" does not become a copy of "own": it stays the coarse reference;
+      "cells" = "own0" plus the model's new showers (built before the blend), "sprog0" unchanged.
+    Without NWP_SERVE there are no "own0" rows ("own" is the un-blended forecast itself).
     Rows as fcgrid (score_same.py --log eugrid): verify_log/eugrid_<YYYYMMDD>.jsonl. Every analysis is saved on that
     grid to verify_log/obs_eu/ (truth for tools/wo_verify_eu.py, kept OBS_KEEP_DAYS) with grid.json (the region's
     projection and cell size). Each row is written twice: area "all" (the whole radar coverage) and area "wo" (only
@@ -294,7 +303,8 @@ class RegionVerify:
             ref, obs = r.ref, dict(r.obs)
             fc, raw = dict(r.fc), dict(getattr(r, "fc_cells", None) or {})
             pure = dict(getattr(r, "fc_pure", None) or {})
-            nwp = dict(getattr(r, "fc_nwp", None) or {})  # rapid-update model blend (nwp_blend.py), shadow only
+            nwp = dict(getattr(r, "fc_nwp", None) or {})  # rapid-update model blend (nwp_blend.py), at ~4 km
+            own0 = dict(getattr(r, "fc_own0", None) or {})  # NWP_SERVE: the forecast without the blend
         if not ref or ref not in obs:
             return
         if ref != self.done_ref:
@@ -306,7 +316,7 @@ class RegionVerify:
                 put(("pers", ref, lead), a0)
                 if t in fc:
                     put(("own", ref, lead), self._grid(fc[t])[0])
-                for name, src in (("cells", raw), ("sprog0", pure), ("nwp", nwp)):
+                for name, src in (("cells", raw), ("sprog0", pure), ("nwp", nwp), ("own0", own0)):
                     if t in src:
                         g = np.asarray(src[t], np.float32)
                         if g.shape != a0.shape:
