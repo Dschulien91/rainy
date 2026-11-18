@@ -20,7 +20,8 @@ Layers:
       product SRT1 is exactly the sum of the SRI images T-60 .. T-5, measured 13.11.) and 1.4-2.8 x too wet at the
       gauges, most of all in light rain: see ItalyDpc.damp().
       Licence CC BY-SA ("citare la fonte Radar-DPC", derived works under the same licence).
-      Used only over Italy and the seas around it (ItalyDpc.AREA): far from the Italian radars the product is much too
+      Used only over Italy, the seas around it and western Slovenia (ItalyDpc.AREA, WEST_SLOVENIA since 18.11.2026:
+      OPERA has no radar that sees the west of Slovenia well): far from the Italian radars the product is much too
       wet - 13.11.2026, 33 Austrian gauges in Carinthia over 2.5 h: gauges 0.07 mm/h, OPERA 0.32, SRI 2.71 (wet at
       460 of 475 gauge readings, the gauges at 35); Klagenfurt 3.9 mm/h at 20 dBZ maximum reflectivity.
   de  Germany - Deutscher Wetterdienst, open data RV composite: the analysis of each 5-min run (mm per 5 min, 1 km,
@@ -289,12 +290,28 @@ class ItalyDpc(Layer):
             (9.08, 45.90), (9.02, 46.05), (9.17, 46.17), (9.28, 46.50), (9.45, 46.50), (9.58, 46.29), (9.95, 46.38),
             (10.10, 46.23), (10.17, 46.40), (10.08, 46.60), (10.45, 46.55), (10.47, 46.86), (10.75, 46.80),
             (11.05, 46.80), (11.15, 46.95), (11.50, 47.00), (12.13, 47.09), (12.22, 46.88), (12.40, 46.70),
-            (12.75, 46.64), (13.20, 46.59), (13.72, 46.52), (13.66, 46.44), (13.40, 46.32), (13.48, 46.20),
-            (13.52, 46.05), (13.64, 45.95), (13.60, 45.80), (13.80, 45.73), (13.92, 45.63), (13.72, 45.60),
+            (12.75, 46.64), (13.20, 46.59), (13.72, 46.52)] + [
+            # the Slovenian border (used without WEST_SLOVENIA)
+            (13.66, 46.44), (13.40, 46.32), (13.48, 46.20), (13.52, 46.05), (13.64, 45.95), (13.60, 45.80),
+            (13.80, 45.73), (13.92, 45.63), (13.72, 45.60)] + [
             (13.40, 45.50), (13.05, 45.10), (13.30, 44.50), (14.30, 43.60), (15.40, 43.00), (17.00, 42.10),
             (18.30, 41.20), (18.95, 40.30), (19.20, 39.40), (19.60, 34.50), (11.50, 34.50), (11.50, 37.30),
             (10.20, 37.90), (8.00, 38.20), (7.30, 38.40), (7.30, 41.20), (8.60, 41.33), (9.26, 41.31), (9.60, 41.36),
             (9.75, 41.60), (9.75, 42.90), (9.30, 43.35), (8.50, 43.50), (7.60, 43.60)]
+    # WESTERN SLOVENIA (18.11.2026): OPERA has only the eastern Slovenian radar (Lisca; Pasja ravan has not been in
+    # the composite's node list on any day 16.-18.11., nor in ARSO's own composite, which lists SI1 only) and no
+    # Italian radar, so the west of Slovenia is seen from 100+ km away: 17.11., 09-20 UTC, Otlica gauge 54 mm, OPERA
+    # 6.6, Nova Gorica 16 / 1.8. DPC's SRI holds the Friuli radar ~40 km from there. 16.-18.11., 19 ARSO gauges, hourly
+    # sums CSI at 0.2 / 1 / 3 mm: OPERA 0.45/0.32/0.00 x0.38 -> with this area 0.45/0.49/0.19 x0.50 (the 5 western
+    # gauges 0.46/0.28/0.00 x0.15 -> 0.46/0.50/0.28 x0.32; the SRI without damp() would give 0.67/0.73/0.58 x0.66 -
+    # damp() reads NE Italy and Slovenia much too dry in these days' light rain: NE Veneto gauges raw x0.87, damped
+    # x0.08). The area ends at 14.6 E, at 45.2 N in Istria and at the Austrian border (DPC is far too wet beyond the Karawanks: x100 at
+    # Carinthian gauges). WEST_SLOVENIA = False restores the Italian border.
+    WEST_SLOVENIA = True
+    AREA_WEST_SLOVENIA = [(14.10, 46.47), (14.55, 46.40), (14.60, 46.38), (14.60, 45.50), (14.35, 45.35),
+                          (13.90, 45.20), (13.50, 45.20)]   # with northern Istria: the coast keeps its full weight
+    if WEST_SLOVENIA:
+        AREA = AREA[:AREA.index((13.66, 46.44))] + AREA_WEST_SLOVENIA + AREA[AREA.index((13.72, 45.60)) + 1:]
     # The image stamped T is the scan T .. T+5 (DWD, MeteoSwiss and OPERA stamp the end): DPC's own hourly sum SRT1 at T
     # is exactly the sum of the SRI images T-60 .. T-5 (13.11.: ratio 1.00, correlation 1.00 over 93 000 wet cells),
     # the file is written ~7 min after its stamp, and timing() against OPERA is best at +5 (0.444/0.454/0.449 at

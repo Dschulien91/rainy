@@ -89,6 +89,7 @@ services:
       EU_NATIONAL: "1"
       NWP_BLEND: "1"           # rapid-update model blend also in the own picture (default Europe view), served like api-eu
       NWP_SERVE: "1"
+      GAUGE_ADJUST: "1"        # mean-field factor per gauge network, last 12 h (gauge_adjust.py; 18.11. held out: Austria x1.55 -> x1.03, Portugal x0.34 -> x0.81, Finland x0.53 -> x1.01, CSI equal or better); api-eu stays unadjusted as the reference
       EU_MODEL_BLEND: "0"
       SUNNY_DE: "0"
       PRERENDER: "0"

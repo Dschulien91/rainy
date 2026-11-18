@@ -105,7 +105,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v1.58"
+VERSION = "server-v1.59"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -569,6 +569,11 @@ def local_amount(fc, last, motion, km_per_px, sigma_km=LOCAL_PM_KM, power=1.0, c
 LOCAL_AREA_KM = 300.0
 LOCAL_AREA_SLACK = 1.05
 LOCAL_AREA = os.environ.get("LOCAL_AREA", "0") == "1"
+# Gauge adjustment of the Europe pictures (gauge_adjust.py, 18.11.2026): a mean-field bias per gauge network from the
+# last 12 h at the rain gauges, multiplied into every new image (Austria x1.55 -> x1.03, Wallonia x1.45 -> x1.21,
+# Finland x0.53 -> x1.01 at held-out gauges; CSI equal or better overall). GAUGE_ADJUST=1 switches it on (default off;
+# not for North America).
+GAUGE_ADJUST = os.environ.get("GAUGE_ADJUST", "0") == "1"
 
 
 def local_area(fc, last, motion, km_per_px, sigma_km=LOCAL_AREA_KM, slack=LOCAL_AREA_SLACK, tmax=1.0, clip=2.0):
@@ -1111,6 +1116,23 @@ class EuropeOpera(Region):
         self.spoke_log = {}  # radar code -> when its line was last logged
         self.spoke_last = None  # (time step, [(length km, radar code, (col, row))]) of the newest image
         self.state_lock, self.saved_filled = threading.Lock(), set()
+        self.gadj = None
+        if GAUGE_ADJUST and not NA:
+            import gauge_adjust
+            self.gadj = gauge_adjust.GaugeAdjust(self, "nat" if EU_NATIONAL else "opera", log)
+
+    def gauge_adjusted(self, ts, rate):
+        """The image with the gauge adjustment (GAUGE_ADJUST); ts: ms or the OPERA file's url."""
+        if self.gadj is None:
+            return rate
+        try:
+            if not isinstance(ts, (int, np.integer)):
+                stamp = ts.split("OPERA@")[1].split("@")[0]
+                ts = int(datetime.strptime(stamp, "%Y%m%dT%H%M").replace(tzinfo=timezone.utc).timestamp() * 1000)
+            return self.gadj.apply(int(ts), rate)
+        except Exception as e:
+            log(f"gauge adjust failed: {e}")
+            return rate
 
     def despoke(self, url, rate):
         if not self.DESPOKE:
@@ -1175,9 +1197,11 @@ class EuropeOpera(Region):
             cov = (~nod[:h, :w]).reshape(h // k, k, w // k, k).mean(axis=(1, 3))
             tot = np.where(nod[:h, :w], 0, rate[:h, :w]).reshape(h // k, k, w // k, k).mean(axis=(1, 3))
             rate = np.where(cov >= 0.5, tot / np.maximum(cov, 1e-6), NODATA).astype(np.float32)
-            return self.despoke(url, rate)
-        rate[nod] = NODATA
-        return self.despoke(url, rate)
+        else:
+            rate[nod] = NODATA
+        rate = self.despoke(url, rate)
+        # the own picture (EuropeNational.load) adjusts after its layers are laid on
+        return rate if EU_NATIONAL else self.gauge_adjusted(url, rate)
 
     def to_pixels(self, x, y):
         """Fractional pixel centres. Map tiles: the projection (pyproj, ~2/3 of a Europe tile's render time) is the
@@ -1246,7 +1270,7 @@ class EuropeNational(EuropeOpera):
                 log(f"natobs failed: {e}")
         for t in [t for t in self.used if t < ts - 3 * HISTORY_MS]:
             del self.used[t]
-        return rate
+        return self.gauge_adjusted(ts, rate)  # natobs above keeps the unadjusted pictures
 
 
 class NorthAmericaMrms(EuropeOpera):
@@ -2044,6 +2068,8 @@ def main_eu():
     if os.environ.get("PRERENDER", "1") != "0":  # the third instance draws its tiles on demand (CPU for the other two)
         threading.Thread(target=mosaic.prerender_box_loop, args=(MOSAIC, log, eu.BOX if NA else mosaic.EUROPE_BOX, mosaic.EU_PRERENDER_ZOOMS),
                          daemon=True).start()
+    if eu.gadj is not None:  # GAUGE_ADJUST=1: the network factors, every 10 minutes (gauge_adjust.py)
+        threading.Thread(target=eu.gadj.loop, daemon=True).start()
     threading.Thread(target=memory_loop, daemon=True).start()
     log(f"nowcast: {'pySTEPS S-PROG' if HAVE_PYSTEPS else 'simple (pySTEPS not installed)'}, Europe grid {EU_KM} km"
         f"{', national layers: ' + ', '.join(l.name for l in eu.layers) if EU_NATIONAL else ''}")
