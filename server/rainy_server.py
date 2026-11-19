@@ -105,7 +105,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v1.63"
+VERSION = "server-v1.64"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -552,6 +552,81 @@ def local_amount(fc, last, motion, km_per_px, sigma_km=LOCAL_PM_KM, power=1.0, c
     return out
 
 
+# Stationary orographic rain (19.11.2026): rain anchored at the windward slopes (air flows through it, the rain area
+# stays) is moved by S-PROG / local_amount like any other rain - across the Alpine ridge into the lee. At the gauges
+# 17.-19.11. the Europe forecast / later picture at +120 was x2.0 in Austria south / west (the own picture with the
+# Italian layers upstream), x2.6 in Ticino (OPERA), x1.75 in the Italian Alps, and in Switzerland the forecast fell
+# below persistence at 1 / 3 mm. oro_forecast() holds the quasi-stationary part in place: S = the minimum of the images
+# of the last `w` minutes (lightly smoothed), over mountains only (terrain ORO_H0 -> ORO_H1 m: weight 0 -> 1); the
+# forecast loses the share of S the motion carries along (q = moved S / moved last image, ~16 km windows) and gets S
+# back where it is, decaying with exp(-lead / tau). lee: a rain-shadow damping exp(min(0, climb) / lee) with climb = the
+# metres per 5 min the motion climbs over the smoothed terrain. Scored shadow "oro" (tune_oro.py, dem_eu4km.npz).
+# tune_oro.py on the OPERA picture, 10 hourly runs 19.11. 01:50-10:50Z (light rain; amount forecast / later image at
+# +120, CSI cell by cell 0.1/1/3 mm): CH south own0 x1.98 -> oro w30 tau240 x1.64 (1 mm +15..+120 +0.02..0.04),
+# Italian Alps x1.62 -> x1.51, CH north x1.29 -> x1.11, Germany x1.06 -> x1.02 (CSI equal), Austria west 1 mm +15/+30/
+# +60 .38/.26/.16 -> .46/.34/.24 but amount +120 x0.93 -> x0.73, domain CSI equal or +0.01. Weaker variants: tau 120
+# (more loss in Austria west), w 60 (smaller S); the rain-shadow damping (lee 150 / 300) cut real rain on the lee
+# slopes already at +15 (Austria south 1 mm .20 -> .14) and the unmasked S (everywhere) dried the whole domain
+# (x0.87 -> x0.72 at +120) - both rejected. Not yet the target (Austria / CH x1.1): judge the shadow live first.
+ORO_H0, ORO_H1 = 400.0, 1200.0
+ORO = os.environ.get("ORO", "1") != "0"   # the shadow "oro" in the Europe instances (ORO=0: off)
+ORO_W, ORO_TAU, ORO_LEE = 30, 240.0, None   # the variant chosen in tune_oro.py (numbers above)
+
+
+def oro_part(last, past, terrain, w=60, mask=True):
+    """The quasi-stationary rain S (full grid, mm/h): the minimum of the last image and the images up to `w` minutes
+    old (past: {minutes ago: image}, every 15 min), each lightly smoothed (6 km box: a few km of jitter is still the
+    same place); mask: over mountains only (terrain ORO_H0 -> ORO_H1 m). None when an image is missing."""
+    frames = [last] + [past.get(m) for m in sorted(past) if m <= w]
+    if not w or any(g is None for g in frames):
+        return None
+    S = None
+    for g in frames:
+        g = np.asarray(g, np.float32)
+        g = cv2.blur(np.where(g < 0, 0, g), (3, 3))
+        S = g if S is None else np.minimum(S, g)
+    if mask:
+        S *= np.clip((terrain - ORO_H0) / (ORO_H1 - ORO_H0), 0.0, 1.0)
+    return S
+
+
+def oro_forecast(f, lead, last, part, motion, terrain, km_per_px, tau=120.0, lee=None):
+    """f: one forecast step (full grid, NODATA outside); lead: minutes; last: the newest image; part: oro_part();
+    motion: sprog_nowcast(motion_out=...); terrain: metres on the same grid (smoothed). Returns float32 (NODATA kept)."""
+    f = np.asarray(f, np.float32)
+    vel, down = motion.get("velocity"), motion.get("down", 1)
+    if vel is None:
+        return f
+    ny, nx = f.shape
+    steps = lead / 5.0
+    out = np.where(f < 0, 0, f)
+    if part is not None and float(part.max()) > 0:
+        c = max(1, int(round(16.0 / km_per_px)))
+        src_l = _coarse(np.where(np.asarray(last, np.float32) < 0, 0, np.asarray(last, np.float32)), c)
+        src_s = _coarse(part, c)
+        cy, cx = src_l.shape
+        u = cv2.resize(np.nan_to_num(vel[0]).astype(np.float32), (cx, cy), interpolation=cv2.INTER_LINEAR) * down / c
+        v = cv2.resize(np.nan_to_num(vel[1]).astype(np.float32), (cx, cy), interpolation=cv2.INTER_LINEAR) * down / c
+        gx, gy = np.meshgrid(np.arange(cx, dtype=np.float32), np.arange(cy, dtype=np.float32))
+        mx, my = gx - u * steps, gy - v * steps
+        al = cv2.remap(np.maximum(src_l, 0), mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        asl = cv2.remap(np.maximum(src_s, 0), mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        al, asl = cv2.GaussianBlur(al, (0, 0), 1.0), cv2.GaussianBlur(asl, (0, 0), 1.0)
+        q = np.clip(asl / (al + 1e-3), 0.0, 1.0)  # the share of the arriving rain that was anchored where it came from
+        q = cv2.resize(q, (cx * c, cy * c), interpolation=cv2.INTER_LINEAR)
+        q = np.pad(q, ((0, ny - cy * c), (0, nx - cx * c)), mode="edge")
+        out = out * (1.0 - q) + part * math.exp(-lead / tau)
+    if lee:
+        u = cv2.resize(np.nan_to_num(vel[0]).astype(np.float32), (nx, ny), interpolation=cv2.INTER_LINEAR) * down
+        v = cv2.resize(np.nan_to_num(vel[1]).astype(np.float32), (nx, ny), interpolation=cv2.INTER_LINEAR) * down
+        dh_row, dh_col = np.gradient(terrain)
+        climb = u * dh_col + v * dh_row   # m per 5 min along the motion
+        out *= np.exp(np.minimum(0.0, climb) / float(lee))
+    out[out < 0.05] = 0
+    out[f < 0] = NODATA
+    return out
+
+
 # The forecast's WET AREA grows (16.11.2026, North America): from +30 min on the served forecast covered x1.14-1.23
 # of the later image's wet area while the last image unchanged had x1.0-1.08 - S-PROG runs on a coarse grid (6 km
 # there) and the upsampling smears every light-rain edge outwards. A global S-PROG threshold (0.03 -> 0.10) only
@@ -779,6 +854,16 @@ class Region:
     MODEL_DEG = None  # lat/lon spacing of the weather model rain used for blending (None: no blending)
     SPROG_DOWN = 0    # S-PROG runs at grid resolution / SPROG_DOWN (0: simple nowcast only)
     RAW_DOWN = 3      # the forecast without the model's new cells (fc_raw) is kept at grid resolution / RAW_DOWN
+    ORO_DEM = None    # terrain file for the shadow "oro" (oro_forecast; EuropeOpera: dem_eu4km.npz)
+    _terrain = None
+
+    def terrain(self, shape):
+        """The terrain height (m) on the region's grid, smoothed ~6 km (from ORO_DEM, made by build_dem.py)."""
+        if self._terrain is None or self._terrain.shape != tuple(shape):
+            h = np.load(os.path.join(os.path.dirname(os.path.abspath(__file__)), self.ORO_DEM))["h"].astype(np.float32)
+            h = cv2.resize(h, (shape[1], shape[0]), interpolation=cv2.INTER_LINEAR)
+            self._terrain = cv2.GaussianBlur(h, (0, 0), 3.0)
+        return self._terrain
     MODELS = None     # Open-Meteo "models" for the blend (None: best match per place)
     # A 5-minute step the source skipped is filled with the previous run's forecast for it (regions whose source
     # delivers every 5 minutes). 14.11.2026 02:40 UTC: OPERA skipped one image - for an hour one step of the
@@ -881,6 +966,28 @@ class Region:
             raw = {last_t + (i + 1) * STEP_MS: g.astype(np.float16) for i, g in enumerate(small)}  # = fc, at 1/d
             cells = blend_new_cells(self.model, small, last_t, km_per_px=self.KM_PER_PX * d)  # changes `small` in place
             cells = {last_t + (i + 1) * STEP_MS: g.astype(np.float16) for i, g in enumerate(cells)}
+        oro_small = oro = None
+        if self.ORO_DEM and ORO and motion.get("velocity") is not None:
+            # shadow "oro" (19.11.2026): the stationary orographic part held in place (oro_forecast), at 1 / RAW_DOWN
+            try:
+                t0 = time.time()
+                with self.lock:
+                    past = {m: near(m * 60_000, 120_000) for m in (15, 30, 45, 60)}
+                lastf = np.asarray(last, np.float32)
+                terr = self.terrain(lastf.shape)
+                part = oro_part(lastf, past, terr, w=ORO_W)
+                d = self.RAW_DOWN
+                oro_small = []
+                for i, g in enumerate(fc):
+                    o = oro_forecast(g, (i + 1) * STEP_MS / 60_000, lastf, part, motion, terr, self.KM_PER_PX,
+                                     tau=ORO_TAU, lee=ORO_LEE)
+                    oro_small.append(cv2.resize(o, (o.shape[1] // d, o.shape[0] // d),
+                                                interpolation=cv2.INTER_AREA).astype(np.float16))
+                del part, past, lastf
+                self.oro_s = round(time.time() - t0, 2)
+            except Exception as e:
+                log(f"{self.name} oro shadow failed: {e}")
+                oro_small = None
         nwp = own0 = None
         pure = None  # S-PROG's own steps: not needed any more (frees the steps serve() replaces)
         if getattr(self, "nwp", None) is not None:  # shadow "nwp": the served forecast with the rapid-update models
@@ -895,10 +1002,17 @@ class Region:
                     if nwp:
                         fc = self.nwp.serve(fc, small, nwp, last_t)
                 del small
+                if oro_small is not None and nwp and NWP_SERVE:  # "oro" with the same blend, comparable to "own"
+                    oro = self.nwp.blend_again(oro_small, last_t)
             except Exception as e:  # never lose the forecast: fc is only replaced once serve() has finished
                 log(f"{self.name} nwp shadow{' / serve' if NWP_SERVE else ''} failed: {e}")
+            self.nwp.prep = None
+        if oro is None and oro_small is not None and not (NWP_SERVE and nwp):  # no served blend: compare with own as is
+            oro = {last_t + (i + 1) * STEP_MS: g.astype(np.float16) for i, g in enumerate(oro_small)}
+        oro_small = None
         with self.lock:
             self.fc_own0 = own0  # NWP_SERVE: verification shadow "own0" = the forecast without the blend, at 1 / RAW_DOWN
+            self.fc_oro = oro  # verification shadow "oro": the stationary orographic part held in place, at 1 / RAW_DOWN
             self.fc_nwp = nwp  # verification shadow "nwp" (fcverify.RegionVerify), at 1 / RAW_DOWN
             self.fc_raw = raw
             self.fc_cells = cells  # verification shadow "cells": with the model's new showers (served until 11.11.)
@@ -928,6 +1042,7 @@ class EuropeOpera(Region):
     # laptop Docker limit)
     SPROG_DOWN = 3 if EU_KM == 1 else 2
     RAW_DOWN = 3 if EU_KM == 1 else 2   # S-PROG alone, at ~3-4 km: the verification's "sprog" variant
+    ORO_DEM = "dem_eu4km.npz"   # terrain for the shadow "oro" (build_dem.py; the OPERA grid at 4 km)
     # Europe test instance: ICON-EU only - it is on the server's disk (openmeteo-sync); "best match" read AROME, HARMONIE,
     # MET Nordic ... from the remote mirror for ~60k points per refresh (took > 15 min locally)
     MODELS = os.environ.get("EU_MODELS") or None
@@ -1000,7 +1115,7 @@ class EuropeOpera(Region):
             with self.lock:
                 self.obs, self.fc, self.ref = obs, fc, ref
                 self.filled = set(meta["filled"]) & set(obs)
-                self.fc_raw = self.fc_cells = self.fc_pure = self.fc_nwp = None
+                self.fc_raw = self.fc_cells = self.fc_pure = self.fc_nwp = self.fc_oro = None
             self.saved_filled = set(self.filled)
             log(f"{self.name}: continuing with the run of {datetime.fromtimestamp(ref / 1000, timezone.utc):%H:%MZ} "
                 f"from before the restart ({len(obs)} images)")
@@ -1051,7 +1166,8 @@ class EuropeOpera(Region):
                 # the same run's other forecasts, kept at 1 / RAW_DOWN: S-PROG alone, and with the model's new showers
                 more = {name: [d.get(ref + m * 60_000) for m in cng.FC_LEADS]
                         for name, d in (("pure", getattr(self, "fc_pure", None)), ("cells", getattr(self, "fc_cells", None)),
-                                        ("own0", getattr(self, "fc_own0", None))) if d}  # own0: without the blend (NWP_SERVE)
+                                        ("own0", getattr(self, "fc_own0", None)),  # own0: without the blend (NWP_SERVE)
+                                        ("oro", getattr(self, "fc_oro", None))) if d}  # oro: stationary orographic part
             if ref % 600_000 or any(g is None for g in grids):  # the gauges report every 10 minutes
                 return
             d = self.RAW_DOWN
@@ -1296,6 +1412,7 @@ class NorthAmericaMrms(EuropeOpera):
     nowcast, tiles, timeline, verification and warm start as the Europe instances, registered as region "eu" so all
     of that runs unchanged. Grid: MRMS's 0.01 deg cells in 2 x 2 blocks (0.02 deg, ~2.2 km north-south, 1.4-2 km
     east-west), 3500 x 1750."""
+    ORO_DEM = None  # no terrain file for North America: no shadow "oro"
     credit = "NOAA MRMS"
     K = 2
     DEG = northamerica.DEG0 * K

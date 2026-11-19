@@ -636,6 +636,16 @@ class NwpLive:
         if model_at is None:
             return None
         out = blend(fc_small, ref, last, model_at, E, self.opts)
+        self.prep = (ref, last, model_at, E)  # for blend_again() in the same run (rainy_server clears it afterwards)
+        return {ref + (i + 1) * 300_000: g.astype(np.float16) for i, g in enumerate(out)}
+
+    def blend_again(self, fc_small, ref):
+        """The same run's blend applied to another forecast on the verification grid (the shadow "oro", 19.11.2026):
+        reuses shadow()'s prepared model, so no second download or mapping. None when shadow() did not run for ref."""
+        p = getattr(self, "prep", None)
+        if not p or p[0] != ref:
+            return None
+        out = blend(fc_small, ref, p[1], p[2], p[3], self.opts)
         return {ref + (i + 1) * 300_000: g.astype(np.float16) for i, g in enumerate(out)}
 
     def serve(self, fc, fc_small, blended, ref):

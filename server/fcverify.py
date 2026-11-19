@@ -268,6 +268,8 @@ class RegionVerify:
                 "own" vs "nwp" measures how faithfully the served full-grid field reproduces it (should be within
                 +-0.005 CSI / amount), so "nwp" does not become a copy of "own": it stays the coarse reference;
       "cells" = "own0" plus the model's new showers (built before the blend), "sprog0" unchanged.
+      "oro"   = (19.11.2026) "own0" with the stationary orographic part held in place (rainy_server.oro_forecast),
+                then the same blend as "nwp" - compare with "nwp" (same grid, same blend) and "own".
     Without NWP_SERVE there are no "own0" rows ("own" is the un-blended forecast itself).
     Rows as fcgrid (score_same.py --log eugrid): verify_log/eugrid_<YYYYMMDD>.jsonl. Every analysis is saved on that
     grid to verify_log/obs_eu/ (truth for tools/wo_verify_eu.py, kept OBS_KEEP_DAYS) with grid.json (the region's
@@ -305,6 +307,7 @@ class RegionVerify:
             pure = dict(getattr(r, "fc_pure", None) or {})
             nwp = dict(getattr(r, "fc_nwp", None) or {})  # rapid-update model blend (nwp_blend.py), at ~4 km
             own0 = dict(getattr(r, "fc_own0", None) or {})  # NWP_SERVE: the forecast without the blend
+            oro = dict(getattr(r, "fc_oro", None) or {})  # stationary orographic part held in place (19.11.2026)
         if not ref or ref not in obs:
             return
         if ref != self.done_ref:
@@ -316,7 +319,7 @@ class RegionVerify:
                 put(("pers", ref, lead), a0)
                 if t in fc:
                     put(("own", ref, lead), self._grid(fc[t])[0])
-                for name, src in (("cells", raw), ("sprog0", pure), ("nwp", nwp), ("own0", own0)):
+                for name, src in (("cells", raw), ("sprog0", pure), ("nwp", nwp), ("own0", own0), ("oro", oro)):
                     if t in src:
                         g = np.asarray(src[t], np.float32)
                         if g.shape != a0.shape:
