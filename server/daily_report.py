@@ -110,6 +110,7 @@ def state(day):
                            + (f"   !! {late} Messpunkte über {limit} min (Daten standen)" if late else ""))
             else:
                 out.append(f"  !! kein {label} den ganzen Tag")
+        out += sources(hs)
         rss = [r["rss"] for r in hs if r.get("rss")]
         if rss:
             out.append(f"  Speicher: im Mittel {sum(rss) / len(rss):.0f} MB, höchstens {max(rss)} MB")
@@ -133,6 +134,31 @@ def state(day):
         low = any(len(v) < 0.85 * most for v in per.values())
         out.append(f"  {name}: " + " | ".join(f"+{lead}: {len(per[lead])}" for lead in sorted(per))
                    + (f"   (voll: {full})" if full else "") + ("   !! unvollständig" if low else ""))
+    return out
+
+
+# how old a source's newest data may be before it counts as missing (minutes): OPERA is normally 5-10 min late and
+# listed every minute or two, the national layers and DWD ~5 min, the sunny satellite every 10-15 min
+SOURCE_LIMIT = {"opera": 25, "mrms": 20, "dwd": 20, "sunny": MAX_SUN_AGE}
+SOURCE_DEFAULT = 25
+
+
+def sources(hs):
+    """Per source (health rows "src", server-v1.70): minutes it was missing that day and the longest outage."""
+    out, names = [], sorted({k for r in hs for k in (r.get("src") or {})})
+    for name in names:
+        limit = SOURCE_LIMIT.get(name, SOURCE_DEFAULT)
+        late = run = longest = 0
+        for r in hs:  # rows every 5 minutes, in time order
+            v = (r.get("src") or {}).get(name)
+            if v is None or v > limit:
+                late += 1
+                run += 1
+                longest = max(longest, run)
+            else:
+                run = 0
+        out.append(f"  Quelle {name}: " + (f"!! {5 * late} min ohne neue Daten (längster Ausfall {5 * longest} min)" if late
+                                           else "lückenlos"))
     return out
 
 

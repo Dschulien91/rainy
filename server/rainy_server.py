@@ -106,7 +106,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v1.69"
+VERSION = "server-v1.70"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -971,8 +971,10 @@ class Region:
         # 15 min more than the hour the timeline shows: its first step (Mosaic.frames, now - 60 min rounded down) must
         # still have its image when it is asked for a few minutes later (10.11.: the first Europe step was empty)
         cutoff = now - HISTORY_MS - 15 * 60_000
-        avail = {t: s for t, s in self.list_times().items() if t > cutoff}
-        new = [t for t in sorted(avail) if t not in self.obs or t in self.filled]
+        listed = self.list_times()
+        self.src_newest = max(listed, default=None)  # the newest step the source offers (source watch)
+        avail = {t: s for t, s in listed.items() if t > cutoff}
+        new = [t for t in sorted(avail) if t not in self.obs or t in self.filled or self.replace_obs(t, avail[t])]
         for t in new:
             g = self.load(avail[t]).astype(np.float16)  # half the memory; plenty precise for rain rates
             with self.lock:
@@ -1104,6 +1106,10 @@ class Region:
 
     def after_forecast(self):
         """Called after every new forecast run (subclasses: verification notes)."""
+
+    def replace_obs(self, t, src):
+        """True when the step t, already in obs, is to be loaded again from src (EuropeNational: OPERA came late)."""
+        return False
 
 
 class EuropeOpera(Region):
@@ -1388,6 +1394,7 @@ class EuropeOpera(Region):
         if not out and failed:
             raise failed[0]
         newest = max(out, default=0)
+        self.opera_newest = newest or None
         if time.time() * 1000 - newest > 25 * 60_000 and time.time() - self.warned > 1800:  # normally 5-10 min old
             self.warned = time.time()
             log(f"eu radar source failed: newest image {datetime.fromtimestamp(newest / 1000, timezone.utc):%d.%m. %H:%MZ}"
@@ -1395,6 +1402,7 @@ class EuropeOpera(Region):
         return out
 
     warned = 0.0
+    opera_newest = None  # the newest OPERA image listed (ms), for the source watch (monitor_status)
     BUCKET = BUCKETS[0]  # for check_opera_gauges.py
 
     def load(self, url):
@@ -1445,6 +1453,12 @@ class EuropeNational(EuropeOpera):
     """Our own Europe picture (EU_NATIONAL=1, the third instance behind /eun/): OPERA with national radar products
     laid on top (national.py) - same grid, nowcast, tiles and verification as the OPERA instance."""
     credit = "EUMETNET OPERA + national radar services"
+    # OPERA LATE (19.11.2026, server-v1.70): OPERA's composite stopped at 21:10 UTC while the national products (DWD,
+    # MeteoSwiss, Radar-DPC) kept coming - and the own picture stopped with it, the map showed the 21:10 run for over
+    # an hour (also over Germany). A step OPERA has not delivered OPERA_LATE_MIN after the measurement is now composed
+    # from the national layers alone; everywhere else it has no data (hatched in the app, never old rain as "now").
+    # OPERA's image replaces it when it arrives. Normally OPERA is 5-10 min late, so this does not happen.
+    OPERA_LATE_MIN = 15
 
     def __init__(self):
         super().__init__()
@@ -1452,19 +1466,55 @@ class EuropeNational(EuropeOpera):
         self.layers = national.start(self, log, UA)
         self.used = {}  # ts -> names of the layers in that image (health)
         self.gauge_px = None  # gauges at which OPERA alone and the composed picture are noted (check_national_gauges.py)
+        self.partial = set()  # steps composed without OPERA (replaced when OPERA's image comes)
+        self.partial_warned = 0.0
 
     def list_times(self):
-        times = super().list_times()
+        try:
+            times = super().list_times()
+        except Exception as e:  # both OPERA buckets unreachable: the national layers still count
+            if time.time() - self.partial_warned > 1800:
+                log(f"eu radar: OPERA not listed ({e})")
+            times = {}
         now = time.time() * 1000
         # the layers load their last hour first: without them the first images would be composed from OPERA alone
         if time.time() - self.started < 120 and not all(l.first_poll_done for l in self.layers):
             return {}
         alive = [l for l in self.layers if l.alive() and not l.SHADOW]  # a shadow is not waited for
-        return {t: (t, url) for t, url in times.items()
-                if now - t > national.WAIT_MIN * 60_000 or all(l.has(t) for l in alive)}
+        out = {t: (t, url) for t, url in times.items()
+               if now - t > national.WAIT_MIN * 60_000 or all(l.has(t) for l in alive)}
+        if alive:
+            # only after OPERA's newest image: a single image OPERA skipped is filled from the forecast (FILL_GAPS)
+            # instead, so the rest of Europe does not blink out for one step
+            last = int(now - self.OPERA_LATE_MIN * 60_000) // STEP_MS * STEP_MS
+            t, n, opera_last = last, 0, max(times, default=0)
+            while t > max(opera_last, now - HISTORY_MS - 15 * 60_000):
+                if any(l.has(t) for l in alive):
+                    out[t] = (t, None)
+                    n += 1
+                t -= STEP_MS
+            # steps composed without OPERA stay while OPERA does not deliver them later (OPERA back without its backlog)
+            for t in self.partial:
+                if t not in times and t not in out and t > now - HISTORY_MS - 15 * 60_000 and any(l.has(t) for l in alive):
+                    out[t] = (t, None)
+            if n and time.time() - self.partial_warned > 1800:
+                self.partial_warned = time.time()
+                log(f"eu radar without OPERA: {n} steps from the national layers alone ({', '.join(l.name for l in alive)})")
+        return out
+
+    def replace_obs(self, t, src):
+        return t in self.partial and src[1] is not None
 
     def load(self, src):
         ts, url = src
+        if url is None:  # OPERA late: the national layers alone, no data elsewhere
+            rate = np.full((self.NY, self.NX), NODATA, np.float32)
+            self.used[ts] = national.compose(rate, self.layers, ts)
+            self.partial.add(ts)
+            for t in [t for t in self.partial if t < ts - 3 * HISTORY_MS]:
+                self.partial.discard(t)
+            return self.gauge_adjusted(ts, self.declutter(ts, rate))
+        self.partial.discard(ts)
         rate = super().load(url)  # OPERA as the Europe instance shows it (spokes already out)
         opera = None
         try:
@@ -1764,8 +1814,9 @@ def coverage_mask(bbox, w, h, kind="rain"):
         return buf.getvalue()
     eu = REGIONS["eu"]
     frames, _ = eu.frames()
-    if frames:
-        cov |= sample(eu, eu.grid(frames[0]["ts"]), X, Y)[1]
+    obs = [f["ts"] for f in frames if not f["fc"]]
+    if obs:  # the newest image's coverage (v1.70: before the first one's - an OPERA outage looked dry, not hatched)
+        cov |= sample(eu, eu.grid(max(obs)), X, Y)[1]
     if EDITION == "full":
         x0, y0, x1, y1 = UsaNowcoast.BBOX
         cov |= (X >= x0) & (X <= x1) & (Y >= y0) & (Y <= y1)
@@ -1858,6 +1909,7 @@ class Handler(BaseHTTPRequestHandler):
                 info["clouds"] = {"frames": len(CLOUDS.frames()[0]), "ref": CLOUDS.ref}
                 info["sunny"] = SUNNY.health()  # Germany edition's sunny source (DWD satellite)
                 info["de"] = {"frames": len(DE.frames()[0]), "ref": DE.ref, "vetoed_px": getattr(DE, "vetoed", 0)}
+                info["sources"] = source_ages(time.time() * 1000)  # minutes since each source's newest data (v1.70)
                 if EU_NATIONAL:  # per layer: its newest image, and in how many of the map's images it is
                     eu_r = REGIONS["eu"]
                     info["layers"] = {l.name: {"newest": l.newest_ts(), "alive": l.alive(), "shadow": l.SHADOW,
@@ -2003,7 +2055,7 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/radar/mask":
                 bbox = [float(v) for v in q["bbox"].split(",")]
                 w, h = min(int(q["width"]), 1024), min(int(q["height"]), 1024)
-                return self.send(200, coverage_mask(bbox, w, h, q.get("kind", "rain")), "image/png", 600)
+                return self.send(200, coverage_mask(bbox, w, h, q.get("kind", "rain")), "image/png", 120)
             if u.path == "/api/radar/point":
                 name, series, ref = point_series(float(q["lat"]), float(q["lon"]))
                 return self.send(200, json.dumps({"region": name, "series": series, "ref": ref}).encode(), "application/json", 60)
@@ -2145,7 +2197,26 @@ def monitor_status():
     ref = REGIONS["eu"].ref if EDITION == "eu" else DE.ref
     sun = SUNNY.ref if SUNNY_ON else None
     return {"rss": rss_mb(), "rain_age": round((now - ref) / 60_000, 1) if ref else None,
-            "sun_age": round((now - sun) / 60_000, 1) if sun else None}
+            "sun_age": round((now - sun) / 60_000, 1) if sun else None, "src": source_ages(now)}
+
+
+def source_ages(now):
+    """Minutes since the newest data of every source this instance reads (server-v1.70, user 19.11.2026: "we cannot
+    trust our sources" - the daily report counts how long each one was missing)."""
+    out = {}
+    try:  # never lose the health row over this
+        if EDITION == "de":
+            out["dwd"] = DE.ref
+        else:
+            eu = REGIONS["eu"]
+            out["mrms" if NA else "opera"] = getattr(eu, "src_newest", None) if NA else eu.opera_newest
+            for l in getattr(eu, "layers", ()):
+                out[l.name] = l.newest_ts()
+        if SUNNY_ON or NA:
+            out["sunny"] = SUNNY.ref
+    except Exception as e:
+        log(f"source ages failed: {e}")
+    return {k: round((now - v) / 60_000, 1) if v else None for k, v in out.items()}
 
 
 def model_at_gauges_loop(stations=None, out_dir=None, every_h=3):

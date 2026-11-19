@@ -28,6 +28,7 @@ import monitor
 EVERY_S = 300
 NO_ROW_S = 15 * 60
 RAIN_MAX_MIN, SUN_MAX_MIN = 25, 50
+SOURCE_MAX_MIN = {"opera": 30, "mrms": 25, "dwd": 25, "sunny": 50, "default": 30}  # per source (health rows "src")
 STARTS_MAX, STARTS_WINDOW_S = 3, 30 * 60
 AGAIN_S = 6 * 3600
 NAMES = {"de": "Deutschland", "eu": "Europa", "eun": "Europa (eigenes Modell)", "na": "Nordamerika"}
@@ -75,6 +76,14 @@ def problems(now=None, editions=("de", "eu", "eun", "na")):
                 out[f"{ed}:{key}"] = f"{name}: {label} hat keine Bilder"
             elif age > limit:
                 out[f"{ed}:{key}"] = f"{name}: {label} seit {int(age)} Min. ohne neues Bild"
+        # every source on its own (server-v1.70): the own Europe picture keeps going without OPERA, so its rain age
+        # alone no longer shows an OPERA outage
+        for src, age in (r.get("src") or {}).items():
+            if ed == "eun" and src == "opera":  # the same OPERA as api-eu: reported once
+                continue
+            limit = SOURCE_MAX_MIN.get(src, SOURCE_MAX_MIN["default"])
+            if age is None or age > limit:
+                out[f"{ed}:src:{src}"] = f"{name}: Quelle {src} seit {int(age)} Min. ohne neue Daten" if age is not None                     else f"{name}: Quelle {src} hat keine Daten"
     starts = {}
     for r in _rows("starts") + [r for sub in SUBDIRS.values() for r in _rows("starts", sub=sub)]:
         if now - r["ts"] / 1000 < STARTS_WINDOW_S:
