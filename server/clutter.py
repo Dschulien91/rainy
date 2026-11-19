@@ -178,7 +178,9 @@ class Filler:
             good = (~m) & (a >= 0)
             num = cv2.filter2D(np.where(good, a, 0).astype(np.float32), -1, self.k, borderType=cv2.BORDER_CONSTANT)
             den = cv2.filter2D(good.astype(np.float32), -1, self.k, borderType=cv2.BORDER_CONSTANT)
-            fill = np.where(den > 0, num / np.maximum(den, 1e-6), 0.0)
+            # filter2D may go through a DFT for this kernel: its round-off left -1e-7 in dry country, which reads as
+            # "no data" (< 0) - found in the server image's test, 19.11.
+            fill = np.where(den > 0.5, np.maximum(num / np.maximum(den, 1e-6), 0.0), 0.0)
             sel = m & (a >= 0)   # outside the radar's coverage stays NODATA
             a[sel] = fill[sel]
         return out
