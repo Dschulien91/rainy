@@ -179,6 +179,9 @@ def precip_status(raw):
 SWOB_URL = ("https://api.weather.gc.ca/collections/swob-realtime/items?f=json&limit=3000&datetime={t}"
             "&properties=msc_id-value,stn_id-value,date_tm-value,pcpn_amt_pst1hr,rnfl_amt_pst1hr,data_pvdr-value")
 SWOB_PROVIDERS = {"MSC", "NAV CANADA", "DND"}
+# 19.11.2026: a few broken gauges report sentinel sums (609.6-999.2 mm in an hour: CA-2403450, CA-5062835,
+# CA-5040689, CA-3031109 ...) that made the Canada hourly table read x0.05; no real hour comes near this.
+SWOB_MAX_MM = 100.0
 
 
 def swob_rows(raw):
@@ -196,7 +199,7 @@ def swob_rows(raw):
             t = int(datetime.strptime(p["date_tm-value"][:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc).timestamp() * 1000)
         except (KeyError, TypeError, ValueError):
             continue
-        if mm is None or mm < 0 or t % 3600_000:
+        if mm is None or mm < 0 or mm > SWOB_MAX_MM or t % 3600_000:
             continue
         yield "CA-" + sid, lat, lon, t, float(mm)
 

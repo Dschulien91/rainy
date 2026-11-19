@@ -45,7 +45,8 @@ truth = []
 for fp in glob.glob(os.path.join(LOG, "metar", "*.jsonl")):
     for line in open(fp):
         r = json.loads(line)
-        if since <= r["t"] <= now - 30 * 60_000 and r["id"] in idx:
+        # > 100 mm in an hour = a broken gauge's sentinel (Canada SWOB, stored before server-v1.67)
+        if since <= r["t"] <= now - 30 * 60_000 and r["id"] in idx and 0 <= r["mm"] <= 100:
             truth.append((idx[r["id"]], r["t"], r["mm"]))
 obs_files = {int(os.path.basename(f)[:-4]): f for f in glob.glob(os.path.join(cng.OBS_DIR, "*.npz"))}
 fc_files = {int(os.path.basename(f)[:-4]): f for f in glob.glob(os.path.join(cng.FC_DIR, "*.npz"))}
