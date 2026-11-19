@@ -97,7 +97,10 @@ def state(day):
             continue
         up = len(hs) / 288
         out.append(f"  Laufzeit: {len(hs)} von 288 Messpunkten ({100 * up:.0f} %)" + ("   !! Lücke" if up < 0.9 else ""))
-        for key, label, limit in (("rain_age", "Radarbild", MAX_RAIN_AGE), ("sun_age", "Satellitenbild", MAX_SUN_AGE)):
+        # the own Europe picture waits up to national.WAIT_MIN (20 min) for its national layers, so a rain age of
+        # 20-25 min there is by design (the ops watch allows +10 min for eun as well); only flag it beyond that
+        rain_limit = MAX_RAIN_AGE + (10 if ed == "eun" else 0)
+        for key, label, limit in (("rain_age", "Radarbild", rain_limit), ("sun_age", "Satellitenbild", MAX_SUN_AGE)):
             if ed == "eun" and key == "sun_age":  # the own Europe picture has no sunny
                 continue
             v = [r[key] for r in hs if r.get(key) is not None]

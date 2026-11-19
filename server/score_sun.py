@@ -4,7 +4,8 @@ Grid (verify_log/sungrid_*.jsonl, against the later DWD satellite analysis, ~3 k
 CSI / POD / FAR, mean share bias and MAE. Stations (verify_log/sunstation_*.jsonl, against DWD's 10-minute sunshine
 duration SD_10): MAE of the sun share and the hit rate of "sunny or not".
 
-  python score_sun.py sat pers kpers model nwp [--hours 24 | --all | --day 20261110] [--dir verify_log] [--prefix eu] [--broken]
+  python score_sun.py sat pers kpers model nwp [--hours 24 | --all | --day 20261110] [--dir verify_log] [--prefix eu] [--broken] [--by]
+  (--by: MAE per station group, the country for --prefix eusy, rows from server-v1.60 on)
   (--broken: also the stations that were in broken cloud when the run started - compare "sat" with "sharp")
   (--prefix eu: the Europe instance's files eusungrid_* / eusunstation_*)
   (weather-model blend beyond +30 min, 17.11.2026: python score_sun.py sat satnwp nwp pers - "satnwp" is the shadow;
@@ -88,6 +89,22 @@ if "--broken" in args:  # stations in broken cloud at the run's start (sunny_de.
                     e += r["mae_b"] * r["nb"]; b += r["bias_b"] * r["nb"]; h += r["hit_b"] * r["nb"]; w += r["nb"]
             if w:
                 print(f"  {n:8s} +{lead:3d}  {e / w:.3f} {h / w:.3f} {b / w:+.3f} {w:6d}")
+if "--by" in args:  # per group (the country for --prefix eusy; rows since server-v1.60 carry "by")
+    groups = {}
+    for (_, l), v in st.items():
+        for n in load.names:
+            for g, (k, ae, se, hi) in (v[n].get("by") or {}).items():
+                a = groups.setdefault((g, n, l), [0, 0.0, 0.0, 0])
+                a[0] += k; a[1] += ae; a[2] += se; a[3] += hi
+    print("stations by group: MAE at +60 / +120 per variant (n = values at +120)")
+    print("  group   " + "".join(f" {n:>13s}" for n in load.names) + "       n")
+    for g in sorted({g for g, _, _ in groups}):
+        cells = []
+        for n in load.names:
+            a, b = groups.get((g, n, 60)), groups.get((g, n, 120))
+            cells.append(f"{a[1] / a[0]:.3f}/{b[1] / b[0]:.3f}" if a and b and a[0] and b[0] else "-")
+        nn = max((groups.get((g, n, 120)) or [0])[0] for n in load.names)
+        print(f"  {g:8s}" + "".join(f" {c:>13s}" for c in cells) + f"  {nn:6d}")
 if ANA:
     w = sum(r["n"] for r in ANA)
     print(f"analysis at the stations (newest image vs gauge, {len(ANA)} images, {w} values): "

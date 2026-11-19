@@ -610,10 +610,14 @@ class SunVerify:
     restarts (last_ref): before 10.11. a restart lost them, and the last hour's runs were made again from the reloaded
     images (the first of them without motion) and replaced the real rows. log_dir given (replays): memory only."""
 
-    def __init__(self, sun, stations, log, log_dir=None, prefix="", stations_only=False):
+    def __init__(self, sun, stations, log, log_dir=None, prefix="", stations_only=False, group=None):
         """stations_only: a second station truth for the same runs (synop.SynopFeed.sky for all of Europe, 16.11.2026)
-        - its own station rows (<prefix>sunstation_*), no grid rows and no timeline (the main verifier writes those)."""
+        - its own station rows (<prefix>sunstation_*), no grid rows and no timeline (the main verifier writes those).
+        group: station id -> group name (e.g. the country); station rows then also hold "by" = {group: [n, sum |error|,
+        sum error, hits]} so score_sun.py --by can tell where a variant wins or loses (19.11.2026: against SYNOP cover
+        persistence beat every forecast Europe-wide, and the all-stations mean cannot say where)."""
         self.sun, self.stations, self.log, self.prefix = sun, stations, log, prefix
+        self.group = group
         self.stations_only = stations_only
         self._pix, self._pix_n = None, -1
         self.persist = log_dir is None
@@ -784,6 +788,15 @@ class SunVerify:
                     row.update({"nb": int(b.sum()), "mae_b": round(float(np.abs(f - o)[b].mean()), 4),
                                 "bias_b": round(float((f - o)[b].mean()), 4),
                                 "hit_b": round(float(((f >= SUNNY) == (o >= SUNNY))[b].mean()), 4)})
+            if self.group:
+                by = {}
+                for s, fv, ov in zip(keys, f, o):
+                    g = self.group(s)
+                    if g is None:
+                        continue
+                    a = by.setdefault(g, [0, 0.0, 0.0, 0])
+                    a[0] += 1; a[1] += abs(float(fv - ov)); a[2] += float(fv - ov); a[3] += int((fv >= SUNNY) == (ov >= SUNNY))
+                row["by"] = {g: [a[0], round(a[1], 3), round(a[2], 3), a[3]] for g, a in by.items()}
             slines.append(row)
         self._write(self.prefix + "sungrid", lines)
         self._write(self.prefix + "sunstation", slines)
