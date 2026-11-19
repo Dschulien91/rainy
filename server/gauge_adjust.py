@@ -48,13 +48,16 @@ WIN_H = float(os.environ.get("GAUGE_ADJUST_WIN_H", 12))
 LAG_H = 1.5            # the newest gauge values are ~1 h late (archive hourly, networks 10-90 min behind)
 PRIOR = 3.0            # mm per network: shrinks the factor to 1 when little rain was seen
 WET = 0.3              # mm/h: steps where neither the gauge nor the picture reach this do not count
-MIN_F, MAX_F = 0.5, 3.0
+MIN_F, MAX_F = 0.8, 3.0   # 19.11.2026: min 0.5 -> 0.8 (held-out 17.-19.11.: ALL x0.99 -> x1.02, CSI 1/3 mm .49/.29 ->
+                          # .50/.30, Austria 1 mm .28 -> .37 - a deep cut also removes real heavy rain)
 FIELD_KM = 40.0        # spread of the gauges' factors on the map
 FIELD_D0 = 0.02        # gauges per 16 km cell (after the spread) at which a factor counts half
 CELL_KM = 16.0
 EVERY_S = 600
 # networks that never take part (comma-separated codes, SYNOP countries as "sy-xx"), e.g. GAUGE_ADJUST_SKIP=de,bf
-SKIP = {s.strip() for s in os.environ.get("GAUGE_ADJUST_SKIP", "").split(",") if s.strip()}
+# Default "ch,iv" (19.11.2026, held-out 58 h): Switzerland raw x1.04 CSI 1/3 mm .63/.28 vs adjusted x0.88 .58/.16,
+# Veneto 3 mm .27 -> .08 with no amount gain - the factor cuts the heavy cores there. GAUGE_ADJUST_SKIP= (empty) = none.
+SKIP = {s.strip() for s in os.environ.get("GAUGE_ADJUST_SKIP", "ch,iv").split(",") if s.strip()}
 MS10 = 600_000
 
 
