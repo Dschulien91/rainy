@@ -6,6 +6,8 @@ duration SD_10): MAE of the sun share and the hit rate of "sunny or not".
 
   python score_sun.py sat pers kpers model nwp [--hours 24 | --all | --day 20261110] [--dir verify_log] [--prefix eu] [--broken] [--by]
   (--by: MAE per station group, the country for --prefix eusy, rows from server-v1.60 on)
+  (--prefix eusd: SYNOP hourly sunshine duration, ~340 stations in 16 countries, server-v1.62 on - the fair
+   Europe-wide sunny truth; --prefix eusy = total cloud cover, a cloud truth: unfair to the sun share, see synop.HourlySun)
   (--broken: also the stations that were in broken cloud when the run started - compare "sat" with "sharp")
   (--prefix eu: the Europe instance's files eusungrid_* / eusunstation_*)
   (weather-model blend beyond +30 min, 17.11.2026: python score_sun.py sat satnwp nwp pers - "satnwp" is the shadow;

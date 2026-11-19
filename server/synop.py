@@ -135,6 +135,47 @@ def decode(data):
     return out
 
 
+class HourlySun:
+    """The SYNOP hourly sunshine duration (ss, period 1 h: minutes in (T - 60, T]) as sunny's station truth, the
+    interface of sunny_de.SunStations: truth(end) = {station: minutes / 60} of the reports stamped exactly end.
+    19.11.2026: the cloud cover (SynopFeed.sky, files eusy*) is no fair truth for the sun share - it is a cloud amount
+    over roughly the past hour (replay 17.-19.11.: the analysis matches a report at T best 20-30 min before it, the
+    hour mean of the slots better still: MAE .115 vs .133 for one slot), thin cloud with WMO sunshine counts as
+    overcast, and a clear sky at a 6 deg sun has no sunshine. ~340 stations in 16 countries (fr, de, gb, es, it, dk,
+    ro, fi, at, no, ch ...) report the measured minutes every hour. Used with SunVerify(lag_ms=30 min): the run's
+    forecast for the middle of that hour."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.stations = {}   # id -> (lat, lon)
+        self.obs = {}        # id -> {hour end ms: sunshine fraction}
+
+    def add(self, sid, lat, lon, t, frac):
+        with self.lock:
+            self.stations[sid] = (lat, lon)
+            d = self.obs.setdefault(sid, {})
+            d[t] = frac
+            if len(d) > 40:
+                for k in sorted(d)[:-30]:
+                    del d[k]
+
+    def truth(self, end_ts):
+        with self.lock:
+            return {sid: d[end_ts] for sid, d in self.obs.items() if end_ts in d}
+
+    def newest(self):
+        with self.lock:
+            ends = [max(d) for d in self.obs.values() if d]
+        return int(sorted(ends)[len(ends) // 2]) if ends else 0
+
+    @property
+    def values(self):
+        return self.obs
+
+    def loop(self):
+        pass
+
+
 class SynopFeed:
     """Reads the new bulletin files every 5 minutes (the first pass reads the ~24 h DWD keeps) and keeps the European
     reports on disk; .sky = the cloud cover as sunny's station truth (northamerica.MetarSky)."""
@@ -147,6 +188,7 @@ class SynopFeed:
         self.st_path = os.path.join(self.dir, "stations.json")
         self.read = set()
         self.sky = northamerica.MetarSky()
+        self.sun = HourlySun()   # measured sunshine minutes per hour: the fair sunny truth (eusd*)
         self.lock = threading.Lock()
 
     def stations(self):
@@ -183,6 +225,9 @@ class SynopFeed:
                     st[sid][3] = True
                 if cover is not None:
                     self.sky.add(sid, lat, lon, t, cover)
+                for p, minutes in ss:
+                    if p == -1 and 0 <= minutes <= 60 and t % 3600_000 == 0:
+                        self.sun.add(sid, lat, lon, t, minutes / 60.0)
                 day = time.strftime("%Y%m%d", time.gmtime(t / 1000))
                 lines.setdefault(day, []).append(json.dumps({"id": sid, "t": t, "n": cover, "rr": rr, "ss": ss}))
                 n_rep += 1

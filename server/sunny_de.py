@@ -610,13 +610,17 @@ class SunVerify:
     restarts (last_ref): before 10.11. a restart lost them, and the last hour's runs were made again from the reloaded
     images (the first of them without motion) and replaced the real rows. log_dir given (replays): memory only."""
 
-    def __init__(self, sun, stations, log, log_dir=None, prefix="", stations_only=False, group=None):
+    def __init__(self, sun, stations, log, log_dir=None, prefix="", stations_only=False, group=None,
+                 lag_ms=STATION_LAG_MS):
         """stations_only: a second station truth for the same runs (synop.SynopFeed.sky for all of Europe, 16.11.2026)
         - its own station rows (<prefix>sunstation_*), no grid rows and no timeline (the main verifier writes those).
         group: station id -> group name (e.g. the country); station rows then also hold "by" = {group: [n, sum |error|,
         sum error, hits]} so score_sun.py --by can tell where a variant wins or loses (19.11.2026: against SYNOP cover
-        persistence beat every forecast Europe-wide, and the all-stations mean cannot say where)."""
+        persistence beat every forecast Europe-wide, and the all-stations mean cannot say where).
+        lag_ms: the station truth for valid time v is stations.truth(v + lag_ms) (DWD SD_10: 10 min; SYNOP hourly
+        sunshine duration, synop.HourlySun: 30 min = the forecast at the middle of the hour the minutes are summed over)."""
         self.sun, self.stations, self.log, self.prefix = sun, stations, log, prefix
+        self.lag_ms = lag_ms
         self.group = group
         self.stations_only = stations_only
         self._pix, self._pix_n = None, -1
@@ -758,7 +762,7 @@ class SunVerify:
         for key in self.spending:
             variant, r, lead = key
             valid = r + lead * 60_000
-            end = valid + STATION_LAG_MS
+            end = valid + self.lag_ms
             if newest < end:
                 if now_ref - r > STATION_WAIT_MS:
                     del self.spending[key]

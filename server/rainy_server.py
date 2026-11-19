@@ -105,7 +105,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v1.61"
+VERSION = "server-v1.62"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -2001,6 +2001,11 @@ def synop_start():
             except ValueError:
                 return None
         SUNNY.extra_verify.append(sunny_de.SunVerify(SUNNY, feed.sky, log, prefix="eusy", stations_only=True, group=_cc))
+        # measured sunshine (19.11.2026): SYNOP hourly sunshine duration at ~340 stations in 16 countries, scored with
+        # the forecast for the middle of the hour (synop.HourlySun) - the fair Europe-wide sunny truth; the cloud cover
+        # rows (eusy) stay as a cloud truth (score_sun.py ... --prefix eusd --broken --by)
+        SUNNY.extra_verify.append(sunny_de.SunVerify(SUNNY, feed.sun, log, prefix="eusd", stations_only=True, group=_cc,
+                                                     lag_ms=30 * 60_000))
 
 
 def gauge_archive_loop():
