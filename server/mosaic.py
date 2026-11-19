@@ -477,7 +477,10 @@ class Mosaic:
             idx = np.arange(-DATA_MARGIN, DATA_SIZE + DATA_MARGIN) + 0.5
             X, Y = np.meshgrid(-WORLD + x * span + idx * step, WORLD - y * span - idx * step)
             S = DATA_SIZE + 2 * DATA_MARGIN
-            img = np.zeros((S * DATA_ROWS, S * DATA_COLS, 3), np.uint8)
+            # only as many rows / columns as the steps need (server-v1.68): the app's first request per tile is the
+            # shown step alone (n = 1), a 132 x 132 image instead of a mostly empty 924 x 792 one; the layout of
+            # step i stays (i // DATA_COLS, i % DATA_COLS), the app reads the texture size from the image
+            img = np.zeros((S * -(-n // DATA_COLS), S * min(n, DATA_COLS), 3), np.uint8)
             for i in range(n):
                 ts = t0 + i * STEP_MS
                 rate, faint = self.rain(ts, X, Y, use_de, variant, run, own)

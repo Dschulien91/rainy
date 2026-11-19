@@ -29,6 +29,18 @@
     if (t !== "auto") document.documentElement.classList.add(t === "light" ? "theme-light" : "theme-dark"); }
   catch { document.documentElement.classList.add("theme-dark"); }
 </script>
+<script>
+  // v1.25: a returning visitor's place is known before the map libraries load (~0.3-1 s on phones): ask for its radar
+  // and weather data right away - the same URLs as last time (rainy.last.early); getJSON() picks the answers up
+  try { const l = JSON.parse(localStorage.getItem("rainy.last"));
+    if (l && Array.isArray(l.early) && !/[?&]lat=/.test(location.search) && !window.PRESET) {
+      window.EARLY = {};
+      for (const u of l.early) if (typeof u === "string" && u.startsWith(location.origin + "/"))
+        window.EARLY[u] = fetch(u).then((r) => { if (!r.ok) throw new Error(r.status); return r.json(); });
+    } }
+  catch {}
+</script>
+<link rel="preconnect" href="https://tiles.openfreemap.org" crossorigin>
 <link rel="stylesheet" href="vendor/leaflet.css">
 <link rel="stylesheet" href="vendor/maplibre-gl.css">
 <style>
@@ -474,11 +486,11 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=1.24"></script>
-<script src="lang/en.js?v=1.24"></script>
+<script src="lang/de.js?v=1.25"></script>
+<script src="lang/en.js?v=1.25"></script>
 <script>
 "use strict";
-const VERSION = "v1.24";
+const VERSION = "v1.25";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -628,6 +640,7 @@ const state = {
 };
 const cur = () => state.views[`${state.mode}-${state.range}`] || { frames: [], nowIdx: 0, idx: 0 };
 let locRequest = 0;      // increments per location load; stale responses are dropped
+const EARLY_URLS = [];   // the place's radar and weather-model URLs, kept with rainy.last for the next start's <head>
 let imgView = null, imgViewId = 0, shownKey = null, visibleFrame = null, preloadToken = 0;
 let gridOverlay = null, gridFetching = false;
 const imgFrames = new Map();
@@ -938,6 +951,8 @@ function interp(times, values, t) {
   return values[values.length - 1];
 }
 async function getJSON(url) {
+  const early = window.EARLY && window.EARLY[url]; // asked for already in <head> (returning visitor's place)
+  if (early) { delete window.EARLY[url]; try { return await early; } catch {} }
   const r = await fetch(url);
   if (!r.ok) throw new Error(r.status + " " + url);
   return r.json();
@@ -1587,11 +1602,13 @@ async function cityZoom(place) {
 async function loadPoint(loc) {
   await serverReady; // decides between our Open-Meteo and the public one
   // ~1 km rounding: everyone in the same square asks the same URL, so the server / CDN answers it once
-  const d = await getJSON(`${OM_BASE}/v1/forecast?latitude=${loc.lat.toFixed(2)}&longitude=${loc.lon.toFixed(2)}` +
+  const url = `${OM_BASE}/v1/forecast?latitude=${loc.lat.toFixed(2)}&longitude=${loc.lon.toFixed(2)}` +
     `&minutely_15=temperature_2m,precipitation,cloud_cover,is_day` +
     `&past_minutely_15=8&forecast_minutely_15=64` +
     `&hourly=temperature_2m,precipitation,cloud_cover,is_day,weather_code,wind_speed_700hPa,wind_direction_700hPa` +
-    `&forecast_hours=73&daily=sunrise,sunset&forecast_days=4&timezone=auto&timeformat=unixtime`);
+    `&forecast_hours=73&daily=sunrise,sunset&forecast_days=4&timezone=auto&timeformat=unixtime`;
+  if (!state.picked) EARLY_URLS[0] = url;
+  const d = await getJSON(url);
   const m = d.minutely_15;
   // Steering wind at ~3 km height: fallback for how clouds move when the satellite gives no usable motion.
   const h = d.hourly;
@@ -1688,8 +1705,10 @@ async function loadRadarPoint(loc) {
   if (API_BASE && cc !== "CA" && !(loc.lon < -50 && !inBox(US_BOX, loc.lat, loc.lon))) {
     // our server: the same seamless mosaic the map shows (DWD in Germany, OPERA, NOAA, satellite estimate)
     try {
-      await serverReady;
-      const d = await getJSON(`${RADAR_BASE}/api/rain/point?lat=${loc.lat.toFixed(2)}&lon=${loc.lon.toFixed(2)}${RAIN_EU ? "&src=eu" : ""}${FC_OWN ? "&fc=own" : ""}`);
+      // (v1.25: no longer waits for /api/health - the radar does not depend on it)
+      const url = `${RADAR_BASE}/api/rain/point?lat=${loc.lat.toFixed(2)}&lon=${loc.lon.toFixed(2)}${RAIN_EU ? "&src=eu" : ""}${FC_OWN ? "&fc=own" : ""}`;
+      if (!state.picked) EARLY_URLS[1] = url;
+      const d = await getJSON(url);
       // a place outside the radar area (Germany edition): the map still shows the German radar (10.11.: it was empty),
       // the place's own values then come from the weather model (rainMapOnly)
       state.rainMapOnly = DE_ONLY && d.covered === false;
@@ -2212,6 +2231,10 @@ function tileLayer(kind, ts, coarse = false) {
 // the timeline and zooming need no new downloads, and each zoom asks for one file per tile instead of 36.
 // The pictures stay the default and the fallback (no WebGL, or the switch off).
 const GL_DATA = { size: 128, margin: 2, cols: 7, rows: 6, q: 8, zooms: [3, 8], step: 5 * 60e3 };
+// v1.25: at most this many data tiles on the screen (else one data zoom coarser), downloads at a time, and the GPU
+// memory budget for the tiles (counted twice per texture; phones and tablets get less)
+const GL_MAX_VIEW = 40, GL_PARALLEL = 6;
+const GL_BUDGET = (window.matchMedia && matchMedia("(pointer: coarse)").matches ? 128 : 256) * 2 ** 20;
 // server/palette.py STEPS: RGBA (alpha 0-255) per kind (rain, sleet, snow, freezing rain, graupel, hail) and class 1-8
 const GL_PALETTE = [
   [[150, 200, 255, 150], [110, 175, 255, 190], [40, 130, 255, 215], [20, 70, 235, 235], [120, 50, 235, 245], [205, 30, 205, 250], [255, 50, 90, 255], [255, 215, 0, 255]],
@@ -2279,6 +2302,7 @@ const GLRain = L.Renderer.extend({
     L.Renderer.prototype.initialize.call(this, opts);
     this.tex = new Map();  // url -> {tex, z, x, y, t0, n, key, used}
     this.ts = null; this.visible = false;
+    this.pass = 0; this.inflight = 0; this.queue = []; // load passes, downloads running, downloads waiting (_load)
   },
   _initContainer() {
     const c = this._container = document.createElement("canvas");
@@ -2327,33 +2351,88 @@ const GLRain = L.Renderer.extend({
   hide() { this.visible = false; if (this._container) this._container.style.display = "none"; },
   // the run's data: key, first time step, number of steps (from the timeline), base URL
   setRun(key, t0, n, base) { this.run = { key, t0, n, base }; this._load(); },
-  _dz() { return Math.max(GL_DATA.zooms[0], Math.min(GL_DATA.zooms[1], Math.round(this._map.getZoom()))); },
-  _tilesInView(z) {
-    const b = this._bounds, zoom = this._map.getZoom(), o = this._map.getPixelOrigin(), span = 256 * Math.pow(2, zoom - z);
-    const x0 = Math.floor((b.min.x + o.x) / span), x1 = Math.floor((b.max.x + o.x) / span);
-    const y0 = Math.max(0, Math.floor((b.min.y + o.y) / span)), y1 = Math.min((1 << z) - 1, Math.floor((b.max.y + o.y) / span));
-    const out = [];
-    for (let x = x0; x <= x1; x++) for (let y = y0; y <= y1; y++) out.push([z, ((x % (1 << z)) + (1 << z)) % (1 << z), y]);
-    return out;
+  // The data zoom: the map's zoom (3-8), one lower while more than GL_MAX_VIEW tiles would cover the screen (a big
+  // screen zoomed out to Europe needed ~100 tiles of ~200 KB and ~3 MB GPU memory each: v1.24 dropped tiles still on
+  // screen beyond 48 and loaded them again, over and over)
+  _dz() {
+    const m = this._map, size = m.getSize(), zoom = m.getZoom();
+    let z = Math.max(GL_DATA.zooms[0], Math.min(GL_DATA.zooms[1], Math.round(zoom)));
+    const count = (q) => { const span = 256 * Math.pow(2, zoom - q); return (Math.ceil(size.x / span) + 1) * (Math.ceil(size.y / span) + 1); };
+    while (z > GL_DATA.zooms[0] && count(z) > GL_MAX_VIEW) z--;
+    return z;
   },
+  // tiles of zoom z on the screen (+ margin, a share of the screen size), nearest to the centre first
+  _tiles(z, margin = 0) {
+    const m = this._map, pb = m.getPixelBounds(), size = m.getSize(), span = 256 * Math.pow(2, m.getZoom() - z), W = 1 << z;
+    const mx = size.x * margin, my = size.y * margin;
+    const x0 = Math.floor((pb.min.x - mx) / span), x1 = Math.floor((pb.max.x + mx) / span);
+    const y0 = Math.max(0, Math.floor((pb.min.y - my) / span)), y1 = Math.min(W - 1, Math.floor((pb.max.y + my) / span));
+    const cx = (pb.min.x + pb.max.x) / 2 / span - 0.5, cy = (pb.min.y + pb.max.y) / 2 / span - 0.5;
+    const out = [];
+    for (let x = x0; x <= x1; x++) for (let y = y0; y <= y1; y++) out.push({ z, x: ((x % W) + W) % W, y, d: (x - cx) ** 2 + (y - cy) ** 2 });
+    return out.sort((a, b) => a.d - b.d);
+  },
+  // Loading order (v1.25, as games stream a scene: what is on screen first, coarse before sharp):
+  //   1. the shown time step alone for every tile on screen (~2-10 KB each instead of 20-250 KB): the map is there at once
+  //   2. the whole timeline two zooms coarser (a handful of tiles): zooming out and dragging the timeline show rain
+  //      right away, coarse, until the sharp tiles are in
+  //   3. the whole timeline sharp, from the centre of the screen outwards
+  //   4. a margin around the screen for panning, as far as the GPU budget allows
+  // At most GL_PARALLEL downloads at a time; a new view or time step re-sorts what has not started yet.
   _load() {
-    if (!this.run || !this._map || !this._bounds || !this.visible) return;
-    const { key, t0, n, base } = this.run;
-    for (const [z, x, y] of this._tilesInView(this._dz())) {
-      const url = `${base}/${key}/${t0}-${n}/${z}/${x}/${y}.png`;
-      if (this.tex.has(url)) { this.tex.get(url).used = Date.now(); continue; }
-      const entry = { z, x, y, t0, n, key, used: Date.now(), tex: null };
-      this.tex.set(url, entry);
-      const get = (tries) => fetch(url).then((r) => { if (!r.ok) throw new Error(r.status); return r.blob(); })
+    if (!this.run || !this._map || !this._bounds || !this.visible || this.lost) return;
+    const { key, t0, n, base } = this.run, step = GL_DATA.step, dz = this._dz(), pass = ++this.pass;
+    const i = this.ts == null ? -1 : (this.ts - t0) / step;
+    const shown = Number.isInteger(i) && i >= 0 && i < n ? this.ts : null;
+    const item = (t, a, k) => ({ u: `${base}/${key}/${a}-${k}/${t.z}/${t.x}/${t.y}.png`, z: t.z, x: t.x, y: t.y, t0: a, n: k, key });
+    const ready = (u) => { const e = this.tex.get(u); return !!(e && e.tex); };
+    const view = this._tiles(dz), inView = new Set(view.map((t) => `${t.x}/${t.y}`));
+    const want = [];
+    if (shown != null) for (const t of view) if (!ready(item(t, t0, n).u)) want.push(item(t, shown, 1));
+    const cz = Math.max(GL_DATA.zooms[0], dz - 2);
+    if (cz < dz) for (const t of this._tiles(cz, 0.3)) want.push(item(t, t0, n));
+    for (const t of view) want.push(item(t, t0, n));
+    const full = 2 * 4 * (GL_DATA.size + 2 * GL_DATA.margin) ** 2 * GL_DATA.cols * GL_DATA.rows; // bytes, counted twice (GPU copies)
+    let room = Math.floor(GL_BUDGET / full) - want.filter((w) => w.n > 1).length;
+    for (const t of this._tiles(dz, 0.3)) { if (room-- <= 0) break; if (!inView.has(`${t.x}/${t.y}`)) want.push(item(t, t0, n)); }
+    for (const w of want) { const e = this.tex.get(w.u); if (e) e.used = pass; }
+    this.queue = want.filter((w) => !this.tex.has(w.u));
+    this._pump();
+    // keep the GPU memory bounded: forget the least recently wanted tiles once over the budget (never wanted ones)
+    let bytes = 0;
+    for (const e of this.tex.values()) bytes += e.bytes || 0;
+    if (bytes > GL_BUDGET) {
+      const old = [...this.tex.entries()].filter(([, e]) => e.tex && e.used !== pass).sort((a, b) => a[1].used - b[1].used);
+      for (const [u, e] of old) { if (bytes <= GL_BUDGET) break; bytes -= e.bytes; this.gl.deleteTexture(e.tex); this.tex.delete(u); }
+    }
+  },
+  _pump() {
+    while (this.inflight < GL_PARALLEL && this.queue.length) {
+      const w = this.queue.shift();
+      if (this.tex.has(w.u)) continue;
+      const entry = { ...w, used: this.pass, tex: null };
+      this.tex.set(w.u, entry);
+      this.inflight++;
+      let fin = false;
+      const done = () => { if (fin) return; fin = true; this.inflight--; this._pump(); };
+      // Priority Hints (Chrome, Safari 17.2+; ignored elsewhere): the single steps before the whole timelines
+      const get = (tries) => fetch(w.u, { priority: w.n === 1 ? "high" : "low" }).then((r) => { if (!r.ok) throw new Error(r.status); return r.blob(); })
         .then((b) => (window.createImageBitmap ? createImageBitmap(b, { premultiplyAlpha: "none", colorSpaceConversion: "none" }) : loadImage(URL.createObjectURL(b))))
-        .then((img) => { if (this.lost) return; entry.tex = this._texture(img, 0, 0, this.gl.LINEAR); entry.w = img.width; entry.h = img.height; this.redraw(); })
-        .catch(() => { if (tries < 2) setTimeout(() => get(tries + 1), 1500 * (tries + 1)); else this.tex.delete(url); });
+        .then((img) => {
+          done();
+          if (this.lost || this.tex.get(w.u) !== entry) return;
+          entry.tex = this._texture(img, 0, 0, this.gl.LINEAR); entry.w = img.width; entry.h = img.height; entry.bytes = 2 * img.width * img.height * 4;
+          if (entry.n > 1) this._dropSteps(entry); // the whole timeline is in: its single steps are not needed any more
+          this.redraw();
+        })
+        .catch(() => { if (tries < 2) setTimeout(() => get(tries + 1), 1500 * (tries + 1)); else { done(); if (this.tex.get(w.u) === entry) this.tex.delete(w.u); } });
       get(0);
     }
-    // keep the GPU memory bounded: forget the least recently used tiles beyond 48
-    if (this.tex.size > 48) {
-      const old = [...this.tex.entries()].filter(([, e]) => e.tex).sort((a, b) => a[1].used - b[1].used).slice(0, this.tex.size - 48);
-      for (const [u, e] of old) { this.gl.deleteTexture(e.tex); this.tex.delete(u); }
+  },
+  _dropSteps(a) {
+    for (const [u, e] of this.tex) {
+      if (e.n !== 1 || !e.tex || e.key !== a.key || e.z !== a.z || e.x !== a.x || e.y !== a.y || e.t0 < a.t0 || e.t0 >= a.t0 + a.n * GL_DATA.step) continue;
+      this.gl.deleteTexture(e.tex); this.tex.delete(u);
     }
   },
   redraw() {
@@ -2403,10 +2482,34 @@ if (USE_GL) {
   try { glRain = new GLRain(); map.addLayer(glRain); glRain.hide(); } catch (e) { console.warn("webgl", e); glRain = null; }
 }
 // the run the WebGL layer draws: the rain timeline's key and steps
+const GL_BASE = `${RADAR_BASE}/tiles/${RAIN_EU ? "raindataeu" : FC_OWN ? "raindataown" : "raindata"}`;
 function glSetRun() {
   if (!glRain || !state.radarPoint.length || state.radarSource !== "rtile") return;
-  glRain.setRun(state.tileKey.rain, state.radarPoint[0].ts, state.radarPoint.length,
-    `${RADAR_BASE}/tiles/${RAIN_EU ? "raindataeu" : FC_OWN ? "raindataown" : "raindata"}`);
+  glRain.setRun(state.tileKey.rain, state.radarPoint[0].ts, state.radarPoint.length, GL_BASE);
+}
+// The rain map before the rest of the place's data (v1.25): as soon as the radar run is known, the WebGL map shows
+// the step the timeline will open on - the weather model, warnings, thunderstorms and the place name may take longer
+// (the weather model sometimes seconds) and no longer hold up the map. renderFrame() takes over when all is in.
+function earlyRain(req) {
+  if (req !== locRequest || state.mode !== "rain" || !glRain || state.radarSource !== "rtile" || !state.radarPoint.length) return;
+  const f = cur().frames[cur().idx], R = state.radarPoint, now = Date.now();
+  if (f && f.map.kind !== "rtile") return; // the place before showed something else there: renderFrame decides
+  const ts = f && R.some((r) => r.ts === f.map.ts) ? f.map.ts : (R.findLast((r) => r.ts <= now) || R[0]).ts;
+  if (shownTiles) { shownTiles.setOpacity(0); if (shownTiles.stale) shownTiles.remove(); shownTiles = null; }
+  glSetRun(); glRain.show(ts);
+}
+// First visit: while the browser still looks for the position (often 1-3 s), the radar of the map's area already
+// shows (like a game's scene behind its loading screen); the place's own data replaces it.
+async function ambientRain() {
+  if (!glRain || state.mode !== "rain" || !API_BASE || state.radarPoint.length) return;
+  const c = map.getCenter();
+  try {
+    const d = await getJSON(`${RADAR_BASE}/api/rain/point?lat=${c.lat.toFixed(2)}&lon=${c.lng.toFixed(2)}${RAIN_EU ? "&src=eu" : ""}${FC_OWN ? "&fc=own" : ""}`);
+    const S = d.series || [], now = Date.now();
+    if (state.radarPoint.length || !S.length || !d.key) return; // the place's own data was faster
+    glRain.setRun(d.key, S[0].ts, S.length, GL_BASE);
+    glRain.show((S.findLast((r) => r.ts <= now) || S[0]).ts);
+  } catch {}
 }
 
 // Show a time step; the previous one stays visible until the new tiles are in (no blank flashes while playing).
@@ -3001,13 +3104,14 @@ async function setLocation(loc, picked, knownName) {
   if (!picked) pickedMarker.remove();
   const placeEl = document.getElementById("place");
   if (picked) placeEl.innerHTML = '<svg class="pin-ico" viewBox="0 0 24 24"><path d="M12 22s-7-7.6-7-13a7 7 0 0 1 14 0c0 5.4-7 13-7 13z" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="9" r="2.4" fill="none" stroke="currentColor" stroke-width="2"/></svg>' + esc(t("place.loading")); else placeEl.textContent = knownName || "…";
-  const nameP = knownName ? Promise.resolve(knownName) : reverseGeocode(loc, picked).then((p) => p.name);
+  const nameP = knownName && knownName.then ? knownName.then((n) => n || reverseGeocode(loc, picked).then((p) => p.name))
+    : knownName ? Promise.resolve(knownName) : reverseGeocode(loc, picked).then((p) => p.name);
   try {
     const fresh = state.satLatest && state.satRegion === satRegion(loc.lon) && Date.now() - state.satLatest < 45 * 60e3;
     const satP = fresh || DE_ONLY ? null : loadSatLatest(loc);
     // weather model and radar at the place in parallel (the radar first asks the country)
     const [pointOk] = await Promise.all([loadPoint(loc).then(() => true, (err) => { console.warn(err); return false; }),
-      loadRadarPoint(loc), loadCloudPoint(loc), satP, loadThunderPoint(loc), loadWarningsPoint(loc)]);
+      loadRadarPoint(loc).then(() => earlyRain(req)), loadCloudPoint(loc), satP, loadThunderPoint(loc), loadWarningsPoint(loc)]);
     if (!pointOk) {
       if (!(state.point && state.point.loc && sameLoc(state.point.loc, loc))) PLACE_TZ = tzFromLon(loc.lon);
       const same = state.point && state.point.loc && sameLoc(state.point.loc, loc);
@@ -3025,20 +3129,22 @@ async function setLocation(loc, picked, knownName) {
   }
   if (req !== locRequest) return; // a newer request won
   buildViews();
-  const name = await nameP;
-  if (req !== locRequest) return;
-  state.placeName = name;
-  renderPlace();
-  // a landing page's place (window.PRESET) is not the user's home: do not remember it for the next visit
-  const preset = window.PRESET && Math.abs(loc.lat - window.PRESET.lat) < 1e-6 && Math.abs(loc.lon - window.PRESET.lon) < 1e-6;
-  if (!picked && !preset) {
-    try { localStorage.setItem("rainy.last", JSON.stringify({ lat: loc.lat, lon: loc.lon, name, zoom: map.getZoom() })); } catch {}
-  }
+  // the map first, the place name when it is in (v1.25: before, the map waited for the name too)
   if (needsGrid()) loadGrid();
   if (state.mode === "sun") { loadNowcastBase(); loadMotion(); }
   updateHeader();
   renderFrame();
   preloadFrames();
+  const name = await nameP;
+  if (req !== locRequest) return;
+  state.placeName = name;
+  renderPlace();
+  updateHeader();
+  // a landing page's place (window.PRESET) is not the user's home: do not remember it for the next visit
+  const preset = window.PRESET && Math.abs(loc.lat - window.PRESET.lat) < 1e-6 && Math.abs(loc.lon - window.PRESET.lon) < 1e-6;
+  if (!picked && !preset) {
+    try { localStorage.setItem("rainy.last", JSON.stringify({ lat: loc.lat, lon: loc.lon, name, zoom: map.getZoom(), early: EARLY_URLS })); } catch {}
+  }
 }
 
 // ---------- Favorites ----------
@@ -3803,17 +3909,39 @@ try {
     await setLocation({ lat: GERMANY_VIEW.lat, lon: GERMANY_VIEW.lon }, false, GERMANY_VIEW.name);
   }
   if (cached && outsideRadar()) await showGermany();
+  // first visit: radar of the map's area while the position is being looked up (ambientRain)
+  if (!cached && !params.has("lat")) setTimeout(ambientRain, 0);
   let loc = await posP;
   if (!loc && !cached) loc = { lat: FALLBACK.lat, lon: FALLBACK.lon };
   if (loc && (!cached || map.distance([loc.lat, loc.lon], [cached.lat, cached.lon]) > 1000)) {
     state.home = loc;
     youAreHere.setLatLng([loc.lat, loc.lon]);
-    const place = await Promise.race([reverseGeocode(loc), new Promise((r) => setTimeout(() => r(null), 1500))]);
-    const zoom = place ? await Promise.race([cityZoom(place), new Promise((r) => setTimeout(() => r(11), 1500))]) : 11;
-    // ?zoom= (shared links) or the city's size; ?view=lat,lon centres the map elsewhere than the place
+    // v1.25: map and data at once - the place name and the city's size (zoom) are looked up meanwhile; before, the data
+    // only started after both (up to 3 s). The city's size then only fine-tunes the zoom (10-13: the same rain data
+    // tiles), unless the user has touched the map by then.
+    const placeP = Promise.race([reverseGeocode(loc), new Promise((r) => setTimeout(() => r(null), 1500))]);
     const view = (params.get("view") || "").split(",").map(Number);
-    map.setView(view.length === 2 && view.every(isFinite) ? view : [loc.lat, loc.lon], +params.get("zoom") || zoom, { animate: false });
-    await setLocation(loc, false, PRESET && PRESET.name ? PRESET.name : place ? place.name : undefined);
+    const center = view.length === 2 && view.every(isFinite) ? view : [loc.lat, loc.lon];
+    // ?zoom= (shared links) or the city's size; ?view=lat,lon centres the map elsewhere than the place
+    map.setView(center, +params.get("zoom") || 11, { animate: false });
+    if (!params.get("zoom")) {
+      let touched = false;
+      const el = map.getContainer(), touch = () => { touched = true; };
+      for (const ev of ["pointerdown", "wheel", "keydown"]) el.addEventListener(ev, touch, { once: true, passive: true });
+      placeP.then((p) => (p ? Promise.race([cityZoom(p), new Promise((r) => setTimeout(() => r(11), 1500))]) : 11))
+        .then((z) => {
+          if (touched || state.home !== loc || z === map.getZoom()) return;
+          // the next start opens at this zoom (rainy.last may have been written with the first one)
+          map.once("zoomend", () => setTimeout(() => {
+            try {
+              const l = JSON.parse(localStorage.getItem("rainy.last"));
+              if (l && sameLoc(l, loc) && l.zoom !== z) localStorage.setItem("rainy.last", JSON.stringify({ ...l, zoom: z }));
+            } catch {}
+          }, 3000));
+          map.setView(center, z, { animate: true });
+        });
+    }
+    await setLocation(loc, false, PRESET && PRESET.name ? PRESET.name : placeP.then((p) => (p ? p.name : undefined)));
     if (outsideRadar()) await showGermany();
     if (params.has("t")) { // ?t=30: open the timeline 30 min ahead (shared links, screenshots)
       const s = cur();
