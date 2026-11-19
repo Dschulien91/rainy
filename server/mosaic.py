@@ -38,6 +38,7 @@ import numpy as np
 from PIL import Image
 
 import palette
+import tileimg
 from ptype import NAMES as ptype_names, dwd_grid_maps
 
 WORLD = 20037508.342789244
@@ -464,8 +465,8 @@ class Mosaic:
             return make()
         return self._cached(f"{'r' if use_de else 're'}{variant}/{key}/{ts}/{z}/{x}/{y}", make)
 
-    def rain_data_tile(self, key, t0, n, z, x, y, use_de=True, variant="dwd"):
-        """Data tile PNG (see DATA_SIZE) of the time steps t0, t0 + 5 min, ... (n of them) for the WebGL map; the
+    def rain_data_tile(self, key, t0, n, z, x, y, use_de=True, variant="dwd", fmt="png"):
+        """Data tile PNG or lossless WebP (fmt, tileimg.py; see DATA_SIZE) of the time steps t0, t0 + 5 min, ... (n of them) for the WebGL map; the
         timeline's first step is part of the URL, so a tile never changes for its URL (cacheable like the pictures)."""
         if not (z in DATA_ZOOMS and 1 <= n <= DATA_COLS * DATA_ROWS):
             return None
@@ -491,12 +492,10 @@ class Mosaic:
                 if kind is not None:
                     cell[..., 1] = np.asarray(kind, np.uint8) * 40
                 cell[..., 2] = np.where(faint, 255, 0)
-            buf = io.BytesIO()
-            Image.fromarray(img, "RGB").save(buf, "PNG", compress_level=6)
-            return buf.getvalue()
+            return tileimg.encode(Image.fromarray(img, "RGB"), fmt, "rain", 6)
         if not self.key_known(key):
             return make()
-        ck = f"{'d' if use_de else 'de'}{variant}/{key}/{t0}/{n}/{z}/{x}/{y}"
+        ck = f"{'d' if use_de else 'de'}{variant}/{key}/{t0}/{n}/{z}/{x}/{y}/{fmt}"
         with self.cache_lock:
             if ck in self.data_cache:
                 self.data_cache.move_to_end(ck)
@@ -522,26 +521,29 @@ class Mosaic:
             return {z: {"tiles": n, "dry": d, "avg_ms": round(t / n * 1000, 1), "max_ms": round(m * 1000, 1)}
                     for z, (n, d, t, m) in sorted(self.render_stats.items()) if n}
 
-    def cloud_tile(self, key, ts, z, x, y):
+    def cloud_tile(self, key, ts, z, x, y, fmt="png"):
         span = 2 * WORLD / (1 << z)
         bbox = (-WORLD + x * span, WORLD - (y + 1) * span, -WORLD + (x + 1) * span, WORLD - y * span)
         run = int(key) if key.isdigit() else None  # the cloud key is the run's ref (ms)
-        make = lambda: self.clouds.image(ts, bbox, TILE, TILE, run=run)
+        if hasattr(self.clouds, "image_atlas"):  # sunny_de: PNG or WebP itself
+            make = lambda: self.clouds.image(ts, bbox, TILE, TILE, run=run, fmt=fmt)
+        else:  # EUMETSAT clouds (clouds.py) make PNGs only
+            make = lambda: tileimg.transcode(self.clouds.image(ts, bbox, TILE, TILE, run=run), fmt)
         if not self.cloud_key_known(key):  # e.g. just after a restart, before the run is loaded again: never cached
             return make()
-        return self._cached(f"c/{key}/{ts}/{z}/{x}/{y}", make)
+        return self._cached(f"c/{key}/{ts}/{z}/{x}/{y}/{fmt}", make)
 
-    def cloud_data_tile(self, key, t0, n, z, x, y):
-        """All sunny frames t0 .. t0 + (n - 1) x 10 min of one tile as one atlas PNG (SunnyDE.image_atlas)."""
+    def cloud_data_tile(self, key, t0, n, z, x, y, fmt="png"):
+        """All sunny frames t0 .. t0 + (n - 1) x 10 min of one tile as one atlas PNG / WebP (SunnyDE.image_atlas)."""
         if not hasattr(self.clouds, "image_atlas") or not (1 <= n <= 40) or z > 8:
             return None
         span = 2 * WORLD / (1 << z)
         bbox = (-WORLD + x * span, WORLD - (y + 1) * span, -WORLD + (x + 1) * span, WORLD - y * span)
         run = int(key) if key.isdigit() else None
-        make = lambda: self.clouds.image_atlas(t0, n, bbox, TILE, TILE, run=run)
+        make = lambda: self.clouds.image_atlas(t0, n, bbox, TILE, TILE, run=run, fmt=fmt)
         if not self.cloud_key_known(key):
             return make()
-        return self._cached(f"ca/{key}/{t0}/{n}/{z}/{x}/{y}", make)
+        return self._cached(f"ca/{key}/{t0}/{n}/{z}/{x}/{y}/{fmt}", make)
 
     def cloud_key_known(self, key):
         """The cloud key's run is still kept (or the source keeps no runs): its tiles can be cached as immutable."""

@@ -97,6 +97,7 @@ import recorder
 import sunny_de
 import sunny_na
 import thunder
+import tileimg
 
 try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is used
     from pysteps import motion as ps_motion, nowcasts as ps_nowcasts
@@ -105,7 +106,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v1.68"
+VERSION = "server-v1.69"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -1870,45 +1871,50 @@ class Handler(BaseHTTPRequestHandler):
                         "tiles": MOSAIC.render_summary()}  # rain tile render time per zoom (server CPU)
                 return self.send(200, json.dumps(body).encode(), "application/json", 10)
             if u.path.startswith("/tiles/raindata"):  # data tiles for the app's WebGL map (mosaic.rain_data_tile)
-                m = re.fullmatch(r"/tiles/(raindata|raindataown|raindataeu)/([\w-]+)/(\d+)-(\d+)/(\d+)/(\d+)/(\d+)\.png", u.path)
+                m = re.fullmatch(r"/tiles/(raindata|raindataown|raindataeu)/([\w-]+)/(\d+)-(\d+)/(\d+)/(\d+)/(\d+)\.(png|webp)", u.path)
                 if not m:
                     return self.send(404, b"not found", "text/plain", 60)
                 kind, key = m.group(1), m.group(2)
-                t0, n, z, x, y = map(int, m.groups()[2:])
+                t0, n, z, x, y = map(int, m.groups()[2:7])
+                fmt = m.group(8)  # lossless WebP (server-v1.69, tileimg.py) or PNG: the same values
                 if not (0 <= x < (1 << z) and 0 <= y < (1 << z)):
                     return self.send(404, b"bad tile", "text/plain", 3600)
                 png = MOSAIC.rain_data_tile(key, t0, n, z, x, y, use_de=kind != "raindataeu",
-                                            variant="own" if kind == "raindataown" else "dwd")
+                                            variant="own" if kind == "raindataown" else "dwd", fmt=fmt)
                 if png is None:
                     return self.send(404, b"bad tile", "text/plain", 3600)
-                return self.send(200, png, "image/png", 86400 if MOSAIC.key_known(key) else 60)
+                return self.send(200, png, tileimg.TYPES[fmt], 86400 if MOSAIC.key_known(key) else 60)
             if u.path.startswith("/tiles/clouddata/"):  # all sunny frames of one tile in one atlas (app v1.13)
-                m = re.fullmatch(r"/tiles/clouddata/(\d+)/(\d+)-(\d+)/(\d+)/(\d+)/(\d+)\.png", u.path)
+                m = re.fullmatch(r"/tiles/clouddata/(\d+)/(\d+)-(\d+)/(\d+)/(\d+)/(\d+)\.(png|webp)", u.path)
                 if not m:
                     return self.send(404, b"not found", "text/plain", 60)
                 key = m.group(1)
-                t0, n, z, x, y = map(int, m.groups()[1:])
+                t0, n, z, x, y = map(int, m.groups()[1:6])
+                fmt = m.group(7)
                 if not (0 <= x < (1 << z) and 0 <= y < (1 << z)):
                     return self.send(404, b"bad tile", "text/plain", 3600)
-                png = MOSAIC.cloud_data_tile(key, t0, n, z, x, y)
+                png = MOSAIC.cloud_data_tile(key, t0, n, z, x, y, fmt=fmt)
                 if png is None:
                     return self.send(404, b"no atlas", "text/plain", 60)
-                return self.send(200, png, "image/png", 86400 if MOSAIC.cloud_key_known(key) else 60)
+                return self.send(200, png, tileimg.TYPES[fmt], 86400 if MOSAIC.cloud_key_known(key) else 60)
             if u.path.startswith("/tiles/"):
-                m = re.fullmatch(r"/tiles/(rain|rainown|raineu|cloud)/([\w-]+)/(\d+)/(\d+)/(\d+)/(\d+)\.png", u.path)
+                m = re.fullmatch(r"/tiles/(rain|rainown|raineu|cloud)/([\w-]+)/(\d+)/(\d+)/(\d+)/(\d+)\.(png|webp)", u.path)
                 if not m:
                     return self.send(404, b"not found", "text/plain", 60)
-                kind, key, ts, z, x, y = m.group(1), m.group(2), *map(int, m.groups()[2:])
+                kind, key, ts, z, x, y = m.group(1), m.group(2), *map(int, m.groups()[2:6])
+                fmt = m.group(7)
                 variant = "own" if kind == "rainown" else "dwd"
+                if fmt == "webp" and kind != "cloud":  # rain pictures stay PNG
+                    return self.send(404, b"not found", "text/plain", 3600)
                 if not (2 <= z <= 13 and 0 <= x < (1 << z) and 0 <= y < (1 << z)):
                     return self.send(404, b"bad tile", "text/plain", 3600)
-                png = (MOSAIC.cloud_tile(key, ts, z, x, y) if kind == "cloud"
+                png = (MOSAIC.cloud_tile(key, ts, z, x, y, fmt) if kind == "cloud"
                        else MOSAIC.rain_tile(key, ts, z, x, y, use_de=kind != "raineu", variant=variant))
                 if png is None:
                     return self.send(404, b"unknown frame", "text/plain", 30)
                 # the key names the run: immutable while that run is kept; an older key (a tab asleep for a while)
                 # gets the current data, cached only briefly
-                return self.send(200, png, "image/png", 86400 if (MOSAIC.cloud_key_known(key) if kind == "cloud" else MOSAIC.key_known(key)) else 60)
+                return self.send(200, png, tileimg.TYPES[fmt], 86400 if (MOSAIC.cloud_key_known(key) if kind == "cloud" else MOSAIC.key_known(key)) else 60)
             if DEV and u.path.startswith("/api/dev/"):  # never in production (env RAINY_DEV=1 only)
                 if u.path == "/api/dev/storm":
                     devtools.storm(DE, PTYPE, THUNDER, float(q["lat"]), float(q["lon"]), int(q.get("arrive", 40)))

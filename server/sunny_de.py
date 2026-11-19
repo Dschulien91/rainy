@@ -70,6 +70,7 @@ from scipy.io import netcdf_file
 
 import gauges
 import monitor
+import tileimg
 from clouds import sun_elevation
 from fcverify import Pending
 from mosaic import GermanyDwd, WORLD, merc
@@ -1312,25 +1313,24 @@ class SunnyDE:
         alpha = ((ins > 0.5) & (kn > 0.5)).astype(np.uint8) * 255
         return grey, alpha, col_row
 
-    def image(self, ts, bbox, w, h, run=None):
-        """Cloud value as a grey + alpha PNG (alpha 0 outside the shown area or where unknown); None: unknown frame.
-        run: the run a tile key names; its frames while it is kept, else (or for a frame it lacks) the current ones."""
+    def image(self, ts, bbox, w, h, run=None, fmt="png"):
+        """Cloud value as a grey + alpha PNG or lossless WebP (fmt, tileimg.py; alpha 0 outside the shown area or where
+        unknown); None: unknown frame. run: the run a tile key names; its frames while it is kept, else (or for a frame
+        it lacks) the current ones."""
         g = self._frame(ts, run)
         if g is None:
             return None
         grey, alpha, _ = self._grey_alpha(g, bbox, w, h)
-        buf = io.BytesIO()
-        Image.fromarray(np.dstack([grey, alpha]), "LA").save(buf, "PNG", compress_level=3)
-        return buf.getvalue()
+        return tileimg.encode(Image.fromarray(np.dstack([grey, alpha]), "LA"), fmt, "cloud", 3)
 
     ATLAS_COLS = 8
 
-    def image_atlas(self, t0, n, bbox, w, h, run=None):
+    def image_atlas(self, t0, n, bbox, w, h, run=None, fmt="png"):
         """The frames t0, t0 + 10 min, ... (n of them) of one map tile in ONE grey + alpha PNG, ATLAS_COLS cells of
         w x h per row (a frame the run lacks stays transparent). The app loads one of these per tile position for the
         whole sunny timeline instead of one tile per time step (15.11.2026: ~250 requests, clouds came in late)."""
-        rows = -(-n // self.ATLAS_COLS)
-        out = np.zeros((rows * h, self.ATLAS_COLS * w, 2), np.uint8)
+        rows = -(-n // self.ATLAS_COLS)  # only as many columns as the frames need (server-v1.69; cell i stays at
+        out = np.zeros((rows * h, min(n, self.ATLAS_COLS) * w, 2), np.uint8)  # (i // ATLAS_COLS, i % ATLAS_COLS))
         col_row = None
         for i in range(n):
             g = self._frame(t0 + i * STEP_MS, run)
@@ -1339,9 +1339,7 @@ class SunnyDE:
             grey, alpha, col_row = self._grey_alpha(g, bbox, w, h, col_row)
             r, c = divmod(i, self.ATLAS_COLS)
             out[r * h:(r + 1) * h, c * w:(c + 1) * w, 0], out[r * h:(r + 1) * h, c * w:(c + 1) * w, 1] = grey, alpha
-        buf = io.BytesIO()
-        Image.fromarray(out, "LA").save(buf, "PNG", compress_level=3)
-        return buf.getvalue()
+        return tileimg.encode(Image.fromarray(out, "LA"), fmt, "cloud", 3)
 
     def point(self, lat, lon):
         """Series at a place (3 x 3 mean, ~6 km), or [] outside the shown area."""

@@ -71,8 +71,20 @@ www.{$DOMAIN} {
 		@private path /server/* /deploy/* /tools/* /.git/* /.claude/* /*.md /*.py
 		respond @private 404
 		# the page itself must always be fresh (new versions), the libraries rarely change
-		@page path / /index.html /sw.js /de/* /en/* /lang/* /sitemap.xml /robots.txt /manifest.json
+		@page path / /index.html /sw.js /de/* /en/* /sitemap.xml /robots.txt /manifest.json
 		header @page Cache-Control "no-cache"
+		# language files: the pages ask for lang/<code>.js?v=<app version> (tools/make_landing.py), a new version is a
+		# new URL - so a returning visitor needs no round trip to check them (app v1.26); without ?v= always fresh
+		@langVersioned {
+			path /lang/*
+			query v=*
+		}
+		header @langVersioned Cache-Control "public, max-age=31536000, immutable"
+		@langFresh {
+			path /lang/*
+			not query v=*
+		}
+		header @langFresh Cache-Control "no-cache"
 		header /vendor/* Cache-Control "public, max-age=604800"
 		file_server
 	}
