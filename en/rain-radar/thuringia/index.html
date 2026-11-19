@@ -475,11 +475,11 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=1.26"></script>
-<script src="lang/en.js?v=1.26"></script>
+<script src="lang/de.js?v=1.27"></script>
+<script src="lang/en.js?v=1.27"></script>
 <script>
 "use strict";
-const VERSION = "v1.26";
+const VERSION = "v1.27";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -536,11 +536,27 @@ const API_BASE = LOCAL_DEV ? `${location.protocol}//${location.hostname}:8771`
 const GEO_REVERSE = API_BASE ? `${API_BASE}/api/geo/reverse` : "https://photon.komoot.io/reverse";
 const GEO_SEARCH = API_BASE ? `${API_BASE}/api/geo/search` : "https://geocoding-api.open-meteo.com/v1/search";
 // Weather model API: our self-hosted Open-Meteo when the server reports one (no rate limits), else the public API.
-let OM_BASE = "https://api.open-meteo.com";
+// v1.27: ours from the start (the server always has it); /api/health only switches to the public one when ours is
+// missing - before, every new place waited for /api/health (~0.1-0.25 s) before asking for the weather model
+let OM_BASE = API_BASE ? `${API_BASE}/om` : "https://api.open-meteo.com";
 const serverReady = API_BASE ? fetch(`${API_BASE}/api/health`).then((r) => r.json()).then((h) => {
-  if (h.openmeteo) OM_BASE = `${API_BASE}/om`;
+  if (h.openmeteo === false) OM_BASE = "https://api.open-meteo.com";
   return h;
 }).catch(() => null) : Promise.resolve(null);
+// The weather model at a place (v1.27). Our Open-Meteo answers in ~20 ms from the models on its disk (ICON-D2 / EU /
+// global; HRRR, HRDPS, GFS for North America), but for the local models its "best match" picks elsewhere in Europe
+// (Meteo-France AROME, UKMO, KNMI, DMI and MET Nordic HARMONIE) it reads Open-Meteo's remote mirror first: measured
+// 19.11.2026 1-21 s, once no answer at all. So the best match is asked first; without an answer after OM_FAST_MS the
+// same request with the models on disk runs alongside, and the first answer wins.
+const OM_FAST_MS = 800;
+async function omJSON(url) {
+  if (!API_BASE || !url.startsWith(`${API_BASE}/om/`) || /[?&]models=/.test(url)) return getJSON(url);
+  const best = getJSON(url);
+  const first = await Promise.race([best.catch(() => "failed"), new Promise((r) => setTimeout(r, OM_FAST_MS, "late"))]);
+  if (first !== "late" && first !== "failed") return first;
+  const local = getJSON(`${url}&models=${NA_AREA ? "gfs_seamless" : "icon_seamless"}`);
+  return first === "failed" ? local : Promise.any([best, local]);
+}
 const isImgKind = (k) => k === "radar" || k === "sat" || k === "eu" || k === "srvus" || k === "srvsat" || k === "ca" || k === "us";
 // Canada (ECCC GeoMet): rain rate in 14 discrete classes, observations every 6 min plus a 72 min nowcast.
 const CA_WMS = "https://geo.weather.gc.ca/geomet";
@@ -1626,7 +1642,6 @@ async function cityZoom(place) {
 
 // ---------- Data ----------
 async function loadPoint(loc) {
-  await serverReady; // decides between our Open-Meteo and the public one
   // ~1 km rounding: everyone in the same square asks the same URL, so the server / CDN answers it once
   const url = `${OM_BASE}/v1/forecast?latitude=${loc.lat.toFixed(2)}&longitude=${loc.lon.toFixed(2)}` +
     `&minutely_15=temperature_2m,precipitation,cloud_cover,is_day` +
@@ -1634,7 +1649,12 @@ async function loadPoint(loc) {
     `&hourly=temperature_2m,precipitation,cloud_cover,is_day,weather_code,wind_speed_700hPa,wind_direction_700hPa` +
     `&forecast_hours=73&daily=sunrise,sunset&forecast_days=4&timezone=auto&timeformat=unixtime`;
   if (!state.picked) EARLY_URLS[0] = url;
-  const d = await getJSON(url);
+  let d;
+  try { d = await omJSON(url); } catch (e) { // ours not reachable: the public one if /api/health says so
+    await serverReady;
+    if (url.startsWith(OM_BASE)) throw e;
+    d = await getJSON(url.replace(/^.*?\/v1\//, `${OM_BASE}/v1/`));
+  }
   const m = d.minutely_15;
   // Steering wind at ~3 km height: fallback for how clouds move when the satellite gives no usable motion.
   const h = d.hourly;
