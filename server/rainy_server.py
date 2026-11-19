@@ -105,7 +105,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v1.64"
+VERSION = "server-v1.65"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -627,6 +627,76 @@ def oro_forecast(f, lead, last, part, motion, terrain, km_per_px, tau=120.0, lee
     return out
 
 
+# The radar coverage's INFLOW EDGE (19.11.2026): where a forecast pixel's source - the pixel moved back along the motion
+# - lies outside the radar coverage (the Atlantic beyond OPERA's range, the domain edges, gaps between national
+# networks), the extrapolation knows nothing and brings in zeros: offline (tune_inflow.py on the 66 archived served
+# eu runs 18.11. 20Z-19.11. 12Z) the served forecast kept x0.41 / x0.17 / x0.11 of the rain at +30 / +60 / +120 in
+# those cells (CSI 0.1 mm/h .274 / .132 / .074; persistence .222 / .174 / .154). Shadow "inflow": there the forecast
+# is replaced, with the weight wout = 1 - (source coverage, smoothed over INFLOW_TAPER_KM), by the larger of
+# (a) the last image at the pixel (Eulerian persistence) and (b) the last image extended beyond the coverage edge
+# (nearest covered value of a 20 km smoothed copy, fading with the distance outside over INFLOW_DECAY_KM) moved along
+# the motion ("the rain keeps coming in as it does at the edge"). Offline in those cells: CSI .308 / .198 / .159,
+# amount x0.78 / x0.70 / x0.74; whole domain unchanged (+30 .647 = .647, +60 .541 vs .542, +120 .448 vs .450 at 0.1
+# mm/h; 1 mm/h equal; amount x1.00 -> x1.01). NOT the cause of the Galicia / Portugal / Brittany / Ireland drain
+# measured at the gauges (their sources lie inside the coverage, wout <= 0.03 at +120 there): there even the last
+# image moved along the motion loses the rain (Galicia x0.25 at +120, Brittany x0.60, Portugal x0.49) while the
+# image left in place keeps x1.0 - the rain grows at the coast (orography, coastal convergence, or OPERA reading the
+# sea far from the radars too weak); the shadow "oro" covers the hilly part. On a rebuilt forecast (S-PROG on 4 km +
+# local_amount + advect_blend, 18 runs 18./19.11.) the shadow still helps there: Galicia CSI 0.1 mm/h +120 .128 ->
+# .170 (amount x0.12 -> x0.22), Portugal .244 -> .260; whole domain .413 -> .412.
+# Computed on the verification grid (1 / RAW_DOWN) at the scored leads only (~5 grids). INFLOW=0: off.
+INFLOW = os.environ.get("INFLOW", "1") != "0"
+INFLOW_TAPER_KM, INFLOW_DECAY_KM, INFLOW_SMOOTH_KM = 30.0, 150.0, 20.0
+INFLOW_LEADS = (15, 30, 60, 90, 120)   # fcverify.LEADS and check_national_gauges.FC_LEADS
+
+
+def inflow_forecast(fc, last, motion, d, km_per_px, ref, leads=INFLOW_LEADS):
+    """fc: the served steps (full grid, < 0 = no radar); last: the newest analysis; motion: sprog_nowcast(motion_out=...)
+    (coarse pixels per 5 min); d: RAW_DOWN. Returns {valid ms: float16 grid at 1 / d} for the leads, or None."""
+    from scipy import ndimage
+    vel, down = motion.get("velocity"), motion.get("down", 1)
+    if vel is None or not len(fc):
+        return None
+    lastf = np.asarray(last, np.float32)
+    H, W = lastf.shape[0] // d, lastf.shape[1] // d
+    shrink = lambda a: cv2.resize(np.asarray(a, np.float32), (W, H), interpolation=cv2.INTER_AREA)
+    cov = shrink(lastf >= 0) > 0.5
+    if cov.all() or not cov.any():
+        return None
+    lz = np.where(cov, shrink(np.where(lastf < 0, 0, lastf)), 0).astype(np.float32)
+    km = km_per_px * d
+    s = INFLOW_SMOOTH_KM / km / 2
+    num = cv2.GaussianBlur(lz, (0, 0), s)
+    den = cv2.GaussianBlur(cov.astype(np.float32), (0, 0), s)
+    edge = np.where(cov & (den > 0.05), num / np.maximum(den, 1e-6), 0).astype(np.float32)
+    dist, (iy, ix) = ndimage.distance_transform_edt(~cov, return_indices=True)
+    ext = np.where(cov, lz, edge[iy, ix] * np.exp(-dist * km / INFLOW_DECAY_KM)).astype(np.float32)
+    del num, den, edge, dist, iy, ix
+    f = down / d
+    u = cv2.resize(np.nan_to_num(vel[0]).astype(np.float32), (W, H), interpolation=cv2.INTER_LINEAR) * f
+    v = cv2.resize(np.nan_to_num(vel[1]).astype(np.float32), (W, H), interpolation=cv2.INTER_LINEAR) * f
+    gx, gy = np.meshgrid(np.arange(W, dtype=np.float32), np.arange(H, dtype=np.float32))
+    covf = cov.astype(np.float32)
+    taper = INFLOW_TAPER_KM / km / 2
+    out = {}
+    for i, g in enumerate(fc):
+        lead = (i + 1) * STEP_MS // 60_000
+        if lead not in leads:
+            continue
+        mx, my = gx - u * (i + 1), gy - v * (i + 1)
+        src = cv2.remap(covf, mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        wout = 1.0 - np.clip(cv2.GaussianBlur(src, (0, 0), taper), 0.0, 1.0)
+        wout[~cov] = 0.0
+        fill = np.maximum(lz, cv2.remap(ext, mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0))
+        gf = np.asarray(g, np.float32)
+        gs = shrink(np.where(gf < 0, 0, gf))
+        o = (1.0 - wout) * gs + wout * fill
+        o[o < 0.05] = 0
+        o[shrink(gf >= 0) <= 0.5] = NODATA
+        out[ref + (i + 1) * STEP_MS] = o.astype(np.float16)
+    return out
+
+
 # The forecast's WET AREA grows (16.11.2026, North America): from +30 min on the served forecast covered x1.14-1.23
 # of the later image's wet area while the last image unchanged had x1.0-1.08 - S-PROG runs on a coarse grid (6 km
 # there) and the upsampling smears every light-rain edge outwards. A global S-PROG threshold (0.03 -> 0.10) only
@@ -855,6 +925,7 @@ class Region:
     SPROG_DOWN = 0    # S-PROG runs at grid resolution / SPROG_DOWN (0: simple nowcast only)
     RAW_DOWN = 3      # the forecast without the model's new cells (fc_raw) is kept at grid resolution / RAW_DOWN
     ORO_DEM = None    # terrain file for the shadow "oro" (oro_forecast; EuropeOpera: dem_eu4km.npz)
+    INFLOW_SHADOW = False   # the shadow "inflow" (inflow_forecast; EuropeOpera: True)
     _terrain = None
 
     def terrain(self, shape):
@@ -1007,12 +1078,20 @@ class Region:
             except Exception as e:  # never lose the forecast: fc is only replaced once serve() has finished
                 log(f"{self.name} nwp shadow{' / serve' if NWP_SERVE else ''} failed: {e}")
             self.nwp.prep = None
+        inflow = None
+        if self.INFLOW_SHADOW and INFLOW and motion.get("velocity") is not None:
+            # shadow "inflow" (19.11.2026): the served forecast where its source lies outside the coverage, at 1 / RAW_DOWN
+            try:
+                inflow = inflow_forecast(fc, last, motion, self.RAW_DOWN, self.KM_PER_PX, last_t)
+            except Exception as e:
+                log(f"{self.name} inflow shadow failed: {e}")
         if oro is None and oro_small is not None and not (NWP_SERVE and nwp):  # no served blend: compare with own as is
             oro = {last_t + (i + 1) * STEP_MS: g.astype(np.float16) for i, g in enumerate(oro_small)}
         oro_small = None
         with self.lock:
             self.fc_own0 = own0  # NWP_SERVE: verification shadow "own0" = the forecast without the blend, at 1 / RAW_DOWN
             self.fc_oro = oro  # verification shadow "oro": the stationary orographic part held in place, at 1 / RAW_DOWN
+            self.fc_inflow = inflow  # verification shadow "inflow": the coverage's inflow edge filled, at 1 / RAW_DOWN
             self.fc_nwp = nwp  # verification shadow "nwp" (fcverify.RegionVerify), at 1 / RAW_DOWN
             self.fc_raw = raw
             self.fc_cells = cells  # verification shadow "cells": with the model's new showers (served until 11.11.)
@@ -1043,6 +1122,7 @@ class EuropeOpera(Region):
     SPROG_DOWN = 3 if EU_KM == 1 else 2
     RAW_DOWN = 3 if EU_KM == 1 else 2   # S-PROG alone, at ~3-4 km: the verification's "sprog" variant
     ORO_DEM = "dem_eu4km.npz"   # terrain for the shadow "oro" (build_dem.py; the OPERA grid at 4 km)
+    INFLOW_SHADOW = True        # the shadow "inflow": the coverage's inflow edge (inflow_forecast)
     # Europe test instance: ICON-EU only - it is on the server's disk (openmeteo-sync); "best match" read AROME, HARMONIE,
     # MET Nordic ... from the remote mirror for ~60k points per refresh (took > 15 min locally)
     MODELS = os.environ.get("EU_MODELS") or None
@@ -1115,7 +1195,7 @@ class EuropeOpera(Region):
             with self.lock:
                 self.obs, self.fc, self.ref = obs, fc, ref
                 self.filled = set(meta["filled"]) & set(obs)
-                self.fc_raw = self.fc_cells = self.fc_pure = self.fc_nwp = self.fc_oro = None
+                self.fc_raw = self.fc_cells = self.fc_pure = self.fc_nwp = self.fc_oro = self.fc_inflow = None
             self.saved_filled = set(self.filled)
             log(f"{self.name}: continuing with the run of {datetime.fromtimestamp(ref / 1000, timezone.utc):%H:%MZ} "
                 f"from before the restart ({len(obs)} images)")
@@ -1167,7 +1247,8 @@ class EuropeOpera(Region):
                 more = {name: [d.get(ref + m * 60_000) for m in cng.FC_LEADS]
                         for name, d in (("pure", getattr(self, "fc_pure", None)), ("cells", getattr(self, "fc_cells", None)),
                                         ("own0", getattr(self, "fc_own0", None)),  # own0: without the blend (NWP_SERVE)
-                                        ("oro", getattr(self, "fc_oro", None))) if d}  # oro: stationary orographic part
+                                        ("oro", getattr(self, "fc_oro", None)),  # oro: stationary orographic part
+                                        ("inflow", getattr(self, "fc_inflow", None))) if d}  # inflow: coverage edge filled
             if ref % 600_000 or any(g is None for g in grids):  # the gauges report every 10 minutes
                 return
             d = self.RAW_DOWN
