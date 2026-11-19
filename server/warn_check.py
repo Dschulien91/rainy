@@ -58,9 +58,11 @@ Classes (ratio = the best criterion's robust max / its threshold):
                        our analysis exceeds OWN_T mm in 1 h (15 = DWD "Starkregen"; North America 25, ~flash-flood
                        guidance) inside a warning service's land area with no precipitation warning of any level within
                        ~9 km and +-60 min: real when a gauge within ~9 km measured >= 0.5 x OWN_T in 1 h or >= half of
-                       what our radar shows at that gauge; artefact when the peak pixel had >= 5 mm/h in >= 25 % of the
-                       day's images (static clutter) or gauges measured < 20 % of our radar at the gauge; else
-                       unverified
+                       what our radar shows at that gauge; artefact when the peak pixel lies in a static clutter spot
+                       of the check's 48 h of images (clutter.py's tests "spot" / "hot", field "cm") or gauges measured
+                       < 20 % of our radar at the gauge; else unverified. (Before 19.11.2026: >= 5 mm/h in >= 25 % of
+                       the day's images - that flagged real persistent heavy rain in South Florida 16.-19.11. as an
+                       artefact; "clutter" = that share is still logged.)
 Flood warnings: the rain of the 3 h before onset counts too (PRE_FLOOD - the rain that caused the flood); river
 floods days after the rain remain out of reach.
 Updates: a warning updated with a new id (same source, name, level, areas, windows touching) is one warning.
@@ -128,6 +130,8 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import clutter as cmask_mod  # noqa: E402  static clutter tests (server-v1.61), also used for the our-only cases
 
 LOG_DIR = os.environ.get("VERIFY_LOG_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "verify_log"))
 ARCH = "warnarchive"
@@ -1077,6 +1081,10 @@ def check_domain(dom, day, root, extra=(), geocodes=None, nws_zones=None, log=pr
     ring = deque()
     hours, cur_hour, cur, cur_n = {}, None, None, 0
     cnt5, n_day = np.zeros(grid.shape, np.uint16), 0
+    # static clutter test of clutter.py over all frames of the check (the day + the 24 h before): the same grid as the
+    # instances' counters (obs_eu / obs3km), undecayed counts
+    cl = {k: np.zeros(grid.shape, np.float32) for k in cmask_mod.KEYS}
+    n_cl = 0
     rg_t, rg = [], []
     rows, own_cases, warned_cache = [], [], {}
     T1, kmpx = OWN_T[dom], km_per_px(grid)
@@ -1099,6 +1107,9 @@ def check_domain(dom, day, root, extra=(), geocodes=None, nws_zones=None, log=pr
             ring.popleft()
         rg_t.append(t)
         rg.append(np.where(cov.ravel()[gflat], r.ravel()[gflat], np.nan) if len(gflat) else np.zeros(0, np.float32))
+        for k, inc in zip(cmask_mod.KEYS, cmask_mod.counts_of(np.where(cov, r, -1.0), kmpx)):
+            cl[k] += inc
+        n_cl += 1
         in_day = t > t_day0
         if in_day:
             n_day += 1
@@ -1328,6 +1339,16 @@ def check_domain(dom, day, root, extra=(), geocodes=None, nws_zones=None, log=pr
             res["lead_min"] = max(shown) if shown else (0 if lead else None)
         out.append(res)
     # ---- our-only cases: gauges and clutter decide ----
+    cmask, cblobs = cmask_mod.build_mask(cl, kmpx, n_cl) if n_cl else (np.zeros(grid.shape, bool), [])
+    del cl
+    ckind = np.zeros(grid.shape, np.uint8)       # 1 spot, 2 hot (per connected blob of the mask)
+    if cmask.any():
+        n_, lab_ = cv2.connectedComponents(cmask.astype(np.uint8), connectivity=8)
+        for b in cblobs:
+            ckind[lab_ == lab_[b["row"], b["col"]]] = 1 if b["kind"] == "spot" else 2
+        ckind = cv2.dilate(ckind, np.ones((3, 3), np.uint8))   # one cell of slack around the spot
+        log(f"{dom} {day}: clutter test {len(cblobs)} spots ({sum(b['kind'] == 'hot' for b in cblobs)} hot), "
+            f"{int(cmask.sum())} cells, {n_cl} images")
     for case in own_cases:
         pix = np.zeros(h_ * w_, np.uint8)
         pix[np.fromiter(case["pix"], np.int64)] = 1
@@ -1339,6 +1360,9 @@ def check_domain(dom, day, root, extra=(), geocodes=None, nws_zones=None, log=pr
         res = {"k": "own", "dom": dom, "c": case["c"], "t0": case["t0"], "t1": case["t1"], "tpk": case.get("tpk"),
                "peak1h": round(case["peak"], 1), "rmax": round(case.get("rmax", 0), 1), "lat": round(case["lat"], 3),
                "lon": round(case["lon"], 3), "px": len(case["pix"]), "clutter": round(clutter, 2), "gauges": {"n": len(have)}}
+        cm = int(ckind[case["pr"], case["pc"]])
+        if cm:
+            res["cm"] = "spot" if cm == 1 else "hot"
         cls = "own_unverified"
         if have:
             i_best, v_best = max(have, key=lambda x: x[1])
@@ -1348,7 +1372,7 @@ def check_domain(dom, day, root, extra=(), geocodes=None, nws_zones=None, log=pr
                 cls = "own_real"
             elif r_at >= 5 and v_best < 0.2 * r_at:
                 cls = "own_artefact"
-        if clutter >= 0.25 and cls != "own_real":
+        if cm and cls != "own_real":
             cls = "own_artefact"
         res["class"] = cls
         out.append(res)

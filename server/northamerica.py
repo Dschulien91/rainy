@@ -13,6 +13,7 @@ matter for 5-minute rain motion).
 """
 import gzip
 import io
+import os
 import re
 import struct
 import time
@@ -115,6 +116,11 @@ if __name__ == "__main__":  # quick check: newest file, decode time, coverage
 
 # ---------- rain gauges: US airport weather reports (METAR) ----------
 METAR_URL = "https://aviationweather.gov/data/cache/metars.cache.csv.gz"
+# Gauges with a dead precipitation sensor that the reports do not flag (no "PNO"): never used as truth (hourly rows,
+# minute_gauges via precip_status). KEYW (Key West airport): 0.0 mm and no precipitation in its present weather all
+# through 18.11.2026 while KNQX 7 km away measured 175.5 mm and MRMS showed ~137 mm at both. Env NA_GAUGE_SKIP
+# (comma-separated ICAO ids) replaces the list; check a station with warn_check's "radar@g" or the minute truth.
+GAUGE_SKIP = {s.strip() for s in os.environ.get("NA_GAUGE_SKIP", "KEYW").split(",") if s.strip()}
 
 
 def metar_rows(raw):
@@ -134,7 +140,7 @@ def metar_rows(raw):
             lat, lon = float(r[col["latitude"]]), float(r[col["longitude"]])
         except (ValueError, IndexError, KeyError):
             continue
-        if r[col["metar_type"]] != "METAR" or " AO2" not in raw_text or " PNO" in raw_text:
+        if r[col["metar_type"]] != "METAR" or " AO2" not in raw_text or " PNO" in raw_text or sid in GAUGE_SKIP:
             continue
         if not (20 <= lat <= 56 and -130 <= lon <= -60):
             continue
@@ -161,7 +167,7 @@ def precip_status(raw):
         sid, t = r[i_sid], r[i_t]
         if t >= newest.get(sid, ""):
             newest[sid] = t
-            out[sid] = " AO2" in r[0] and " PNO" not in r[0]
+            out[sid] = " AO2" in r[0] and " PNO" not in r[0] and sid not in GAUGE_SKIP
     return out
 
 
