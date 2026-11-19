@@ -105,7 +105,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v1.60"
+VERSION = "server-v1.61"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -574,6 +574,11 @@ LOCAL_AREA = os.environ.get("LOCAL_AREA", "0") == "1"
 # Finland x0.53 -> x1.01 at held-out gauges; CSI equal or better overall). GAUGE_ADJUST=1 switches it on (default off;
 # not for North America).
 GAUGE_ADJUST = os.environ.get("GAUGE_ADJUST", "0") == "1"
+# Static clutter mask in the eu / eun / na pictures (clutter.py, 19.11.2026): spots that are wet in most images while
+# the country around them is dry, and areas whose mean rate over days no rain reaches (the fixed echo near Dublin
+# in OPERA, radar-site echoes in Scandinavia, Poland, Romania, Portugal ...) are replaced by their surroundings before
+# the nowcast. Set up in main_eu (the serving process only - offline tools that build a region do not count images).
+CLUTTER_MASK = os.environ.get("CLUTTER_MASK", "1") == "1"
 
 
 def local_area(fc, last, motion, km_per_px, sigma_km=LOCAL_AREA_KM, slack=LOCAL_AREA_SLACK, tmax=1.0, clip=2.0):
@@ -1134,6 +1139,18 @@ class EuropeOpera(Region):
             log(f"gauge adjust failed: {e}")
             return rate
 
+    clutter = None  # clutter.ClutterMask (main_eu, CLUTTER_MASK)
+
+    def declutter(self, ts, rate):
+        """The image with the static clutter spots replaced by their surroundings (clutter.py); ts: ms or the OPERA
+        file's url. The mask counts the image before it is applied."""
+        if self.clutter is None:
+            return rate
+        if not isinstance(ts, (int, np.integer)):
+            stamp = ts.split("OPERA@")[1].split("@")[0]
+            ts = int(datetime.strptime(stamp, "%Y%m%dT%H%M").replace(tzinfo=timezone.utc).timestamp() * 1000)
+        return self.clutter.apply(int(ts), rate)
+
     def despoke(self, url, rate):
         if not self.DESPOKE:
             return rate
@@ -1200,8 +1217,8 @@ class EuropeOpera(Region):
         else:
             rate[nod] = NODATA
         rate = self.despoke(url, rate)
-        # the own picture (EuropeNational.load) adjusts after its layers are laid on
-        return rate if EU_NATIONAL else self.gauge_adjusted(url, rate)
+        # the own picture (EuropeNational.load) removes clutter and adjusts after its layers are laid on
+        return rate if EU_NATIONAL else self.gauge_adjusted(url, self.declutter(url, rate))
 
     def to_pixels(self, x, y):
         """Fractional pixel centres. Map tiles: the projection (pyproj, ~2/3 of a Europe tile's render time) is the
@@ -1259,6 +1276,7 @@ class EuropeNational(EuropeOpera):
         except Exception as e:
             log(f"natobs failed: {e}")
         self.used[ts] = national.compose(rate, self.layers, ts)
+        rate = self.declutter(ts, rate)  # before natobs: the gauges see the picture as shown
         if opera is not None:
             try:
                 col, row, ok = self.gauge_px
@@ -1319,6 +1337,7 @@ class NorthAmericaMrms(EuropeOpera):
     def load(self, src):
         ts, url = src
         rate = northamerica.block_mean(northamerica.decode(fetch(url, timeout=60)), self.K, NODATA)
+        rate = self.declutter(ts, rate)
         try:  # the picture at the US rain gauges (METAR), every image: check_na_gauges.py
             import check_national_gauges as cng
             px = self.gauges()
@@ -2020,6 +2039,14 @@ def main_eu():
     """Europe test instance: OPERA + own nowcast (+ the model's new showers), sunny for Europe, their verification."""
     monitor.start(EDITION, VERSION, monitor_status)
     eu = REGIONS["eu"]
+    if CLUTTER_MASK:
+        try:
+            import clutter
+            vdir = os.environ.get("VERIFY_LOG_DIR", ".")
+            eu.clutter = clutter.ClutterMask("na" if NA else "eun" if EU_NATIONAL else "eu", (eu.NY, eu.NX), eu.KM_PER_PX,
+                                             vdir, log, archive=os.path.join(vdir, "obs_eu"), lonlat=eu.pixel_lonlat)
+        except Exception as e:  # never keep the instance from starting
+            log(f"clutter mask not started: {e}")
     eu.load_state()
     threading.Thread(target=update_loop, args=(eu,), daemon=True).start()
     if os.environ.get("EU_MODEL_BLEND", "1") != "0":  # only the verification shadow "cells" needs the weather model
