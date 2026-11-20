@@ -50,6 +50,17 @@ for d in DIRS.values():
     have = {int(os.path.basename(p)[:-4]) for p in glob.glob(os.path.join(d, "*.npz"))}
     refs = have if refs is None else refs & have
 refs = sorted(t for t in refs if since <= t <= UNTIL)
+# --with oro,inflow (20.11.): only the runs that carry these shadows (in either instance), so a shadow that started
+# inside the window is scored on the same cases as the rest; without it a column needs every run of the window
+WITH = sys.argv[sys.argv.index("--with") + 1].split(",") if "--with" in sys.argv else []
+if WITH:
+    def carries(t):
+        keys = set()
+        for d in DIRS.values():
+            with np.load(os.path.join(d, f"{t}.npz")) as z:
+                keys |= set(z.files)
+        return all(k in keys for k in WITH)
+    refs = [t for t in refs if carries(t)]
 if not refs:
     sys.exit("no forecast run that both instances noted in this time")
 print(f"{len(refs)} forecast runs of both instances, {time.strftime('%d.%m. %H:%M', time.gmtime(refs[0] / 1000))} - "
@@ -64,6 +75,10 @@ for name in DIRS:
     cols += [(f"{name[:3]}. {EXTRA[k]}", name, k) for k in EXTRA if all(k in data[name][t] for t in refs)]
     cols.append((f"{name[:3]}. persist", name, None))
     cols.append((f"{name[:3]}. later pic", name, "later"))
+    for k in EXTRA:  # say when a shadow column is left out because only part of the runs have it
+        n = sum(k in data[name][t] for t in refs)
+        if 0 < n < len(refs):
+            print(f"(column {name[:3]}. {EXTRA[k]} left out: only {n} of {len(refs)} runs have it - use --with {k})")
 # "later pic" (16.11.): the instance's own picture at the forecast's VALID time at the same gauges = what the forecast is
 # trained to hit. forecast x ~ later pic x -> the amount error is the picture's (radar / gain); forecast x >> later pic x
 # -> the forecast itself inflates rain at the gauges (15./16.11.: Germany x1.7-1.9 at +60 with persistence x1.1-1.3).
