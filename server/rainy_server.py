@@ -106,7 +106,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v1.71"
+VERSION = "server-v1.72"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -1729,7 +1729,9 @@ def update_loop(region):
                 log(f"[{datetime.now():%H:%M:%S}] {region.name}: +{n} frames, latest "
                       f"{datetime.fromtimestamp(ref / 1000, timezone.utc):%H:%M}Z, {time.time() - started:.1f}s")
         except Exception as e:  # keep serving the last good data
-            log(f"{region.name} update failed: {e}")
+            import traceback  # where it failed (a bare message like "NoneType / int" cannot be traced afterwards)
+            where = " <- ".join(f"{os.path.basename(f.filename)}:{f.lineno} {f.name}" for f in traceback.extract_tb(e.__traceback__)[-3:][::-1])
+            log(f"{region.name} update failed: {e} [{where}]")
         time.sleep(POLL_S)
 
 
