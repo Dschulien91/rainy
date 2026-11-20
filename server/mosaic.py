@@ -642,6 +642,16 @@ def _yield_to_users(mosaic):
         waited += 0.05
 
 
+# PRERENDER (server-v1.78, 20.11.2026): measured per thread over 5 min, the prerender loops took 0.77 of the 1.77
+# cores all four instances used (Germany 0.33, North America 0.32, Europe 0.12) - mostly the per-step PICTURE tiles
+# (/tiles/rain|raineu, ~12k per Germany run, 6.7k per North America run), which only the no-WebGL fallback loads, and
+# the WebGL data tiles were warmed as PNG of DWD's forecast while browsers ask for WebP (tileimg) and, since app v1.28,
+# for our own forecast in Germany. Now only what the app loads first: the shown step alone (n = 1) and the whole
+# timeline, as WebP, for the served variants. PRERENDER_RASTER=1 brings the picture tiles back.
+PRERENDER_RASTER = os.environ.get("PRERENDER_RASTER", "0") == "1"
+PRERENDER_FMTS = ("webp",)
+
+
 def prerender_loop(mosaic, log):
     """Render the German rain tiles of every frame (zoom PRERENDER_ZOOMS) as soon as a new radar run is in, so no
     user waits for them (~120 tiles per frame). The app asks for tiles up to zoom 10 (enlarges them above); zoom 9 and
@@ -656,7 +666,7 @@ def prerender_loop(mosaic, log):
                 lon0, lat0, lon1, lat1 = GERMANY_BOX
                 (x0, x1), (y0, y1) = merc(np.array([lon0 - m * 1.6, lon1 + m * 1.6]), np.array([lat0 - m, lat1 + m]))
                 now = time.time() * 1000
-                for f in sorted(mosaic.frames(), key=lambda f: abs(f["ts"] - now)):  # frames near "now" first
+                for f in sorted(mosaic.frames(), key=lambda f: abs(f["ts"] - now)) if PRERENDER_RASTER else ():
                     for z in PRERENDER_ZOOMS:
                         k = (1 << z) / (2 * WORLD)
                         for x in range(int((x0 + WORLD) * k), int((x1 + WORLD) * k) + 1):
@@ -669,8 +679,10 @@ def prerender_loop(mosaic, log):
                                     n += 1
                     if mosaic.key() + "|" + mosaic.key("own") != key:  # newer run or own forecast: start over
                         break
-                if mosaic.key() + "|" + mosaic.key("own") == key:  # the WebGL map's data tiles too
+                if mosaic.key() + "|" + mosaic.key("own") == key:  # the WebGL map's data tiles
                     box = (lon0 - m * 1.6, lat0 - m, lon1 + m * 1.6, lat1 + m)
+                    if mosaic.de.own_ref == mosaic.de.ref:  # our own forecast: the Germany default since app v1.28
+                        n += prerender_data(mosaic, mosaic.key("own"), box, range(5, 9), variant="own")
                     n += prerender_data(mosaic, mosaic.key(), box, range(5, 9))
                 done = key
                 log(f"[{datetime.now():%H:%M:%S}] prerender: {n} tiles in {time.time() - started:.0f}s")
@@ -686,16 +698,19 @@ def prerender_data(mosaic, key, box, zooms, use_de=True, variant="dwd"):
     if not frames:
         return 0
     t0, n = frames[0]["ts"], min(len(frames), DATA_COLS * DATA_ROWS)
+    shown = max((f["ts"] for f in frames if not f["fc"]), default=None)  # the app opens on "now": that step alone first
     lon0, lat0, lon1, lat1 = box
     (x0, x1), (y0, y1) = merc(np.array([lon0, lon1]), np.array([lat0, lat1]))
     done = 0
-    for z in zooms:
-        k = (1 << z) / (2 * WORLD)
-        for x in range(int((x0 + WORLD) * k), int((x1 + WORLD) * k) + 1):
-            for y in range(int((WORLD - y1) * k), int((WORLD - y0) * k) + 1):
-                _yield_to_users(mosaic)
-                mosaic.rain_data_tile(key, t0, n, z, x, y, use_de=use_de, variant=variant)
-                done += 1
+    for first, count in ([(shown, 1)] if shown is not None else []) + [(t0, n)]:
+        for z in zooms:
+            k = (1 << z) / (2 * WORLD)
+            for x in range(int((x0 + WORLD) * k), int((x1 + WORLD) * k) + 1):
+                for y in range(int((WORLD - y1) * k), int((WORLD - y0) * k) + 1):
+                    for fmt in PRERENDER_FMTS:
+                        _yield_to_users(mosaic)
+                        mosaic.rain_data_tile(key, first, count, z, x, y, use_de=use_de, variant=variant, fmt=fmt)
+                        done += 1
     return done
 
 
@@ -711,7 +726,7 @@ def prerender_box_loop(mosaic, log, box, zooms, use_de=False):
                 lon0, lat0, lon1, lat1 = box
                 (x0, x1), (y0, y1) = merc(np.array([lon0, lon1]), np.array([lat0, lat1]))
                 now = time.time() * 1000
-                for f in sorted(mosaic.frames(), key=lambda f: abs(f["ts"] - now)):
+                for f in sorted(mosaic.frames(), key=lambda f: abs(f["ts"] - now)) if PRERENDER_RASTER else ():
                     for z in zooms:
                         k = (1 << z) / (2 * WORLD)
                         for x in range(int((x0 + WORLD) * k), int((x1 + WORLD) * k) + 1):

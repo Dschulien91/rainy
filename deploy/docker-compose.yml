@@ -95,7 +95,7 @@ services:
       GAUGE_ADJUST: "1"        # mean-field factor per gauge network, last 12 h (gauge_adjust.py; 18.11. held out: Austria x1.55 -> x1.03, Portugal x0.34 -> x0.81, Finland x0.53 -> x1.01, CSI equal or better); api-eu stays unadjusted as the reference
       EU_MODEL_BLEND: "0"
       SUNNY_DE: "0"
-      PRERENDER: "0"
+      PRERENDER: "1"            # server-v1.78: only the WebGL data tiles (shown step + timeline, WebP) - this is the default Europe view
       VERIFY_LOG_DIR: /app/verify_log/eun
       DATA_DIR: /app/data
       MALLOC_ARENA_MAX: "2"
