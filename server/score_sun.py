@@ -106,7 +106,9 @@ if "--by" in args:  # per group (the country for --prefix eusy; rows since serve
             a, b = groups.get((g, n, 60)), groups.get((g, n, 120))
             cells.append(f"{a[1] / a[0]:.3f}/{b[1] / b[0]:.3f}" if a and b and a[0] and b[0] else "-")
         nn = max((groups.get((g, n, 120)) or [0])[0] for n in load.names)
-        print(f"  {g:8s}" + "".join(f" {c:>13s}" for c in cells) + f"  {nn:6d}")
+        # 20.11.2026: be / ch / lv / is showed MAE 0.000 - not a decoding error but 2-30 values in 3 days (few SYNOP
+        # stations in this feed report the cloud cover, and the north has almost no daylight): say so, never rank on them
+        print(f"  {g:8s}" + "".join(f" {c:>13s}" for c in cells) + f"  {nn:6d}" + ("   (too few values)" if nn < 200 else ""))
 if ANA:
     w = sum(r["n"] for r in ANA)
     print(f"analysis at the stations (newest image vs gauge, {len(ANA)} images, {w} values): "

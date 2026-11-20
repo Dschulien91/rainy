@@ -12,6 +12,7 @@ volumes:
 
 services:
   api:
+    cpu_shares: 2048  # CPU priority when all instances compute at once (20.11.2026): Germany + alerts and what users wait for first
     build: ../server
     restart: always
     environment:
@@ -52,6 +53,7 @@ services:
   # kernel killed it every ~10 min from the day sunny Europe and the advection blend were added (25 restarts in 5 h,
   # no Europe verification rows in that time). The server has 7.7 GB: Germany ~1.8, Open-Meteo ~0.7.
   api-eu:
+    cpu_shares: 512
     build: ../server
     restart: always
     mem_limit: 3400m
@@ -79,6 +81,7 @@ services:
   # Its verification files go to verify_log/eun/ (same names as api-eu's, so the same scripts score both).
   # No sunny, no weather-model shadow, no tile pre-rendering, at most 1.5 cores: the two public instances come first.
   api-eun:
+    cpu_shares: 1536
     build: ../server
     restart: always
     mem_limit: 2800m
@@ -109,6 +112,7 @@ services:
   # api-eu (rainy_server.NorthAmericaMrms, region "eu" inside). Served under /na/, files in verify_log/na/.
   # Pre-renders its tiles (zoom 3-6 over North America); sunny from GOES-East; no weather-model blend.
   api-na:
+    cpu_shares: 1024
     build: ../server
     restart: always
     mem_limit: 3000m   # + sunny for the Americas (GOES, ~0.5 GB more)
@@ -134,6 +138,7 @@ services:
       retries: 3
 
   openmeteo:
+    cpu_shares: 2048
     image: ghcr.io/open-meteo/open-meteo
     restart: always
     volumes:
@@ -171,6 +176,7 @@ services:
     # gusts, showers): without those variables the symbol took 2.8 s per new place; the 700 hPa wind comes from GFS 0.25.
 
   caddy:
+    cpu_shares: 2048
     image: caddy:2
     restart: always
     ports:

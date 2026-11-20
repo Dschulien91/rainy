@@ -87,6 +87,20 @@ def group(s):
     return f"sy-{s[1].split('-', 1)[0]}" if s[0] == "sy" else s[0]
 
 
+# Gauge groups outside a provider's radar coverage (server-v1.75, 20.11.2026): inside its bounding box (bench select)
+# but its nowcast has no data there and reads 0 - 48 h measured amount ratio x0.00-0.19 while the gauges and
+# persistence see rain (KNMI and INCA-BE in England / UK / Denmark / France, MET Norway outside the Nordic countries).
+# They made those providers look far worse than they are; listed per group, never counted in "All gauges".
+OUTSIDE = {"knmi": ("England", "United Kingdom", "Denmark", "France"),
+           "incabe": ("England", "United Kingdom", "France"),
+           "metno": ("Denmark", "Poland", "Germany", "Faroe", "Estonia")}
+
+
+def outside(p, g):
+    name = group_name(g)
+    return any(o.lower() in name.lower() for o in OUTSIDE.get(p, ()))
+
+
 def group_name(g):
     if g.startswith("sy-"):
         import synop
@@ -282,8 +296,8 @@ def main():
         groups = sorted({g for (pp, g, _, _) in data if pp == p})
         groups = sorted(groups, key=lambda g: -sum(len(v) for (pp, gg, _, _), v in data.items() if pp == p and gg == g))
         for g in groups + ["all"]:
-            sel = (lambda gg: True) if g == "all" else (lambda gg, g=g: gg == g)
-            name = "All gauges of this provider" if g == "all" else group_name(g)
+            sel = (lambda gg, p=p: not outside(p, gg)) if g == "all" else (lambda gg, g=g: gg == g)
+            name = "All gauges of this provider" if g == "all" else group_name(g) + (" [outside coverage]" if outside(p, g) else "")
             only = opt("--only")
             if only and g != "all" and not any(o == g or o.lower() in name.lower() for o in only.split(",")):
                 continue
@@ -314,7 +328,7 @@ def main():
                     csi.append(f"{h / (h + m + f):.2f}" if h + m + f else "  - ")
                 ratio = f"x{q.sum() / g.sum():.2f}" if g.sum() > 0.5 else "x - "
                 cells.append(f"{'/'.join(csi)} {ratio}")
-            print(f"  {p:7s} {name[:34]:34s} +{lead:3d} n={len(g):5d}  " + "  |  ".join(cells))
+            print(f"  {p:7s} {name[:52]:52s} +{lead:3d} n={len(g):5d}  " + "  |  ".join(cells))
 
 
 if __name__ == "__main__":
