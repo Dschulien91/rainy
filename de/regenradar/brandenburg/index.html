@@ -475,11 +475,11 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=1.28"></script>
-<script src="lang/en.js?v=1.28"></script>
+<script src="lang/de.js?v=1.29"></script>
+<script src="lang/en.js?v=1.29"></script>
 <script>
 "use strict";
-const VERSION = "v1.28";
+const VERSION = "v1.29";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -3230,7 +3230,7 @@ async function setLocation(loc, picked, knownName) {
   state.loc = loc; state.picked = picked;
   if (!picked) pickedMarker.remove();
   const placeEl = document.getElementById("place");
-  if (picked) placeEl.innerHTML = '<svg class="pin-ico" viewBox="0 0 24 24"><path d="M12 22s-7-7.6-7-13a7 7 0 0 1 14 0c0 5.4-7 13-7 13z" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="9" r="2.4" fill="none" stroke="currentColor" stroke-width="2"/></svg>' + esc(t("place.loading")); else placeEl.textContent = knownName || "…";
+  if (picked) placeEl.innerHTML = '<svg class="pin-ico" viewBox="0 0 24 24"><path d="M12 22s-7-7.6-7-13a7 7 0 0 1 14 0c0 5.4-7 13-7 13z" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="9" r="2.4" fill="none" stroke="currentColor" stroke-width="2"/></svg>' + esc(t("place.loading")); else placeEl.textContent = (knownName && !knownName.then && knownName) || "…"; // a pending name (Promise) shows "…"
   const nameP = knownName && knownName.then ? knownName.then((n) => n || reverseGeocode(loc, picked).then((p) => p.name))
     : knownName ? Promise.resolve(knownName) : reverseGeocode(loc, picked).then((p) => p.name);
   try {

@@ -150,6 +150,8 @@ def sources(hs):
         limit = SOURCE_LIMIT.get(name, SOURCE_DEFAULT)
         late = run = longest = 0
         for r in hs:  # rows every 5 minutes, in time order
+            if "src" not in r:  # written before server-v1.70 (no source ages yet): unknown, not an outage
+                continue
             v = (r.get("src") or {}).get(name)
             if v is None or v > limit:
                 late += 1
