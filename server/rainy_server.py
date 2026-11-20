@@ -106,7 +106,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v1.76"
+VERSION = "server-v1.77"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -506,10 +506,11 @@ NWP_BLEND = os.environ.get("NWP_BLEND", "1") != "0"
 NWP_SERVE = os.environ.get("NWP_SERVE", "0") == "1"
 
 
-def local_amount(fc, last, motion, km_per_px, sigma_km=LOCAL_PM_KM, power=1.0, clip=3.0, keep=True):
+def local_amount(fc, last, motion, km_per_px, sigma_km=LOCAL_PM_KM, power=1.0, clip=3.0, keep=True, steps=None):
     """fc: S-PROG steps (float16, NODATA outside); last: the newest analysis; motion: sprog_nowcast(motion_out=...).
     Returns the steps with every region's rain amount set to the advected last image's (keep: scaled to S-PROG's
-    total; else the advected image's own total = Lagrangian persistence)."""
+    total; else the advected image's own total = Lagrangian persistence). steps: the step number of each grid when
+    only some steps are passed (shadows)."""
     vel, down = motion.get("velocity"), motion.get("down", 1)
     if vel is None or not len(fc):
         return fc
@@ -533,7 +534,8 @@ def local_amount(fc, last, motion, km_per_px, sigma_km=LOCAL_PM_KM, power=1.0, c
         gf = np.asarray(g, np.float32)
         f = _coarse(np.where(gf < 0, 0, gf)[: cy * c, : cx * c], c)
         f[f < 0] = 0
-        mx, my = gx - u * (i + 1), gy - v * (i + 1)
+        k = steps[i] if steps is not None else i + 1
+        mx, my = gx - u * k, gy - v * k
         adv = cv2.remap(src, mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
         cov = cv2.remap(cov0, mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
         tf, ta = float(f.sum()), float(adv.sum())
@@ -927,6 +929,7 @@ class Region:
     MODEL_DEG = None  # lat/lon spacing of the weather model rain used for blending (None: no blending)
     SPROG_DOWN = 0    # S-PROG runs at grid resolution / SPROG_DOWN (0: simple nowcast only)
     ADV_SHADOWS = {}  # name -> (fade_min, speed): scored shadows of the moved last image's hand-over to S-PROG
+    LA_SHADOWS = {}   # name -> sigma_km: scored shadows of local_amount's window (without the NWP blend: vs own0)
     RAW_DOWN = 3      # the forecast without the model's new cells (fc_raw) is kept at grid resolution / RAW_DOWN
     ORO_DEM = None    # terrain file for the shadow "oro" (oro_forecast; EuropeOpera: dem_eu4km.npz)
     INFLOW_SHADOW = False   # the shadow "inflow" (inflow_forecast; EuropeOpera: True)
@@ -1020,19 +1023,26 @@ class Region:
                     d = self.RAW_DOWN  # the uncorrected S-PROG, kept small for the shadow "sprog0"
                     pure_small = {last_t + (i + 1) * STEP_MS: cv2.resize(np.asarray(g, np.float32), (g.shape[1] // d, g.shape[0] // d),
                                   interpolation=cv2.INTER_AREA).astype(np.float16) for i, g in enumerate(pure)}
+                    ks = [lead // 5 for lead in INFLOW_LEADS]
+                    raw_k = [pure[k - 1] for k in ks] if self.LA_SHADOWS and LOCAL_AMOUNT else None
                     if LOCAL_AMOUNT:  # every region keeps its rain amount (local_amount, 16.11.2026)
                         pure = local_amount(pure, last, motion, self.KM_PER_PX, keep=False)
                     fc = advect_blend(pure, last, motion)  # no break at "now" (ADV_FADE_MIN)
-                    if self.ADV_SHADOWS:  # other hand-overs, at the scored leads only, at 1 / RAW_DOWN
+                    if self.ADV_SHADOWS or raw_k is not None:  # other variants, at the scored leads only, at 1 / RAW_DOWN
                         try:
-                            ks, d = [lead // 5 for lead in INFLOW_LEADS], self.RAW_DOWN
-                            adv = {n: {last_t + k * STEP_MS: cv2.resize(np.asarray(g, np.float32), (g.shape[1] // d, g.shape[0] // d),
-                                                                        interpolation=cv2.INTER_AREA).astype(np.float16)
-                                       for k, g in zip(ks, advect_blend([pure[k - 1] for k in ks], last, motion, f, sp, steps=ks))}
+                            d = self.RAW_DOWN
+                            small = lambda gs: {last_t + k * STEP_MS: cv2.resize(np.asarray(g, np.float32), (g.shape[1] // d, g.shape[0] // d),
+                                                                                 interpolation=cv2.INTER_AREA).astype(np.float16)
+                                                for k, g in zip(ks, gs)}
+                            adv = {n: small(advect_blend([pure[k - 1] for k in ks], last, motion, f, sp, steps=ks))
                                    for n, (f, sp) in self.ADV_SHADOWS.items()}
+                            for n, sig in self.LA_SHADOWS.items() if raw_k is not None else ():
+                                la = local_amount(raw_k, last, motion, self.KM_PER_PX, sigma_km=sig, keep=False, steps=ks)
+                                adv[n] = small(advect_blend(la, last, motion, steps=ks))
                         except Exception as e:
-                            log(f"{self.name} hand-over shadows failed: {e}")
+                            log(f"{self.name} extra shadows failed: {e}")
                             adv = None
+                    raw_k = None
                     if LOCAL_AREA:  # off by default: wet area per window <= the moved last image's (local_area)
                         fc = local_area(fc, last, motion, self.KM_PER_PX)
                 except Exception as e:  # never lose the forecast: fall back to the simple method
@@ -1108,7 +1118,7 @@ class Region:
             self.fc_own0 = own0  # NWP_SERVE: verification shadow "own0" = the forecast without the blend, at 1 / RAW_DOWN
             self.fc_oro = oro  # verification shadow "oro": the stationary orographic part held in place, at 1 / RAW_DOWN
             self.fc_inflow = inflow  # verification shadow "inflow": the coverage's inflow edge filled, at 1 / RAW_DOWN
-            self.fc_adv = adv  # verification shadows of the hand-over (ADV_SHADOWS), at 1 / RAW_DOWN
+            self.fc_adv = adv  # verification shadows ADV_SHADOWS / LA_SHADOWS, at 1 / RAW_DOWN
             self.fc_nwp = nwp  # verification shadow "nwp" (fcverify.RegionVerify), at 1 / RAW_DOWN
             self.fc_raw = raw
             self.fc_cells = cells  # verification shadow "cells": with the model's new showers (served until 11.11.)
@@ -1474,6 +1484,13 @@ class EuropeNational(EuropeOpera):
     # from the national layers alone; everywhere else it has no data (hatched in the app, never old rain as "now").
     # OPERA's image replaces it when it arrives. Normally OPERA is 5-10 min late, so this does not happen.
     OPERA_LATE_MIN = 15
+    # LOCAL WINDOW (20.11.2026): Wallonia +120 x2.6 at the gauges (19./20.11., later picture x0.95) while NL x0.43 and
+    # Flanders x0.59. A stationary heavy-rain maximum over northern France was carried east along a W-E band by the
+    # moved last image; local_amount's 150 km window then filled the decay S-PROG let happen over NL / Flanders back into
+    # the band's core. Offline (12 event runs + 12 runs of 16./17.11., +120 vs the later picture): sigma 50 km -> Wallonia
+    # x1.79 -> 1.61, NL x0.53 -> 0.76 in the event, Wallonia 1.29 -> 1.14 on the quiet days, domain CSI unchanged.
+    # Scored shadow "la50" (without the NWP blend: compare with own0).
+    LA_SHADOWS = {"la50": 50.0}
 
     def __init__(self):
         super().__init__()
