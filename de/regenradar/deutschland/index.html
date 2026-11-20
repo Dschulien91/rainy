@@ -474,11 +474,11 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=1.27"></script>
-<script src="lang/en.js?v=1.27"></script>
+<script src="lang/de.js?v=1.28"></script>
+<script src="lang/en.js?v=1.28"></script>
 <script>
 "use strict";
-const VERSION = "v1.27";
+const VERSION = "v1.28";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -653,13 +653,15 @@ const imgFrames = new Map();
 // Map style (style card, stored on the device; ?sat=photo still works for testing):
 // sat = "clouds" (our cloud layer + sun tint) | "photo" (EUMETSAT satellite photo); theme = "auto" | "light" | "dark";
 // rain = "mix" (DWD in Germany, OPERA elsewhere) | "eu" (EUMETNET OPERA everywhere, for comparison);
-// fc = "dwd" (DWD's 2 h radar forecast) | "own" (our own pySTEPS forecast on the same radar, being tuned)
+// fc = "own" (our own forecast on DWD's radar, the default since v1.28: better than DWD's at the gauges from +30 min
+// every day, user decision 20.11.2026) | "dwd" (DWD's 2 h radar forecast). fcPick: chosen in the settings - before
+// v1.28 every saved style held fc "dwd", so only an explicit pick keeps DWD.
 const MAP_STYLE = (() => {
   let st = {};
   try { st = JSON.parse(localStorage.getItem("rainy.style")) || {}; } catch {}
   return { sat: st.sat === "photo" ? "photo" : "clouds", theme: ["light", "dark", "auto"].includes(st.theme) ? st.theme : "dark", // dark by default (07.11.)
     rain: st.rain === "eu" ? "eu" : "mix", area: ["de", "na"].includes(st.area) ? st.area : "eu", eusrc: st.eusrc === "opera" ? "opera" : "nat" /* own Europe picture by default (user, 14.11.2026) */, render: st.render === "img" ? "img" : "gl", // WebGL by default (10.11.); pictures without WebGL
-    fc: (new URLSearchParams(location.search).get("fc") || st.fc) === "own" ? "own" : "dwd", design: ["liberty", "bright", "fiord", "earth"].includes(st.design) ? st.design : "plain",
+    fc: (new URLSearchParams(location.search).get("fc") || (st.fcPick ? st.fc : "own")) === "dwd" ? "dwd" : "own", fcPick: st.fcPick === true, design: ["liberty", "bright", "fiord", "earth"].includes(st.design) ? st.design : "plain",
     warn: st.warn === "on" ? "on" : "off" /* warnings + lightning on the map and the warning line: off by default (user, 18.11.2026) */ };
 })();
 // Edition: "de" = first public version (Germany: rain radar 2 h + 24 h / 3 days; sunny 2 h from the server's DWD satellite
@@ -3590,7 +3592,7 @@ function showSettings() {
     update(); renderPlace(); showSettings();
   }));
   card.querySelectorAll("[data-sat], [data-theme], [data-rain], [data-fc], [data-design], [data-area], [data-render], [data-eusrc], [data-warn]").forEach((b) => b.addEventListener("click", () => {
-    const key = ["sat", "theme", "rain", "fc", "design", "area", "render", "eusrc", "warn"].find((k) => b.dataset[k] != null), next = { ...MAP_STYLE, [key]: b.dataset[key] };
+    const key = ["sat", "theme", "rain", "fc", "design", "area", "render", "eusrc", "warn"].find((k) => b.dataset[k] != null), next = { ...MAP_STYLE, [key]: b.dataset[key], ...(key === "fc" ? { fcPick: true } : {}) };
     if (next[key] === MAP_STYLE[key]) return;
     try { localStorage.setItem("rainy.style", JSON.stringify(next)); } catch {}
     flushSync(true); // keepalive request: survives the reload
