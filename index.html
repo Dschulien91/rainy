@@ -187,7 +187,7 @@
   .alert-card .hint { margin: -4px 0 4px; font-size: 12px; color: var(--muted); }
   .alert-card .device-hint { margin-top: 8px; color: var(--fg); }
   .alert-card .places button { border: 1px solid var(--line); background: none; color: var(--fg); font: inherit; font-size: 13px; padding: 4px 9px; border-radius: 999px; cursor: pointer; margin: 2px 0 2px 4px; }
-  #styleCard { max-height: calc(100vh - var(--sheet-h) - 40px); overflow-y: auto; }
+  #styleCard { max-height: calc(100vh - var(--sheet-h) - 40px); max-height: calc(100dvh - var(--sheet-h) - 40px); overflow-y: auto; }
   .alert-card .lead-val { min-width: 54px; text-align: right; font-variant-numeric: tabular-nums; }
   /* small "beta" mark behind features still being verified (own forecast, Europe radar) */
   .beta { font-size: 9px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; opacity: 0.7; margin-left: 3px; vertical-align: 1px; }
@@ -479,7 +479,7 @@
 <script src="lang/en.js"></script>
 <script>
 "use strict";
-const VERSION = "v1.31";
+const VERSION = "v1.32";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -548,14 +548,34 @@ const serverReady = API_BASE ? fetch(`${API_BASE}/api/health`).then((r) => r.jso
 // (Meteo-France AROME, UKMO, KNMI, DMI and MET Nordic HARMONIE) it reads Open-Meteo's remote mirror first: measured
 // 19.11.2026 1-21 s, once no answer at all. So the best match is asked first; without an answer after OM_FAST_MS the
 // same request with the models on disk runs alongside, and the first answer wins.
-const OM_FAST_MS = 800;
-async function omJSON(url) {
-  if (!API_BASE || !url.startsWith(`${API_BASE}/om/`) || /[?&]models=/.test(url)) return getJSON(url);
+// v1.32: which answer a place got is remembered for the session (per ~1 km square). Before, the slow best match
+// lost the race on the first load but was then cached by the browser / CDN, so the 5-minute refresh or a reload
+// showed the other model: temperatures jumped by up to 3-4 C between loads (audit 20.11.2026: Cork 6.2 -> 8.7,
+// Dublin, London, Warsaw, Anchorage). The models on disk follow the PLACE (North America: GFS/HRRR, else ICON), not
+// the chosen map area.
+const OM_FAST_MS = 800, OM_SLOW_MS = 6000;
+const omChoice = new Map(); // "lat,lon" (2 decimals) -> "best" | "local"
+try { for (const [k, v] of Object.entries(JSON.parse(sessionStorage.getItem("rainy.omChoice")) || {})) omChoice.set(k, v); } catch {}
+const omLocalModel = (lat, lon) => (lon < -50 && lat > 14 ? "gfs_seamless" : "icon_seamless");
+function omRemember(key, v) {
+  if (omChoice.get(key) === v) return;
+  omChoice.set(key, v);
+  try { sessionStorage.setItem("rainy.omChoice", JSON.stringify(Object.fromEntries(omChoice))); } catch {}
+}
+async function omJSON(url, lat, lon) {
+  if (!API_BASE || !url.startsWith(`${API_BASE}/om/`) || /[?&]models=/.test(url) || lat == null) return getJSON(url);
+  const key = `${(+lat).toFixed(2)},${(+lon).toFixed(2)}`, localUrl = `${url}&models=${omLocalModel(lat, lon)}`;
+  let won = false; // only the answer actually used counts (the other one may still arrive later)
+  const tag = (p, v) => p.then((d) => { if (!won) { won = true; omRemember(key, v); } return d; });
+  const choice = omChoice.get(key);
+  if (choice === "local") return getJSON(localUrl);
   const best = getJSON(url);
-  const first = await Promise.race([best.catch(() => "failed"), new Promise((r) => setTimeout(r, OM_FAST_MS, "late"))]);
-  if (first !== "late" && first !== "failed") return first;
-  const local = getJSON(`${url}&models=${NA_AREA ? "gfs_seamless" : "icon_seamless"}`);
-  return first === "failed" ? local : Promise.any([best, local]);
+  // known as "best": wait for it (normally cached by now); only a failure or a very slow answer switches over
+  const wait = choice === "best" ? OM_SLOW_MS : OM_FAST_MS;
+  const first = await Promise.race([best.catch(() => "failed"), new Promise((r) => setTimeout(r, wait, "late"))]);
+  if (first !== "late" && first !== "failed") return omRemember(key, "best"), first;
+  const local = tag(getJSON(localUrl), "local");
+  return first === "failed" ? local : Promise.any([tag(best, "best"), local]);
 }
 const isImgKind = (k) => k === "radar" || k === "sat" || k === "eu" || k === "srvus" || k === "srvsat" || k === "ca" || k === "us";
 // Canada (ECCC GeoMet): rain rate in 14 discrete classes, observations every 6 min plus a 72 min nowcast.
@@ -1612,7 +1632,8 @@ function showGrid(ts, kind, opacity = 1) {
   for (let k = 0; k < g.cover.length; k++) {
     let c;
     if (kind === "rain") {
-      const col = rainColor(interp(g.t, g.precip[k], ts));
+      // hourly precipitation at t is the sum over t-1h..t: the rain AT ts is read half an hour later (v1.32)
+      const col = rainColor(interp(g.t, g.precip[k], ts + 1800e3));
       c = col ? [col[0], col[1], col[2], col[3]] : [0, 0, 0, 0];
     } else {
       const cover = clamp(interp(g.t, g.cover[k], ts) / 100, 0, 1);
@@ -1668,28 +1689,39 @@ async function cityZoom(place) {
 }
 
 // ---------- Data ----------
-async function loadPoint(loc) {
+// Hourly model values for the strips (v1.32): Open-Meteo's hourly precipitation and weather code at hour H are the
+// sum / the weather of the PRECEDING hour (H-1..H; checked 20.11.2026: Frankfurt 20:00 = 3.2 mm = the 15-min values
+// 19:15-20:00), temperature and cloud cover are values at H. The slot "H" means H..H+1 (as the radar hours in
+// hoursWithRadar), so it takes precipitation and code from the next entry - before, rain showed one hour late and
+// "Now" showed the past hour's rain. Needs one hour more than shown (forecast_hours=74 for 73 slots).
+function modelHours(h) {
+  const out = [];
+  for (let i = 0; i + 1 < h.time.length; i++) out.push({
+    ts: h.time[i] * 1000, temp: h.temperature_2m[i], precip: h.precipitation[i + 1], cover: h.cloud_cover[i],
+    isDay: h.is_day[i], code: h.weather_code[i + 1],
+  });
+  return out;
+}
+async function loadPoint(loc, req = locRequest) {
   // ~1 km rounding: everyone in the same square asks the same URL, so the server / CDN answers it once
   const url = `${OM_BASE}/v1/forecast?latitude=${loc.lat.toFixed(2)}&longitude=${loc.lon.toFixed(2)}` +
     `&minutely_15=temperature_2m,precipitation,cloud_cover,is_day` +
     `&past_minutely_15=8&forecast_minutely_15=64` +
     `&hourly=temperature_2m,precipitation,cloud_cover,is_day,weather_code,wind_speed_700hPa,wind_direction_700hPa` +
-    `&forecast_hours=73&daily=sunrise,sunset&forecast_days=4&timezone=auto&timeformat=unixtime`;
+    `&forecast_hours=74&daily=sunrise,sunset&forecast_days=4&timezone=auto&timeformat=unixtime`;
   if (!state.picked) EARLY_URLS[0] = url;
   let d;
-  try { d = await omJSON(url); } catch (e) { // ours not reachable: the public one if /api/health says so
+  try { d = await omJSON(url, loc.lat, loc.lon); } catch (e) { // ours not reachable: the public one if /api/health says so
     await serverReady;
     if (url.startsWith(OM_BASE)) throw e;
     d = await getJSON(url.replace(/^.*?\/v1\//, `${OM_BASE}/v1/`));
   }
+  if (req !== locRequest) return; // a newer place was asked for meanwhile: never write this one's data over it
   const m = d.minutely_15;
   // Steering wind at ~3 km height: fallback for how clouds move when the satellite gives no usable motion.
   const h = d.hourly;
   state.wind = h ? { kmh: h.wind_speed_700hPa[0], from: h.wind_direction_700hPa[0] } : null;
-  state.hours = h ? h.time.map((t, i) => ({
-    ts: t * 1000, temp: h.temperature_2m[i], precip: h.precipitation[i], cover: h.cloud_cover[i],
-    isDay: h.is_day[i], code: h.weather_code[i],
-  })) : [];
+  state.hours = h ? modelHours(h) : [];
   const dl = d.daily;
   state.sunEvents = dl ? [...dl.sunrise.map((t) => ({ ts: t * 1000, type: "rise" })), ...dl.sunset.map((t) => ({ ts: t * 1000, type: "set" }))]
     .sort((a, b) => a.ts - b.ts) : [];
@@ -1701,28 +1733,30 @@ async function loadPoint(loc) {
 }
 // Clouds at the place from our server (full edition: Europe, EUMETSAT; Germany edition: Germany + border zone, DWD
 // satellite sunshine with a 2 h forecast; empty elsewhere or without the server).
-async function loadCloudPoint(loc) {
+async function loadCloudPoint(loc, req = locRequest) {
   state.cloudPoint = []; state.cloudFrames = [];
   if (!API_BASE || SAT_STYLE !== "clouds") return; // (v1.26: no longer waits for /api/health, it needs nothing from it)
   try {
     const url = `${SUN_BASE}/api/cloud/point?lat=${loc.lat}&lon=${loc.lon}`;
     if (!state.picked) EARLY_URLS[2] = url;
     const d = await getJSON(url);
+    if (req !== locRequest) return; // a newer place meanwhile (v1.32)
     state.cloudPoint = d.series || []; state.cloudRef = d.ref; state.tileKey.cloud = d.ref;
     state.cloudFrames = [];
     if (!state.cloudPoint.length) { // outside the sunny area: the map still shows it (10.11.: it was empty)
       const f = await getJSON(`${SUN_BASE}/api/cloud/frames`);
+      if (req !== locRequest) return;
       state.cloudFrames = f.frames || []; state.cloudRef = f.ref; state.tileKey.cloud = f.ref;
     }
   } catch {}
 }
 // DWD thunderstorm warnings at the place (our server; Germany).
-async function loadThunderPoint(loc) {
+async function loadThunderPoint(loc, req = locRequest) {
   state.thunder = [];
   if (!API_BASE || NA_AREA) return;
   try {
-    state.thunder = (await getJSON(`${API_BASE}/api/thunder/point?lat=${loc.lat.toFixed(2)}&lon=${loc.lon.toFixed(2)}`))
-      .filter((w) => w.group === "Gewitter");
+    const w = await getJSON(`${API_BASE}/api/thunder/point?lat=${loc.lat.toFixed(2)}&lon=${loc.lon.toFixed(2)}`);
+    if (req === locRequest) state.thunder = w.filter((x) => x.group === "Gewitter");
   } catch {}
 }
 // Official weather warnings at the place (server/official_warnings.py): DWD in the Germany instance, MeteoAlarm (39
@@ -1730,10 +1764,11 @@ async function loadThunderPoint(loc) {
 // Germany and the Europe instance are asked: inside Germany DWD's own warnings (municipality level) win over the
 // MeteoAlarm copy (district level). Level 2 yellow, 3 orange, 4 red; level 1 (minor notes) is not shown.
 const WARN_BASES = !API_BASE ? [] : NA_AREA ? [`${API_BASE}/na`] : EU_AREA ? [API_BASE, `${API_BASE}/eu`] : [API_BASE];
-async function loadWarningsPoint(loc) {
+async function loadWarningsPoint(loc, req = locRequest) {
   if (!WARN_ON) { state.warnings = []; return; }
   const q = `lat=${loc.lat.toFixed(2)}&lon=${loc.lon.toFixed(2)}&lang=${LANG}`;
   const res = await Promise.all(WARN_BASES.map((b) => getJSON(`${b}/api/warnings/point?${q}`).catch(() => null)));
+  if (req !== locRequest) return; // a newer place meanwhile (v1.32)
   const dwd = res[0] && res[0].warnings.some((w) => w.source === "dwd"), out = [];
   for (const r of res) {
     if (!r) continue;
@@ -1764,12 +1799,14 @@ async function countryOf(loc) {
   }
   return countryCache.get(key);
 }
-async function loadRadarPoint(loc) {
+async function loadRadarPoint(loc, req = locRequest) {
   const now = Date.now(), iso = (t) => new Date(t).toISOString().slice(0, 19) + "Z";
+  const stale = () => req !== locRequest; // a newer place was asked for meanwhile: write nothing (v1.32)
   state.radarPoint = []; state.rainMapOnly = false; state.radarOut = false; state.radarEst = false;
   // Germany edition with our server: the server itself says whether a place is inside the radar area ("covered"),
   // so skip the country lookup (an extra round trip to the geocoder of up to ~1 s before the radar could load)
   const cc = DE_ONLY && API_BASE ? "DE" : await countryOf(loc);
+  if (stale()) return;
   // Germany edition: radar in Germany and the border zone the map shows (the server answers "covered");
   // elsewhere the timeline falls back to the weather model
   if (DE_ONLY && cc && cc !== "DE" && !API_BASE) return;
@@ -1783,23 +1820,29 @@ async function loadRadarPoint(loc) {
       const url = `${RADAR_BASE}/api/rain/point?lat=${loc.lat.toFixed(2)}&lon=${loc.lon.toFixed(2)}${RAIN_EU ? "&src=eu" : ""}${FC_OWN ? "&fc=own" : ""}`;
       if (!state.picked) EARLY_URLS[1] = url;
       const d = await getJSON(url);
+      if (stale()) return;
       // a place outside the radar area (Germany edition): the map still shows the German radar (10.11.: it was empty),
-      // the place's own values then come from the weather model (rainMapOnly)
-      state.rainMapOnly = DE_ONLY && d.covered === false;
+      // the place's own values then come from the weather model (rainMapOnly). The Europe / North America instances
+      // answer covered:false outside their radar coverage too (server-v1.79); North America has no satellite
+      // estimate, so an all-"est" series there is no measurement but zeros (audit 20.11.2026: Anchorage, Honolulu,
+      // San Juan showed "measured, dry") - the model then as well.
+      const est = !!(d.series || []).length && d.series.every((r) => r.est);
+      state.rainMapOnly = DE_ONLY && (d.covered === false || (NA_AREA && est));
       state.radarPoint = (d.series || []).map((r) => ({ ts: r.ts, mmh: r.mmh, ref: r.fc ? 1 : null, kind: r.kind }));
       state.radarSource = "rtile"; state.tileKey.rain = d.key;
       // inside the radar area but no radar values: the source delivers nothing (12.11.: Europe hatched for 22 h
       // with only "model forecast" as explanation) - the source line says so
       state.radarOut = !state.radarPoint.length && d.covered !== false;
       // no radar at this place: the values are the satellite estimate (own Europe picture) - the source line says so
-      state.radarEst = !!(d.series || []).length && d.series.every((r) => r.est);
-    } catch { state.radarPoint = []; state.radarOut = navigator.onLine !== false; }
+      state.radarEst = est;
+    } catch { if (stale()) return; state.radarPoint = []; state.radarOut = navigator.onLine !== false; }
   }
   // Bright Sky only without our server: with it, places never go to third parties (privacy)
   if (!state.radarPoint.length && !API_BASE && (cc === "DE" || (cc ? false : inBox(DE_BOX, loc.lat, loc.lon)))) {
     try {
       const d = await getJSON(`https://api.brightsky.dev/radar?lat=${loc.lat}&lon=${loc.lon}&distance=1000&format=plain` +
         `&date=${iso(now - 3600e3)}&last_date=${iso(now + 2.5 * 3600e3)}`);
+      if (stale()) return;
       state.radarPoint = (d.radar || []).map((r) => {
         const g = r.precipitation_5;
         const center = g[Math.floor(g.length / 2)][Math.floor(g[0].length / 2)];
@@ -1808,23 +1851,25 @@ async function loadRadarPoint(loc) {
         return { ts: Date.parse(r.timestamp), mmh: (center / 100) * 12, ref: isNaN(run) ? null : run }; // 0.01 mm / 5 min -> mm/h
       });
       state.radarSource = "radar";
-    } catch { state.radarPoint = []; }
+    } catch { if (stale()) return; state.radarPoint = []; }
   }
   if (DE_ONLY) return;
   if (!state.radarPoint.length && loc.lon < -50 && loc.lat > 15) {
     // North America: country decides the source (Canada has an official nowcast, the USA observations only)
-    if (cc === "CA") state.radarPoint = await caFrames().catch(() => []), state.radarSource = "ca";
-    else if (cc === "US" && !API_BASE) state.radarPoint = await usFrames().catch(() => []), state.radarSource = "us";
+    const fr = cc === "CA" ? await caFrames().catch(() => []) : cc === "US" && !API_BASE ? await usFrames().catch(() => []) : null;
+    if (stale()) return;
+    if (fr) state.radarPoint = fr, state.radarSource = cc === "CA" ? "ca" : "us";
   }
   if (!state.radarPoint.length && API_BASE) {
     // Our server: Europe (OPERA) and USA (NOAA) radar, each with our own 2 h nowcast
     try {
       await serverReady;
       const d = await getJSON(`${API_BASE}/api/radar/point?lat=${loc.lat}&lon=${loc.lon}`);
+      if (stale()) return;
       state.radarPoint = (d.series || []).map((r) => ({ ts: r.ts, mmh: r.mmh, ref: r.ts > d.ref ? d.ref : null }));
       state.radarSource = { us: "srvus", sat: "srvsat" }[d.region] || "eu";
       state.radarRegion = d.region || "eu";
-    } catch { state.radarPoint = []; }
+    } catch { if (stale()) return; state.radarPoint = []; }
   }
 }
 // Frame lists from the WMS capabilities (time dimension); values are filled in from the images.
@@ -1924,7 +1969,11 @@ function buildViews() {
   const now = Date.now(), p = state.point, R = state.radarPoint;
   const start = Math.floor(now / STEP) * STEP - 4 * STEP; // 1 h history
   const temp = (ts) => interp(p.t, p.temp, ts);
-  const modelRain = (ts) => Math.max(0, interp(p.t, p.precip, ts) * 4); // mm per 15 min -> mm/h
+  // mm per 15 min -> mm/h. A 15-min value at t is the sum over t-15..t, so the rate AT ts is read half a step later
+  // (v1.32; before, model rain came 7.5 min late). No model data -> NaN, not 0: "no data" must never read as "dry"
+  // (audit 20.11.2026: offline the app said "Dry for the next 2 hours").
+  const modelRain = (ts) => { const v = interp(p.t, p.precip, ts + STEP / 2); return v == null ? NaN : Math.max(0, v * 4); };
+  const modelCover = (ts) => { const v = interp(p.t, p.cover, ts); return v == null ? NaN : v; };
   const radarEnd = R.length ? R[R.length - 1].ts : -Infinity;
   const steps = (hours) => Array.from({ length: 4 + hours * 4 + 1 }, (_, i) => start + i * STEP);
   // timelines: last hour + 2 h ahead; the cursor always starts at "now" (newest observation)
@@ -1961,7 +2010,7 @@ function buildViews() {
       }
       // Sun share = clear-sky share from the same cloud cover the map shows (the model's separate
       // sunshine-duration field often contradicts its own cloud cover).
-      const sun = isDay ? clamp(1 - interp(p.t, p.cover, ts) / 100, 0, 1) : 0;
+      const sun = isDay ? clamp(1 - modelCover(ts) / 100, 0, 1) : 0;
       const F = state.cloudFrames || [];
       const g = F.length ? F.reduce((a, b) => (Math.abs(b.ts - ts) < Math.abs(a.ts - ts) ? b : a)) : null;
       if (g && Math.abs(g.ts - ts) <= near(F, ts)) // place outside the sunny area: its map, the model's values
@@ -2751,7 +2800,11 @@ function updateSource() {
   const now = Date.now();
   const shown = isImgKind(f.map.kind) && f.map.kind !== "sat" ? resolveMap(f.map) : f.map;
   const k = shown ? shown.kind : "none", fc = f.ts > now;
+  // the place is outside the radar coverage: its values are the weather model's, even though the map shows radar
+  // around it (v1.32: before, the line said "measured" there - Germany edition outside the border zone, and with
+  // server-v1.79 every place without radar coverage in Europe / North America)
   let text = k === "none" ? t("source.noRadar")
+    : k === "rtile" && state.rainMapOnly ? t("source.modelRain")
     : k === "radar" ? (fc ? t("source.dwdForecast") : t("source.dwdMeasured"))
     : k === "eu" ? (fc ? t("source.operaForecast") : t("source.operaMeasured"))
     : k === "srvus" ? (fc ? t("source.noaaForecast") : t("source.noaaMeasured"))
@@ -2780,7 +2833,8 @@ function updateSource() {
 
 function summary() {
   const s = cur(), fr = s.frames.slice(s.nowIdx), h = 2;
-  if (!fr.length) return t("summary.noData");
+  // no radar and no model values (offline, both sources failed): say so instead of "dry" / "no sun" (v1.32)
+  if (!fr.length || !fr.some((f) => Number.isFinite(f.value))) return t("summary.noData");
   if (state.mode === "rain") {
     const wet = (f) => f.value >= 0.1, word = (f) => t(KIND_WORD[f.ptype] || "kind.rain");
     if (wet(fr[0])) {
@@ -2855,7 +2909,8 @@ function drawChart() {
   // Bars: rain intensity (sqrt scale, capped at 8 mm/h) or sunshine share
   frames.forEach((f, i) => {
     const v = rain ? Math.sqrt(clamp(f.value, 0, 8) / 8) : f.value;
-    if (!(v > 0.005)) return;
+    // rain below the map's lowest class is not drawn on the map either (v1.32: bars of 0.007 mm/h under "dry")
+    if (!(v > 0.005) || (rain && !(f.value >= RAIN_BANDS[0]))) return;
     const h = Math.max(2, v * plotH);
     const past = i < s.nowIdx;
     ctx.fillStyle = rain ? rgba(rainColor(Math.max(f.value, 0.1), f.ptype), past ? 0.5 : 1) : col(past ? "--sun-soft" : "--sun");
@@ -3038,8 +3093,12 @@ function hourBlocks(list, size) {
   return out;
 }
 // HTML for an hourly strip (24 hourly entries or 18 four-hour blocks).
-function stripHTML(all, three, rain, tz = PLACE_TZ) {
+// "Now" (the first hourly slot) shows the temperature of this moment, as the header does (v1.32: before, the value at
+// the start of the hour - up to ~1 C off the header); nowTemp from the 15-min data, else between the first two hours.
+const hourlyNowTemp = (all) => (all && all.length > 1 ? interp([all[0].ts, all[1].ts], [all[0].temp, all[1].temp], Date.now()) : all && all[0] ? all[0].temp : null);
+function stripHTML(all, three, rain, tz = PLACE_TZ, nowTemp = null) {
   if (!all || !all.length) return "";
+  if (nowTemp == null) nowTemp = hourlyNowTemp(all);
   const items = three ? hourBlocks(all, 4).slice(0, 18) : all.slice(0, 24);
   let lastDay = localParts(items[0].ts, tz).wd;
   // Night = 23-7 h (sleeping hours); a 4-hour block counts as night when most of its hours fall in that range.
@@ -3064,7 +3123,7 @@ function stripHTML(all, three, rain, tz = PLACE_TZ) {
     const marks = (night[i] && !night[i - 1] ? '<span class="zz">Zz</span>' : "") +
       (h.ts - Date.now() >= 48 * 3600e3 ? `<span class="far" title="${esc(t("hours.far"))}"></span>` : "");
     return `<button class="hour${cls}" data-ts="${h.ts}">${marks}<span>${label}</span>${weatherIcon(h)}` +
-      `<span class="tp">${Math.round(h.temp)}°</span><span class="bar">${bar}</span></button>`;
+      `<span class="tp">${Math.round(i === 0 && !three && nowTemp != null ? nowTemp : h.temp)}°</span><span class="bar">${bar}</span></button>`;
   }).join("");
 }
 // The hours the radar timeline covers (measured + 2 h forecast) take their rain from it instead of from the weather
@@ -3073,7 +3132,8 @@ function stripHTML(all, three, rain, tz = PLACE_TZ) {
 // An hour counts when the radar has at least 9 of its 12 five-minute steps; its icon then follows the radar too.
 function hoursWithRadar(list) {
   const r = state.radarPoint;
-  if (!list || !r || r.length < 9) return list;
+  // outside the radar coverage the radar series is no measurement (the timeline shows the model there too)
+  if (!list || !r || r.length < 9 || state.rainMapOnly) return list;
   return list.map((h) => {
     const v = r.filter((q) => q.ts >= h.ts && q.ts < h.ts + 3600e3 && Number.isFinite(q.mmh));
     if (v.length < 9) return h;
@@ -3083,7 +3143,8 @@ function hoursWithRadar(list) {
   });
 }
 function renderHours() {
-  document.getElementById("hours").innerHTML = stripHTML(hoursWithRadar(state.hours), state.hoursRange === "3d", state.mode === "rain");
+  const p = state.point, now = p && p.t.length ? interp(p.t, p.temp, Date.now()) : null;
+  document.getElementById("hours").innerHTML = stripHTML(hoursWithRadar(state.hours), state.hoursRange === "3d", state.mode === "rain", PLACE_TZ, now);
 }
 // Short message over the map; it stays until hideToast().
 function toast(text) {
@@ -3262,10 +3323,15 @@ async function setLocation(loc, picked, knownName) {
     const fresh = state.satLatest && state.satRegion === satRegion(loc.lon) && Date.now() - state.satLatest < 45 * 60e3;
     const satP = fresh || DE_ONLY ? null : loadSatLatest(loc);
     // weather model and radar at the place in parallel (the radar first asks the country)
-    const [pointOk] = await Promise.all([loadPoint(loc).then(() => true, (err) => { console.warn(err); return false; }),
-      loadRadarPoint(loc).then(() => earlyRain(req)), loadCloudPoint(loc).then(() => earlySun(req)), satP, loadThunderPoint(loc), loadWarningsPoint(loc)]);
+    const [pointOk] = await Promise.all([loadPoint(loc, req).then(() => true, (err) => { console.warn(err); return false; }),
+      loadRadarPoint(loc, req).then(() => earlyRain(req)), loadCloudPoint(loc, req).then(() => earlySun(req)), satP,
+      loadThunderPoint(loc, req), loadWarningsPoint(loc, req)]);
+    if (req !== locRequest) return; // a newer place won: its own call writes the state (v1.32)
     if (!pointOk) {
-      if (!(state.point && state.point.loc && sameLoc(state.point.loc, loc))) PLACE_TZ = tzFromLon(loc.lon);
+      // no weather model: the time zone from the longitude - at the user's own position the device's zone is better
+      // (v1.32: Spain, western France, Ireland got UTC+0 instead of +1)
+      const own = !picked && state.home && sameLoc(state.home, loc) && DEVICE_TZ;
+      if (!(state.point && state.point.loc && sameLoc(state.point.loc, loc))) PLACE_TZ = own ? DEVICE_TZ : tzFromLon(loc.lon);
       const same = state.point && state.point.loc && sameLoc(state.point.loc, loc);
       if (!same) state.point = { loc, t: [], temp: [], precip: [], cover: [], isDay: [] };
       if (!same) state.hours = [];
@@ -3661,12 +3727,12 @@ async function loadFavData(favs) {
   await serverReady; // decides between our Open-Meteo and the public one
   const key = favs.map((f) => `${f.lat},${f.lon}`).join(";");
   if (favData && favDataKey === key && Date.now() - favData.at < 10 * 60e3) return favData.list;
-  const d = await getJSON(`${OM_BASE}/v1/forecast?latitude=${favs.map((f) => f.lat)}&longitude=${favs.map((f) => f.lon)}` +
-    `&hourly=temperature_2m,precipitation,cloud_cover,is_day,weather_code&forecast_hours=73&timezone=auto&timeformat=unixtime`);
-  const list = (Array.isArray(d) ? d : [d]).map((x) => Object.assign(x.hourly.time.map((t, i) => ({
-    ts: t * 1000, temp: x.hourly.temperature_2m[i], precip: x.hourly.precipitation[i], cover: x.hourly.cloud_cover[i],
-    isDay: x.hourly.is_day[i], code: x.hourly.weather_code[i],
-  })), { tz: x.timezone }));
+  // v1.32: one request per place through omJSON - the same model choice as the place's main view (before, one
+  // best-match request for all: a favourite could show another temperature than the place itself, and the slowest
+  // remote model held up the whole list for up to ~20 s)
+  const one = (f) => omJSON(`${OM_BASE}/v1/forecast?latitude=${(+f.lat).toFixed(2)}&longitude=${(+f.lon).toFixed(2)}` +
+    `&hourly=temperature_2m,precipitation,cloud_cover,is_day,weather_code&forecast_hours=74&timezone=auto&timeformat=unixtime`, f.lat, f.lon);
+  const list = (await Promise.all(favs.map(one))).map((x) => Object.assign(modelHours(x.hourly), { tz: x.timezone }));
   favData = { at: Date.now(), list }; favDataKey = key;
   return list;
 }
@@ -3683,7 +3749,7 @@ async function renderFavs() {
   }
   const card = (f, i, hours) => `<div class="fav" data-i="${i}"><div class="fav-head">` +
     `<button class="drag" aria-label="${esc(t("favs.move"))}">≡</button>` +
-    `<button class="fav-name">${esc(f.name)}${hours ? `<small>${Math.round(hours[0].temp)}°</small>` : ""}</button>` +
+    `<button class="fav-name">${esc(f.name)}${hours && hours.length ? `<small>${Math.round(hourlyNowTemp(hours))}°</small>` : ""}</button>` +
     `<button class="fav-del" aria-label="${esc(t("favs.remove"))}">${CLOSE}</button></div>` +
     (hours ? `<div class="hours">${stripHTML(hours, three, rain, hours.tz)}</div>` : `<div class="loading">${t("favs.loading")}</div>`) + "</div>";
   el.innerHTML = favs.map((f, i) => card(f, i, favData && favDataKey === favs.map((x) => `${x.lat},${x.lon}`).join(";") ? favData.list[i] : null)).join("");
@@ -4055,7 +4121,9 @@ try {
   // stay empty. Then show the Germany overview with its radar instead; the user can still pick any place.
   const GERMANY_VIEW = NA_AREA ? { lat: 39.5, lon: -96.0, zoom: 4, name: t("place.northAmerica") }  // a place outside it
     : { lat: 51.16, lon: 10.45, zoom: 6, name: t("place.germany") };
-  const outsideRadar = () => DE_ONLY && API_BASE && (!state.radarPoint.length || state.rainMapOnly) && !params.has("lat");
+  // (v1.32: in the Europe / North America area a place outside the radar coverage keeps its place - the model gives
+  // its rain - instead of jumping to the overview; only no radar data at all still opens it)
+  const outsideRadar = () => DE_ONLY && API_BASE && (!state.radarPoint.length || (state.rainMapOnly && !EU_AREA)) && !params.has("lat");
   async function showGermany() {
     map.setView([GERMANY_VIEW.lat, GERMANY_VIEW.lon], GERMANY_VIEW.zoom, { animate: false });
     await setLocation({ lat: GERMANY_VIEW.lat, lon: GERMANY_VIEW.lon }, false, GERMANY_VIEW.name);

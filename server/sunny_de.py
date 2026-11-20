@@ -24,7 +24,9 @@ Method (separates the weather from the sun's geometry):
      soft threshold around 120 W/m2 -> "sun share" 0..1 (fraction of the 10 min with sunshine); none below SUN_ELEV
 Shadows (scored, not served): "pers" (the analysis stays), "kpers" (k stays, only the sun moves), "model" (fading into
 the weather model's sunshine in the second hour), "nwp" (weather model only: Open-Meteo minutely_15 sunshine_duration,
-self-hosted, best match = ICON-D2 in Germany). The served forecast changes only when a shadow wins (server/score_sun.py).
+self-hosted, best match = ICON-D2 in Germany), "lowf03" / "lowf10" (the other low-sun clear beam factor, see
+LOW_F), "metfog" (Europe: IR k capped around airports reporting fog, see METAR_URL). The served forecast changes only
+when a shadow wins (server/score_sun.py).
 Replay 07.+08.11. (server/replay_sun.py, 94 runs, daytime): station MAE +60/+120 sat 0.089/0.124, persistence
 0.106/0.145, kpers 0.102/0.139, model blend 0.089/0.175, model alone 0.230/0.241 (far too sunny, bias +0.2); grid CSI
 +60/+120 sat 0.87/0.77, persistence 0.83/0.71. So the model is not mixed in (to be re-checked with the live logs).
@@ -49,6 +51,8 @@ shadows); downloads ~3 MB (SID) + ~0.9 MB (CTH, only when the sun is low somewhe
 per ~30 min. No lock is shared with the rain processing.
 """
 import bz2
+import csv
+import gzip
 import io
 import json
 import math
@@ -86,6 +90,8 @@ OBS_KEEP_MS = 3 * 3600_000     # observed frames kept (the app shows the last ho
 K_KEEP_MS = 40 * 60_000        # k fields kept for the motion
 FC_LEADS = range(10, 151, 10)  # minutes after the newest image (it is ~20 min old): covers "now + 2 h"
 POLL_S = 120                   # new files every 10 min
+CTH_WAIT_AREA = 0.5            # night / twilight: a slot waits for its own CTH file (SunnyDE._wait_cth) ...
+CTH_WAIT_S = 15 * 60           # ... at most this long after its SIDhr file appeared
 # sun geometry
 SUN_ELEV = 3.0                 # below: no sunshine (the beam is too weak and the retrieval unreliable)
 DAY_ELEV = 8.0                 # above: k from DNI alone; between SUN_ELEV and DAY_ELEV it fades into the IR cloud top height
@@ -135,13 +141,51 @@ TRUTH_KEEP_MS = 8 * 3600_000
 # 26-40 % at 3-9 deg, 55 % at 9-12, 87 % at 12-16, 97 % above 16; k (old model) median 0.2-0.35 below 12 deg, 0.9 above
 # 16. So sunrise runs (k from IR = 1) forecast sun for ~5x the area that got it (09.11. morning). The clear beam is
 # scaled down by LOW_F at <= LOW_E0, fading out at LOW_E1. The analysis is unaffected (share = f(k * clear_dni) = f(DNI)).
+# Germany: switched off (LOW_F_DE = 1, server-v1.79, 20.11.2026). k = DNI / clear_dni was ~3x too high at 3-10 deg,
+# and the map (k shown at DISP_ELEV) cleared up every afternoon ~30 min before IR took over and closed again (Germany
+# 20.11. clear share 13:30 .28, 14:00 .36, 14:30 .40, 15:00 .19; with 1: .25/.30/.29/.14); the forecast lost the sun of
+# a setting sun (live 14.-20.11., valid 13-16 UTC, +60: sunny stations forecast 659 vs observed 988, bias -0.086). The
+# satellite's own clear beam at a low sun is not weaker than CS_A says: the 99th percentile of DNI per 2 deg (19./20.11.,
+# all of DWD's area) is 1.1-1.3x clear_dni(1) at 2-12 deg in the morning and 0.8-1.0x in the afternoon. Replay 19.+20.11.
+# (replay_sun.py, 158 slots, ICON-D2), DWD stations MAE / bias / hit (sunny fc:obs) at +60 and +120, 0.3 -> 1:
+#   07-09 UTC  +60 .077/-.033/.927 -> .055/-.016/.950   +120 .065/-.057/.942 -> .052/-.021/.956
+#   09-13 UTC  +60 .098/+.028/.903 -> .092/+.015/.909   +120 .131/+.035/.873 -> .109/-.004/.896
+#   13-16 UTC  +60 .115/-.083/.893 (x0.28) -> .130/-.028/.873 (x0.83)   +120 .122/-.083/.887 -> .126/-.031/.886
+#   all day    +60 .098 -> .094, +120 .116 -> .102; grid CSI +60/+120 .715/.554 -> .755/.604 (13-16 UTC .586/.435 ->
+#   .710/.614, sunny area x0.63/0.50 -> 0.89/0.88; 07-09 UTC .332/.152 -> .578/.461)
+# (the afternoon's slightly lower station MAE with 0.3 is the hedging of a forecast that drops the sun).
+# Europe and the Americas keep 0.3: in the Alps the low sun is behind the mountains, and 0.3 stands in for that.
+# Europe replay 20.11. (ICON-EU, DWD + 265 GeoSphere TAWES stations), MAE at +60 / +120, 0.3 -> 1:
+#   Austria  07-09 UTC .185/.136 -> .178/.187   13-17 UTC .155/.149 -> .226/.248 (bias -.047 -> +.069)
+#   Germany  07-09 UTC .138/.115 -> .095/.088   13-17 UTC .146/.160 -> .140/.158
+#   grid CSI +60 07-09 .761 -> .872, 13-16 .833 -> .902, but sunny area x1.10-1.14 in the afternoon
+# A clear IR sky scaled down instead (IR_F 0.3 with LOW_F 1) helped the Austrian mornings (+60 .145) but lost in
+# Germany (+60 07-09 .066 vs .055) and on the grid. Each instance scores the other value as the shadow
+# "lowf03" / "lowf10" (low_f_shadow).
 LOW_E0, LOW_E1 = 10.0, 18.0
-LOW_F = float(os.environ.get("SUNNY_LOW_F", "0.3"))  # env only for replays (server/replay_sun.py: 1 = without)
+LOW_F = float(os.environ.get("SUNNY_LOW_F", "0.3"))  # Europe, the Americas, tools (env only for replays)
+LOW_F_DE = float(os.environ.get("SUNNY_LOW_F", "1.0"))  # the Germany instance (SunnyDE without an area)
+# IR "clear" is a hazy clear: the IR k (k_from_cth, after the fog caps) times IR_F, i.e. a clear IR sky gives the beam
+# clear_dni * IR_F (env only for replays, server/replay_sun.py --ir-f; see LOW_F)
+IR_F = float(os.environ.get("SUNNY_IR_F", "1.0"))
 # Fog and low stratus: their tops are about as warm as the ground, so the IR cloud top height calls them "clear" (CTH
 # near 0) and sunny showed full sunshine under fog at sunrise (Stuttgart 09.11.: fog, visibility ~1 km, gauges 0 sun;
 # ICON-D2 had 90-100 % low cloud). Where k comes from IR (low sun, night) it is capped by the weather model's low cloud
 # cover: k <= 1 - LOWCC_W * low cover. Env only for replays (0 = without).
 LOWCC_W = float(os.environ.get("SUNNY_LOWCC_W", "1.0"))
+# ... but ICON-EU (the Europe instance's model) misses shallow valley fog: Po valley 20.11.2026 night, METAR LIML / LIMC
+# 0500 FG, LIPE 0200 FG VV001, LIPX 0400 FG VV001, ICON-EU low cloud 0-51 % (ICON-D2 100 % at Bologna only), the map
+# clear (cloud 0.05). Airport reports - aviationweather.gov's global METAR file, the one the North America instance
+# reads - of fog (FG / FZFG, visibility < 1 km) or a ceiling / vertical visibility at or below 300 ft cap the IR k
+# around the station: 0 within METAR_FOG_R0 km, no cap beyond METAR_FOG_R1 km (server-v1.79, Europe instance only).
+# Scored as the shadow "metfog" (the forecast from the capped k; equal to "sat" when no fog is reported); the served
+# map and forecast change only with SUNNY_METAR_FOG=1 (after the shadow has won on foggy mornings).
+METAR_URL = "https://aviationweather.gov/data/cache/metars.cache.csv.gz"
+METAR_BOX = (34.0, 72.0, -25.0, 45.0)    # lat min, lat max, lon min, lon max
+METAR_FOG_R0, METAR_FOG_R1 = 10.0, 20.0  # km
+METAR_FOG_AGE_MS = 75 * 60_000           # a report counts for the slots up to this far from its time
+METAR_EVERY_S = 600
+METAR_FOG_SERVE = os.environ.get("SUNNY_METAR_FOG", "0") == "1"
 # Weather-model blend beyond +30 min (scored shadow "satnwp", 17.11.2026): the advected satellite loses skill with the
 # lead, the weather model does not, but the raw model is far too sunny (live 7 days: station bias +0.16, grid sunny area
 # x1.7) - so the "model" shadows mixed in that bias. Here the model's clear-sky index (Open-Meteo minutely_15
@@ -195,20 +239,52 @@ def quantile_map(src, ref, n=50_000):
     return f
 
 
-def clear_dni(elev):
+def clear_dni(elev, low_f=None):
     """Clear-sky direct normal irradiance (W/m2) for a solar elevation in degrees (array): Meinel-type
-    transmittance CS_A ** (AM ** 0.678) with the Kasten & Young air mass, lowered at a low sun (LOW_F). Only its shape
-    over elevation matters for the forecast (the index k is divided by it and multiplied back with it at the forecast time)."""
+    transmittance CS_A ** (AM ** 0.678) with the Kasten & Young air mass, lowered at a low sun by low_f (default LOW_F).
+    Only its shape over elevation matters for the forecast (the index k is divided by it and multiplied back with it at
+    the forecast time)."""
+    low_f = LOW_F if low_f is None else low_f
     e = np.maximum(np.asarray(elev, np.float32), 0.5)
     am = 1.0 / (np.sin(np.radians(e)) + 0.50572 * (e + 6.07995) ** -1.6364)
-    low = LOW_F + (1.0 - LOW_F) * np.clip((e - LOW_E0) / (LOW_E1 - LOW_E0), 0.0, 1.0)
+    low = low_f + (1.0 - low_f) * np.clip((e - LOW_E0) / (LOW_E1 - LOW_E0), 0.0, 1.0)
     return (1361.0 * CS_A ** (am ** 0.678) * low).astype(np.float32)
 
 
-def share_from_k(k, elev):
+def share_from_k(k, elev, low_f=None):
     """Sun share 0..1 from the clear-sky index and the solar elevation (NaN where k is unknown)."""
-    s = np.clip((k * clear_dni(elev) - (DNI_SUN - RAMP)) / (2 * RAMP), 0.0, 1.0)
+    s = np.clip((k * clear_dni(elev, low_f) - (DNI_SUN - RAMP)) / (2 * RAMP), 0.0, 1.0)
     return np.where(elev < SUN_ELEV, np.where(np.isfinite(k), 0.0, np.nan), s).astype(np.float32)
+
+
+def metar_fog(raw, box=METAR_BOX):
+    """{station: (lat, lon, observation time ms, fog)} of the METARs inside box in aviationweather.gov's cache file
+    (gzip csv). fog: visibility below 1 km (FG / FZFG when the visibility is missing; not MIFG / BCFG / PRFG / VCFG:
+    shallow, patches, nearby; "AUTO 9999 FG" neither), or a BKN / OVC layer or a vertical visibility at or below 300 ft."""
+    rows = list(csv.reader(gzip.decompress(raw).decode("utf-8", "replace").splitlines()))
+    if not rows or rows[0][0] != "raw_text":
+        return {}
+    col = {name: i for i, name in enumerate(rows[0]) if name not in ("sky_cover", "cloud_base_ft_agl")}
+    out = {}
+    for r in rows[1:]:
+        try:
+            lat, lon = float(r[col["latitude"]]), float(r[col["longitude"]])
+            if not (box[0] <= lat <= box[1] and box[2] <= lon <= box[3]):
+                continue
+            t = int(datetime.strptime(r[col["observation_time"]][:19], "%Y-%m-%dT%H:%M:%S")
+                    .replace(tzinfo=timezone.utc).timestamp() * 1000)
+            vis = r[col["visibility_statute_mi"]].rstrip("+")
+            vis = float(vis) if vis else None
+        except (ValueError, IndexError, KeyError):
+            continue
+        text = " " + re.split(r" (?:RMK|TEMPO|BECMG|NOSIG)\b", r[0])[0] + " "  # the observation, not its trend
+        fog = ((vis is not None and vis < 0.62)
+               or (vis is None and re.search(r" [+-]?(FZ)?FG ", text) is not None)
+               or any(int(h) <= 3 for h in re.findall(r" (?:BKN|OVC|VV)(\d{3})", text)))
+        sid = r[col["station_id"]]
+        if sid not in out or t > out[sid][2]:
+            out[sid] = (lat, lon, t, fog)
+    return out
 
 
 def k_from_cth(cth):
@@ -522,6 +598,13 @@ class SunStations:
 
 GEOSPHERE = "https://dataset.api.hub.geosphere.at/v1/station/current/tawes-v1-10min"
 SMN_ITEMS = "https://data.geo.admin.ch/api/stac/v1/collections/ch.meteoschweiz.ogd-smn/items?limit=100"
+# Swiss stations are one file each (~395 SwissMetNet items): read every 5 min day and night that was ~46k requests a
+# day for values that change every 10 min and are 0 at night. Now (server-v1.79, 20.11.2026) every CH_EVERY_S, only
+# while the sun is above CH_SUN_ELEV somewhere in CH_BOX (Switzerland + Austria), and never again on a day for a
+# station whose file has no sunshine column. The values only feed the verification (station truth, daytime only).
+CH_EVERY_S = 570               # ~10 min (a little less, so that a 300 s polling loop takes every second round)
+CH_BOX = (45.8, 49.1, 5.9, 17.2)  # lat min, lat max, lon min, lon max
+CH_SUN_ELEV = -2.0             # deg: a small margin before sunrise / after sunset
 
 
 class EuSunStations(SunStations):
@@ -533,6 +616,14 @@ class EuSunStations(SunStations):
     def __init__(self, fetch, log):
         super().__init__(fetch, log)
         self.at_ids, self.ch_items, self.extra_day = [], {}, None
+        self.ch_at, self.ch_nosun = 0.0, set()  # last Swiss round (time.time()); stations without sunshine today
+
+    @staticmethod
+    def _ch_daylight(ts_ms):
+        """True while the sun is above CH_SUN_ELEV somewhere in CH_BOX."""
+        lat0, lat1, lon0, lon1 = CH_BOX
+        la, lo = np.meshgrid(np.linspace(lat0, lat1, 3), np.linspace(lon0, lon1, 5), indexing="ij")
+        return float(np.max(sun_elevation(ts_ms, la, lo))) > CH_SUN_ELEV
 
     def _extra_lists(self):
         d = json.loads(self.fetch(f"{GEOSPHERE}/metadata", timeout=60))
@@ -552,6 +643,7 @@ class EuSunStations(SunStations):
         if time.strftime("%Y%m%d") != self.extra_day:
             at, ch = self._extra_lists()
             self.at_ids, self.ch_items, self.extra_day = [k[3:] for k in at], ch, time.strftime("%Y%m%d")
+            self.ch_nosun = set()
             with self.lock:
                 self.stations.update(at)
                 self.stations.update({k: v[:2] for k, v in ch.items()})
@@ -565,8 +657,14 @@ class EuSunStations(SunStations):
                     if v is not None and v >= 0}
             if vals:
                 got[f"AT:{f['properties']['station']}"] = vals
-        # Switzerland: one small file per station (today's 10-min values)
-        for sid, (_, _, href) in self.ch_items.items():
+        # Switzerland: one small file per station (today's 10-min values), see CH_EVERY_S
+        now = time.time()
+        ch_due = now - self.ch_at >= CH_EVERY_S and self._ch_daylight(now * 1000)
+        if ch_due:
+            self.ch_at = now
+        for sid, (_, _, href) in (self.ch_items.items() if ch_due else ()):
+            if sid in self.ch_nosun:
+                continue
             time.sleep(0.2)
             try:
                 rows = self.fetch(href, timeout=30, tries=1).decode("latin-1").splitlines()
@@ -574,6 +672,8 @@ class EuSunStations(SunStations):
                 continue
             head = rows[0].split(";")
             if "sre000z0" not in head:
+                if len(head) > 3:  # a real header without sunshine (not an error page)
+                    self.ch_nosun.add(sid)
                 continue
             k = head.index("sre000z0")
             vals = {}
@@ -835,6 +935,13 @@ class SunnyDE:
         self.skipped, self.skips_in_row = set(), 0  # slots rejected as implausible (JUMP_MAX)
         self._clm_cache = {}                        # 15-min slot -> EUMETSAT cloud mask on the grid (clm_cloud)
         self.extra_verify = []                      # SunVerify(stations_only=True): other station truths (SYNOP)
+        self._sid_seen = {}                         # slot -> time.time() its SIDhr file was first listed (_wait_cth)
+        self._metar = {}                            # METAR station -> (lat, lon, time ms, fog), Europe only
+        self._k_fog = None                          # (slot, k with the METAR fog cap) of the last ingest, or None
+        self._k_low = None                          # (slot, k with low_f_shadow) of the last ingest, or None
+        # the low-sun clear beam factor (see LOW_F) served here, and the other one, scored as a shadow
+        self.low_f = LOW_F if area else LOW_F_DE
+        self.low_f_shadow = 1.0 if self.low_f < 1.0 else 0.3
 
     # ---------- helpers ----------
     def inside(self):
@@ -888,7 +995,10 @@ class SunnyDE:
         dni = self.grid.regrid(lat, lon, v["DNI"], sigma=(0.8, 0.5))
         del v
         e = self.elev(ts)
-        k_dni = np.where(e >= SUN_ELEV, np.clip(dni / clear_dni(e), 0, K_MAX), np.nan).astype(np.float32)
+        k_dni = np.where(e >= SUN_ELEV, np.clip(dni / clear_dni(e, self.low_f), 0, K_MAX), np.nan).astype(np.float32)
+        # the same with the other low-sun factor, for the shadow "lowf03" / "lowf10" (see LOW_F)
+        k_dni_o = (np.where(e >= SUN_ELEV, np.clip(dni / clear_dni(e, self.low_f_shadow), 0, K_MAX), np.nan)
+                   .astype(np.float32) if self.low_f_shadow != self.low_f else None)
         k_ir = None
         if cth_data is not None:
             lat, lon, c = read_nc(cth_data, ["CTH"])
@@ -906,26 +1016,82 @@ class SunnyDE:
                 fog_time = (e < 0) | (self.elev(ts + 1_800_000) > e)
                 cap = np.clip(1.0 - LOWCC_W * low, 0.0, 1.0)
                 k_ir = np.where(fog_time, np.minimum(k_ir, cap), k_ir).astype(np.float32)
+        k_ir_o = k_ir  # the low-sun shadow keeps the IR k as it was
+        if k_ir is not None and IR_F != 1.0:
+            k_ir = (k_ir * IR_F).astype(np.float32)
         if k_ir is None:
-            k = k_dni
+            k, k_o = k_dni, k_dni_o
         else:  # DNI by day, IR cloud tops at low sun and night, blended in between; either one fills in for the other
             w = np.clip((e - SUN_ELEV) / (DAY_ELEV - SUN_ELEV), 0.0, 1.0)
             kd = np.where(np.isfinite(k_dni), k_dni, k_ir)
             ki = np.where(np.isfinite(k_ir), k_ir, kd)
             k = (w * kd + (1 - w) * ki).astype(np.float32)
+            k_o = None
+            if k_dni_o is not None:
+                kd_o = np.where(np.isfinite(k_dni_o), k_dni_o, k_ir_o)
+                k_o = (w * kd_o + (1 - w) * np.where(np.isfinite(k_ir_o), k_ir_o, kd_o)).astype(np.float32)
+        k_fog = None
+        cap = self._metar_cap(ts) if k_ir is not None else None
+        if cap is not None:  # METAR fog (see METAR_URL): the IR part capped; by day the DNI sees the fog itself
+            k_fog = (w * kd + (1 - w) * np.minimum(ki, cap)).astype(np.float32)
+            if METAR_FOG_SERVE:
+                k, k_fog = k_fog, None
         if (self.area or {}).get("clm") and not np.isfinite(k).all():  # beyond DWD's area: EUMETSAT's cloud mask
             t_clm, got = self._clm_cache.get("now", (0, None))
             if got is not None and abs(ts - t_clm) <= 60 * 60_000:  # the newest one the background thread has
                 k = np.where(np.isfinite(k), k, 1.0 - 0.92 * got).astype(np.float32)
-        share = share_from_k(k, e)
+                if k_fog is not None:
+                    k_fog = np.where(np.isfinite(k_fog), k_fog, 1.0 - 0.92 * got).astype(np.float32)
+                if k_o is not None:
+                    k_o = np.where(np.isfinite(k_o), k_o, 1.0 - 0.92 * got).astype(np.float32)
+        self._k_fog = (ts, k_fog) if k_fog is not None else None  # for the shadow "metfog" (add_slot -> forecast)
+        self._k_low = (ts, k_o) if k_o is not None else None      # for the low-sun shadow
+        share = share_from_k(k, e, self.low_f)
         return k, share, self._display(k, e)
 
-    @staticmethod
-    def _display(k, e):
+    def _metar_cap(self, ts):
+        """Cap for the IR k from the METAR stations that report fog near the slot ts (1 = none, 0 at the station:
+        METAR_FOG_R0 / R1), or None when none does."""
+        t = ts - self.shift_ms
+        with self.lock:
+            pts = [(la, lo) for la, lo, tr, fog in self._metar.values() if fog and abs(tr - t) <= METAR_FOG_AGE_MS]
+        if not pts:
+            return None
+        g = self.grid
+        cap = np.ones((g.ny, g.nx), np.float32)
+        la, lo = np.array(pts, np.float64).T
+        cols, rows = g.to_pixels(*merc(lo, la))
+        for lat, c, r in zip(la, cols, rows):
+            km = g.cell / 1000.0 * math.cos(math.radians(lat))  # Web Mercator cell -> km on the ground
+            rad = int(math.ceil(METAR_FOG_R1 / km)) + 1
+            r0, r1, c0, c1 = max(int(r) - rad, 0), min(int(r) + rad + 1, g.ny), max(int(c) - rad, 0), min(int(c) + rad + 1, g.nx)
+            if r0 >= r1 or c0 >= c1:
+                continue
+            yy, xx = np.mgrid[r0:r1, c0:c1]
+            d = np.hypot(xx - c, yy - r) * km
+            cap[r0:r1, c0:c1] = np.minimum(cap[r0:r1, c0:c1], np.clip((d - METAR_FOG_R0) / (METAR_FOG_R1 - METAR_FOG_R0), 0, 1))
+        return cap if cap.min() < 1.0 else None
+
+    def metar_loop(self):
+        """The European METARs (fog) every METAR_EVERY_S, in the background (never in the slot loop)."""
+        while True:
+            try:
+                got = metar_fog(self.fetch(METAR_URL, timeout=60))
+                cut = time.time() * 1000 - 3 * 3600_000
+                with self.lock:
+                    for sid, rep_ in got.items():
+                        if sid not in self._metar or rep_[2] >= self._metar[sid][2]:
+                            self._metar[sid] = rep_
+                    self._metar = {sid: v for sid, v in self._metar.items() if v[2] >= cut}
+            except Exception as e:
+                self.log(f"sunny: METAR failed: {e}")
+            time.sleep(METAR_EVERY_S)
+
+    def _display(self, k, e):
         """Cloud value for the map: the sun share k gives with the sun at least DISP_ELEV high (= the share by day, the
         clouds at a low sun and at night: no fading to grey towards sunset, no seam at the terminator); encoded so that
         the app's sunShare() returns that share."""
-        s = np.nan_to_num(share_from_k(k, np.maximum(e, DISP_ELEV)))
+        s = np.nan_to_num(share_from_k(k, np.maximum(e, DISP_ELEV), self.low_f))
         v = np.clip(0.05 + 0.8 * (1.0 - s), 0, 1) * 254
         return np.where(np.isfinite(k), v, 255).astype(np.uint8)
 
@@ -951,8 +1117,13 @@ class SunnyDE:
         flow = self._motion(prev[0].astype(np.float32), k1, prev[1]) if prev else None
         base = fill_nan(k1)
         known = np.isfinite(k1).astype(np.float32)
+        kf = getattr(self, "_kfog_ref", None)
+        base_f = fill_nan(kf[1]) if kf is not None and kf[0] == ref else None  # shadow "metfog" (METAR_URL)
+        ko = getattr(self, "_klow_ref", None)
+        base_o = fill_nan(ko[1]) if ko is not None and ko[0] == ref else None  # low-sun shadow (low_f_shadow)
+        lowf = f"lowf{int(round(10 * self.low_f_shadow)):02d}"
         out = {"sat": {}, "satold": {}, "sharp": {}, "kpers": {}, "pers": {}, "model": {}, "nwp": {}, "shblur": {},
-               "model90": {}, "satnwp": {}, "satadv": {}}
+               "model90": {}, "satnwp": {}, "satadv": {}, "metfog": {}, lowf: {}}
         disp = {}
         qm, skill = self._nwp_qm(ref, k1)  # the model's k -> the satellite's distribution at ref; weight factor
         for lead in FC_LEADS:
@@ -974,7 +1145,7 @@ class SunnyDE:
             sig = max(0.3, BLUR * math.sqrt(lead / 10) * min(1.0, lead / SHARP_MIN))
             kk = cv2.GaussianBlur(kk, (0, 0), sig)
             kk = np.where(kn > 0.5, kk, np.nan).astype(np.float32)
-            s = share_from_k(kk, e)
+            s = share_from_k(kk, e, self.low_f)
             out["sat"][ts] = s
             disp[ts] = self._display(kk, e)
             if SUNNY_NWP and lead in LEADS:
@@ -987,21 +1158,31 @@ class SunnyDE:
                     out["satnwp"][ts] = s
                 elif mq is not None:
                     ok = np.isfinite(mq) & np.isfinite(s)
-                    sn = np.where(ok, (1 - w) * s + w * share_from_k(mq, e), s).astype(np.float32)
+                    sn = np.where(ok, (1 - w) * s + w * share_from_k(mq, e, self.low_f), s).astype(np.float32)
                     if lead in LEADS:
                         out["satnwp"][ts] = sn
                     if SUNNY_NWP:  # served: the share as blended, the map from the k blended alike
                         out["sat"][ts] = sn
                         disp[ts] = self._display(np.where(ok, (1 - w) * kk + w * mq, kk).astype(np.float32), e)
             if lead in LEADS:  # shadows only where they are scored
-                out["satold"][ts] = share_from_k(kold, e)
-                out["sharp"][ts] = share_from_k(ksharp, e)
+                if base_f is None and (self.area or {}).get("clm"):  # Europe, no fog reported: the plain advection
+                    out["metfog"][ts] = s
+                elif base_f is not None:
+                    kf_ = cv2.remap(base_f, mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE) if flow is not None else base_f
+                    kf_ = np.where(kn > 0.5, cv2.GaussianBlur(kf_, (0, 0), sig), np.nan).astype(np.float32)
+                    out["metfog"][ts] = share_from_k(kf_, e, self.low_f)
+                if base_o is not None:  # the plain advection with the other low-sun factor (Germany: as served before v1.79)
+                    ko_ = cv2.remap(base_o, mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE) if flow is not None else base_o
+                    ko_ = np.where(kn > 0.5, cv2.GaussianBlur(ko_, (0, 0), sig), np.nan).astype(np.float32)
+                    out[lowf][ts] = share_from_k(ko_, e, self.low_f_shadow)
+                out["satold"][ts] = share_from_k(kold, e, self.low_f)
+                out["sharp"][ts] = share_from_k(ksharp, e, self.low_f)
                 # shadow "shblur" (16.11.2026): the served "sat" blurs k and then turns it into a sun share - the share
                 # is not linear in k, so broken fields lose sun with the lead (Germany grid sunny area x0.90 at +120,
                 # station bias -0.07). Here the SHARE is blurred instead: the local sun fraction stays as moved.
                 sh = out["sharp"][ts]
                 out["shblur"][ts] = np.where(np.isfinite(sh), cv2.GaussianBlur(fill_nan(sh), (0, 0), sig), np.nan).astype(np.float32)
-                out["kpers"][ts] = share_from_k(k1, e)
+                out["kpers"][ts] = share_from_k(k1, e, self.low_f)
                 if obs is not None:
                     out["pers"][ts] = obs.astype(np.float32)
                 m = self.model.field(ts) if self.model else None
@@ -1022,7 +1203,7 @@ class SunnyDE:
         if d is None:
             return None
         e = self.elev(ts + NWP_LAG_MS)
-        return np.where(e >= SUN_ELEV, np.clip(d / clear_dni(e), 0, K_MAX), np.nan).astype(np.float32)
+        return np.where(e >= SUN_ELEV, np.clip(d / clear_dni(e, self.low_f), 0, K_MAX), np.nan).astype(np.float32)
 
     def _nwp_qm(self, ref, k1):
         """(quantile mapping of the model's k onto the satellite's k at ref over the shown area's daylight pixels, the
@@ -1037,7 +1218,7 @@ class SunnyDE:
         qm = quantile_map(m0[msk], k1[msk])
         if qm is None:
             return None, 0.0
-        s0, a0 = share_from_k(qm(m0), e0), share_from_k(k1, e0)
+        s0, a0 = share_from_k(qm(m0), e0, self.low_f), share_from_k(k1, e0, self.low_f)
         sel = np.isfinite(s0) & np.isfinite(a0) & (e0 >= SCORE_ELEV) & (self.inside() > 0.5)
         if sel.sum() < 500:
             return None, 0.0
@@ -1058,6 +1239,7 @@ class SunnyDE:
     def add_slot(self, ts, sid_data, cth_data=None):
         """Ingest one slot as the newest image, make the forecast, hand it to the verification. False: slot skipped."""
         k, share, disp = self.ingest(ts, sid_data, cth_data)
+        self._kfog_ref, self._klow_ref = self._k_fog, self._k_low
         jump = self._jump(ts, share)
         if jump is not None and jump > JUMP_MAX and ts - STEP_MS in self.obs:
             before = self._jump(ts, share, back=(2,))
@@ -1173,6 +1355,17 @@ class SunnyDE:
         text = self.fetch(url, timeout=60).decode("latin-1")
         return {stamp_ts(s): name for name, s in ((m.group(0), m.group(1)) for m in re.finditer(pattern, text))}
 
+    def _wait_cth(self, t, e):
+        """True: leave slot t for a later round because its own CTH file is not out yet. At night the SIDhr file comes
+        ~6 min before the CTHin file of the same slot (20.11.2026: SIDhr 18:00 at 18:16:33, CTHin 18:00 at 18:22:16):
+        taken at once, the slot was paired with the CTH of 10 min before and the map lagged one IR image all night.
+        Waited for only while at least CTH_WAIT_AREA of the shown area is below DAY_ELEV (by day the DNI decides and
+        nothing is held up), and at most CTH_WAIT_S after the SIDhr file was first seen (server-v1.79)."""
+        ins = self.inside() > 0.5
+        if not ins.any() or float((e[ins] < DAY_ELEV).mean()) < CTH_WAIT_AREA:
+            return False
+        return time.time() - self._sid_seen.setdefault(t, time.time()) < CTH_WAIT_S
+
     def update(self):
         if self.frozen:
             return 0
@@ -1190,12 +1383,15 @@ class SunnyDE:
             want = want[-7:]
         cths = None
         n = 0
+        self._sid_seen = {t: s for t, s in self._sid_seen.items() if t > newest - OBS_KEEP_MS}
         for t in want:
             e = self.elev(t)
             cth = None
             if float(e.min()) < DAY_ELEV:  # IR needed somewhere (low sun, night)
                 try:
                     cths = cths if cths is not None else self._listing(CTH_URL, r"CTHin(\d{12})nEU\.nc\.bz2")
+                    if t not in cths and self._wait_cth(t, e):
+                        break  # this slot (and the newer ones) in a later round
                     near = [c for c in cths if abs(c - t) <= 10 * 60_000]
                     if near:
                         c = min(near, key=lambda c: abs(c - t))
@@ -1244,6 +1440,7 @@ class SunnyDE:
         self.load_state()
         if (self.area or {}).get("clm"):
             threading.Thread(target=self.clm_loop, daemon=True).start()
+            threading.Thread(target=self.metar_loop, daemon=True).start()
         if self.stations:
             threading.Thread(target=self.stations.loop, daemon=True).start()
         if self.model:

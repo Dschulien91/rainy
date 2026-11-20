@@ -9,6 +9,8 @@ counting grid, every 5 minutes), feeds the images of the window to the same deca
 spot (test, lat lon, cells, wet share when the ring is dry and the number of such images, mean rate over the window
 and around it), the gauges within 8 km of a masked cell (gauge sum over the window from gaugetruth vs the picture
 there) and, for the record, the Austria box (light rain aloft over Carinthia / Styria is NOT clutter, 13.11.2026).
+Also the server-v1.61 mask (clutter.GROW off: no test 3, no growing) for comparison; gauges in cells only the grown
+mask has are marked "new".
 --to: end of the window (default: the newest image). ~2-4 s per 100 images.
 """
 import argparse
@@ -58,9 +60,13 @@ for t, fp in frames:
     plain["strong"] += v & (r >= 5.0)
 n = len(frames)
 mask, blobs = clutter.build_mask(c, km, n_eff)
+grow, clutter.GROW = clutter.GROW, False
+mask0 = clutter.build_mask(c, km, n_eff)[0]   # server-v1.61: tests 1 and 2 only, not grown
+clutter.GROW = grow
 print(f"{a.dom}: {n} images {datetime.fromtimestamp(frames[0][0] / 1000, timezone.utc):%d.%m. %H:%M} - "
       f"{datetime.fromtimestamp(frames[-1][0] / 1000, timezone.utc):%d.%m. %H:%MZ}, read in {time.time() - t0:.0f} s; "
-      f"{len(blobs)} spots, {int(mask.sum())} cells masked (before growing)")
+      f"{len(blobs)} spots, {int(mask.sum())} cells masked (before growing by GROW_KM; server-v1.61 mask: "
+      f"{int(mask0.sum())})")
 pv = np.maximum(plain["valid"], 1)
 for b in sorted(blobs, key=lambda b: -b["mean"]):
     lon, lat = grid.to_lonlat(b["col"], b["row"])
@@ -103,7 +109,8 @@ if mask.any() and st:
         gid = f"{st[k][0]}:{st[k][1]}"
         g = truth.get(gid)
         print(f"  {gid:16s} {st[k][2]:7.3f} {st[k][3]:8.3f}  gauge {('%.1f mm (%d values)' % tuple(g)) if g else 'no data'}"
-              f"  picture there ~{float(mean[rs[k], cs[k]]) * a.hours:.1f} mm, masked {bool(mask[rs[k], cs[k]])}")
+              f"  picture there ~{float(mean[rs[k], cs[k]]) * a.hours:.1f} mm, masked {bool(mask[rs[k], cs[k]])}"
+              + (" new" if mask[rs[k], cs[k]] and not mask0[rs[k], cs[k]] else ""))
 
 if a.probe:   # why a known spot is (not) masked: the cell with the highest mean rate within 8 km of each point
     for p in a.probe.split(";"):

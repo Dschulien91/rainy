@@ -7,6 +7,8 @@ Rules (agreed design):
   - only on the change from dry to wet: no alert while it rains, and after rain a cooldown of COOLDOWN_H dry hours
   - at most MAX_PER_DAY alerts per place and day, quiet hours (optional, default 22:00-07:00, own start and end time;
     severe thunderstorm warnings still come through), one upgrade if it gets heavier
+  - DWD thunderstorm warnings: one push per place and storm - again only for a higher level, or THUNDER_REPEAT_MIN
+    after the last one; they count towards MAX_PER_DAY (severe ones also come through when the limit is reached)
   - "rain at the place" is judged over a ~5 km circle (share of wet pixels), which removes most false alarms
     from showers that pass just beside the place
   - optional (env RAIN_ALERT_PROB=1, default off): the start comes from a probability calibrated against rain
@@ -40,6 +42,10 @@ P_EARLY = 0.7             # stricter for the 60 min heads-up
 MIN_STEPS = 2             # rain must last at least 2 steps (10 min) to be worth an alert
 COOLDOWN_H = 2.0
 MAX_PER_DAY = 4
+# NowCastMIX gives every 5-min update a new ID_ALERT (up to 7-14 IDs per place in one storm hour in the archive), so
+# thunder pushes are deduplicated by place + level in a time window, not by ID (server-v1.79, 20.11.2026)
+THUNDER_REPEAT_MIN = 90
+THUNDER_RANK = {"Minor": 1, "Moderate": 2, "Severe": 3, "Extreme": 4}
 RADIUS_KM = 5.0
 LEVELS = ((8.0, "starker Regen", "Starker Regen"), (2.0, "mäßiger Regen", "Mäßiger Regen"), (0.0, "leichter Regen", "Leichter Regen"))
 ICON = {"Starker Regen": "⛈", "Mäßiger Regen": "🌧", "Leichter Regen": "🌦"}
@@ -61,7 +67,8 @@ TEXT = {
            "raining": ("🌧 Jetzt regnet es – {place}", "Erinnerung von vorhin."),
            "allclear": ("🌤 Entwarnung – {place}", "Der angekündigte Niederschlag kommt voraussichtlich doch nicht (nächste 2 Std.)."),
            "thunder_now": "Jetzt bis ca. {to}", "thunder_from": "Ab ca. {fr} bis ca. {to}",
-           "thunder_body": "{when}. Warnung des Deutschen Wetterdienstes."},
+           "thunder_body": "{when}. Warnung des Deutschen Wetterdienstes.",
+           "remind_btn": "In {m} Min. erinnern"},
     "en": {"levels": {"Starker Regen": "Heavy rain", "Mäßiger Regen": "Moderate rain", "Leichter Regen": "Light rain"},
            "kinds": {"snow": "snow", "sleet": "sleet", "freezing": "freezing rain", "graupel": "graupel", "hail": "hail"},
            "rain_word": "rain", "your_place": "your place", "long": "lasting a while", "minutes": "for about {m} min",
@@ -75,7 +82,8 @@ TEXT = {
            "raining": ("🌧 It is raining now – {place}", "Reminder from earlier."),
            "allclear": ("🌤 All clear – {place}", "The expected precipitation is unlikely to come after all (next 2 h)."),
            "thunder_now": "Now until about {to}", "thunder_from": "From about {fr} until about {to}",
-           "thunder_body": "{when}. Warning from the German Weather Service (DWD)."},
+           "thunder_body": "{when}. Warning from the German Weather Service (DWD).",
+           "remind_btn": "Remind me in {m} min"},
 }
 
 
@@ -198,6 +206,13 @@ def quiet_now(cfg, local):
     if start == end:
         return False
     return start <= m < end if start < end else (m >= start or m < end)
+
+
+def count_day(st, local):
+    """Reset the place's daily alert count st["count"] at local midnight."""
+    day = local.strftime("%Y-%m-%d")
+    if st.get("day") != day:
+        st["day"], st["count"] = day, 0
 
 
 def shared_settings(d):
@@ -458,9 +473,7 @@ class AlertEngine:
         dry_long = now_ms - st.get("last_wet", 0) >= COOLDOWN_H * 3600_000
         tz = ZoneInfo(cfg.get("tz", "UTC"))
         local = datetime.fromtimestamp(now_ms / 1000, tz)
-        day = local.strftime("%Y-%m-%d")
-        if st.get("day") != day:
-            st["day"], st["count"] = day, 0
+        count_day(st, local)
         if st["count"] >= MAX_PER_DAY or quiet_now(cfg, local):
             return None, info
         kind = None
@@ -606,23 +619,30 @@ class AlertEngine:
         d = {"title": title, "body": body, "tag": key, "lat": place["lat"], "lon": place["lon"], "name": place["name"]}
         wait = remind_minutes(info.get("lead_min", 0))
         if wait and cfg.get("api"):
-            d.update({"id": sid, "api": cfg["api"], "remind": wait})
+            # the button label in the device's language (sw.js; until server-v1.79 it was German there)
+            d.update({"id": sid, "api": cfg["api"], "remind": wait, "remindLabel": T["remind_btn"].format(m=wait)})
         return d
 
     def thunder_alert(self, place, now_ms, cfg, st):
-        """One push per DWD thunderstorm warning covering the place (active now or within the hour)."""
+        """One push per storm at the place for a DWD thunderstorm warning covering it (active now or within the hour):
+        the highest level first; then nothing for THUNDER_REPEAT_MIN unless the level rises (see THUNDER_REPEAT_MIN)."""
         if not self.thunder or not cfg.get("thunder", True):
             return None
-        sent = st.setdefault("thunder_sent", [])
-        for w in self.thunder.at(place["lat"], place["lon"], now_ms):
-            if w["group"] != "Gewitter" or w["id"] in sent:
-                continue
-            tz = ZoneInfo(cfg.get("tz", "UTC"))
-            local = datetime.fromtimestamp(now_ms / 1000, tz)
-            if quiet_now(cfg, local) and w["severity"] in ("Minor", "Moderate"):
-                continue  # in the quiet hours only severe thunderstorms wake people up
-            sent.append(w["id"])
-            del sent[:-30]
+        st.pop("thunder_sent", None)  # ID list before server-v1.79
+        tz = ZoneInfo(cfg.get("tz", "UTC"))
+        local = datetime.fromtimestamp(now_ms / 1000, tz)
+        count_day(st, local)
+        last = st.get("thunder_last") or {}
+        recent = now_ms - last.get("ts", 0) < THUNDER_REPEAT_MIN * 60_000
+        ws = [w for w in self.thunder.at(place["lat"], place["lon"], now_ms) if w["group"] == "Gewitter"]
+        for w in sorted(ws, key=lambda w: -THUNDER_RANK.get(w["severity"], 1)):  # stable: earliest of a level first
+            rank = THUNDER_RANK.get(w["severity"], 1)
+            if recent and rank <= last.get("rank", 0):
+                break  # this storm was already notified at this level or higher
+            if rank <= 2 and (quiet_now(cfg, local) or st["count"] >= MAX_PER_DAY):
+                continue  # in the quiet hours and over the daily limit only severe thunderstorms come through
+            st["thunder_last"] = {"ts": now_ms, "rank": rank}
+            st["count"] += 1
             hm = lambda t: datetime.fromtimestamp(t / 1000, tz).strftime("%H:%M")
             T = text(cfg)  # the warning level itself comes from the DWD in German
             when = (T["thunder_now"].format(to=hm(w["expires"])) if w["onset"] <= now_ms

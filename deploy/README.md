@@ -73,6 +73,15 @@ German pages (`/de/` and `/de/regenradar/<place>/`, `sitemap.xml`, `robots.txt`)
 - The `push-data` volume holds the alert subscriptions and the VAPID key. Without the key every subscriber would have to
   switch alerts on again. Nightly backup, e.g. in root's crontab:
   `0 3 * * * docker run --rm -v deploy_push-data:/d -v /root/backup:/b alpine sh -c 'cp /d/* /b/'`
+- Disk: `open-meteo sync` never deletes chunks that fell out of `--past-days` (30 GB of the 75 GB disk after 12 days).
+  `deploy/om_cleanup.sh` deletes chunk files not written for 7 days (never `static/`, never the two newest per
+  variable; a missing chunk is read from Open-Meteo's mirror). Try `sh om_cleanup.sh --dry-run` first, then nightly:
+  `40 4 * * * sh /opt/rainy/deploy/om_cleanup.sh >> /var/log/om_cleanup.log 2>&1`
+- Container logs rotate at 3 x 10 MB each (`x-logging` in `docker-compose.yml`).
+- `/api/health` -> `regions.sources`: minutes since each source's newest data, including (server-v1.79) the thunder
+  feeds (`thunder`, `lightning`, Germany instance) and the official warnings per source (`warn:dwd`,
+  `warn:meteoalarm`, `warn:nws`, `warn:eccc`); `regions.de.own_current` false = "own" serves DWD's forecast this run.
+  opswatch.py warns when one is older than 30 min.
 
 ## Never in production
 

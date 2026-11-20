@@ -8,8 +8,9 @@ self.addEventListener("push", (e) => {
   e.waitUntil(self.registration.showNotification(d.title || "rainy", {
     body: d.body || "", icon: "icon-192.png", badge: "icon-192.png",
     tag: d.tag || "rainy", renotify: true, data: d, // one notification per place, newer ones replace older ones
-    // "remind me again": the delay comes from the server (about a third of the time left before the rain)
-    actions: d.remind && d.api ? [{ action: "remind", title: `In ${d.remind} Min. erinnern` }] : [],
+    // "remind me again": the delay comes from the server (about a third of the time left before the rain), and since
+    // server-v1.79 the label in the device's language too; the German one stays for older payloads
+    actions: d.remind && d.api ? [{ action: "remind", title: d.remindLabel || `In ${d.remind} Min. erinnern` }] : [],
   }));
 });
 

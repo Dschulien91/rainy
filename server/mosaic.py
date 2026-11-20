@@ -362,8 +362,13 @@ class Mosaic:
     def frames(self):
         now = int(time.time() * 1000)
         eu_ref = self.regions["eu"].ref or self.de.ref or now
-        start = (now - 60 * 60_000) // STEP_MS * STEP_MS
-        end = max(self.de.ref or 0, eu_ref) + 120 * 60_000
+        run = max(self.de.ref or 0, eu_ref)
+        # The timeline starts 60 min before the run (server-v1.79), not 60 min before "now": with "now" it moved by one
+        # step ~3.5 min after every run, so the data tiles warmed for (run - 60, 37 steps) were not the ones the app
+        # asked for (run - 55, 36) during most of each 5 minutes - they were drawn on demand (audit 20.11.2026). A stale
+        # run (> 15 min: the regions keep their images ~75 min back from now) keeps the old start.
+        start = ((run if now - run <= 15 * 60_000 else now) - 60 * 60_000) // STEP_MS * STEP_MS
+        end = run + 120 * 60_000
         last_obs = min(t for t in (self.de.ref, self.regions["eu"].ref) if t) if (self.de.ref or self.regions["eu"].ref) else now
         return [{"ts": t, "fc": t > last_obs} for t in range(start, end + 1, STEP_MS)]
 
@@ -563,12 +568,25 @@ class Mosaic:
         return self.ptype.kind(ts, X, Y, forecast=not obs or ts > max(obs))
 
     def covered(self, lat, lon):
-        """Inside the area the map shows without hatching (Germany edition: Germany + BORDER_KM within radar range)."""
-        if not self.de_only:
-            return True
+        """Inside the area the map shows without hatching (Germany edition: Germany + BORDER_KM within radar range;
+        the other editions: where the newest radar image has data, as /api/radar/mask, or a satellite estimate exists).
+        Until server-v1.79 the other editions always said True: places without radar (Istanbul, Moscow, Alaska,
+        Hawaii, Puerto Rico, Mexico) got a series of zeros - "dry for 2 hours" under the hatching, while the weather
+        model had rain there (audit 20.11.2026). The point API now sends no series there (rainy_server.py), so the app
+        takes the weather model, as it does without radar."""
         col, row = (int(round(float(v))) for v in self.de.to_pixels(*merc(lon, lat)))
         ok = 0 <= row < self.de.ny and 0 <= col < self.de.nx
-        return bool(ok and self.de.inside[row, col] > 0.5)
+        if self.de_only:
+            return bool(ok and self.de.inside[row, col] > 0.5)
+        X, Y = (np.full((1, 1), v, np.float64) for v in merc(lon, lat))
+        for name in ("eu", "us", "sat"):  # the same sources as rain(); "sat" only where it really has an estimate
+            src = self.regions.get(name)
+            frames = src.frames()[0] if src is not None else []
+            obs = [f["ts"] for f in frames if not f.get("fc")]
+            g = src.grid(max(obs)) if obs else None
+            if g is not None and self.sample(src, g, X, Y)[1].all():
+                return True
+        return bool(ok and self.de.ref is not None and self.de.weight[row, col] > 0)
 
     def rain_point(self, lat, lon, use_de=True, variant="dwd"):
         """Same composite as the map, mean over ~3 km around the place."""

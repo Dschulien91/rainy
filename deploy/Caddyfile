@@ -24,12 +24,14 @@ www.{$DOMAIN} {
 		@chosenDe header Cookie *rainy_lang=de*
 		@chosenEn header Cookie *rainy_lang=en*
 		@browserDe header_regexp Accept-Language ^\s*de
+		# the query string goes along ({uri} is "/" plus it): a notification opens /?lat=..&lon=.. (sw.js) - before, the
+		# redirect dropped it and the app opened the last place instead of the alerted one (audit 20.11.2026)
 		route {
 			header Vary "Accept-Language, Cookie"
-			redir @chosenDe /de/ 302
-			redir @chosenEn /en/ 302
-			redir @browserDe /de/ 302
-			redir * /en/ 302
+			redir @chosenDe /de{uri} 302
+			redir @chosenEn /en{uri} 302
+			redir @browserDe /de{uri} 302
+			redir * /en{uri} 302
 		}
 	}
 	# old addresses before the /de/ folder (08.11.)

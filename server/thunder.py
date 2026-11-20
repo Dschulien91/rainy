@@ -9,6 +9,7 @@ Germany and served to all users as one image.
 """
 import io
 import json
+import re
 import threading
 import time
 import urllib.parse
@@ -27,10 +28,45 @@ LEVEL = {"Minor": "Gewitter", "Moderate": "Starkes Gewitter", "Severe": "Schwere
 LIGHTNING_BOX = (4.5, 46.5, 16.5, 55.8)  # lon/lat box around Germany
 LIGHTNING_SIZE = (720, 900)
 REFRESH_S = 120
+# DWD area (lon, lat ranges incl. the neighbours NowCastMIX covers): they do not overlap, so they tell which
+# coordinate of a feature is the longitude (axis order check, server-v1.79)
+LON_RANGE, LAT_RANGE = (-10.0, 30.0), (40.0, 62.0)
+# lightning: the WMS layer's data time; the image arrives ~15 min after it (20.11.2026), so flashes are dropped only
+# when the data is clearly stale (feed stalled or our fetch failing), not at the normal delivery delay
+LIGHTNING_TIME = "https://view.eumetsat.int/geoserver/mtg_fd/li_afa/ows?service=WMS&version=1.3.0&request=GetCapabilities"
+LIGHTNING_MAX_AGE_MS = 35 * 60_000
 
 
 def iso_ms(s):
     return int(datetime.strptime(s[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc).timestamp() * 1000)
+
+
+def lon_lat(coords):
+    """Polygon / MultiPolygon coordinates in lon/lat order, or None when the axis order cannot be told.
+    The DWD WFS stores the axis order per feature, not per request: in one GetFeature answer (20.11.2026, same
+    srsName EPSG:4326) most features came lon/lat and some lat/lon, and srsName CRS84, the EPSG URI, WFS 1.0.0 or
+    EPSG:3857 did not change that (3857 just projects the swapped pair). So each feature is checked against the DWD
+    area instead of trusting the request (server-v1.79; server-v1.58 swapped all of them, which put every
+    lon/lat-stored storm near the Horn of Africa)."""
+    pts = []
+    stack = [coords]
+    while stack:
+        c = stack.pop()
+        if c and isinstance(c[0], (int, float)):
+            pts.append(c[:2])
+        elif c:
+            stack.extend(c)
+    if not pts:
+        return None
+    a = np.asarray(pts, np.float64)
+    x, y = a[:, 0], a[:, 1]
+    ok = lambda v, r: bool(((v >= r[0]) & (v <= r[1])).all())
+    if ok(x, LON_RANGE) and ok(y, LAT_RANGE):
+        return coords
+    if ok(x, LAT_RANGE) and ok(y, LON_RANGE):
+        flip = lambda c: [c[1], c[0]] if c and not isinstance(c[0], list) else [flip(v) for v in c]
+        return flip(coords)
+    return None
 
 
 def inside(lon, lat, ring):
@@ -47,8 +83,36 @@ class Thunder:
         self.fetch, self.log = fetch, log
         self.lock = threading.Lock()
         self.warnings = []       # [{id, group, level, severity, onset, expires, rings}]
-        self.geojson = b'{"type":"FeatureCollection","features":[]}'
-        self.lightning = None    # (ts ms, png bytes)
+        self._geojson, self._feats = b'{"type":"FeatureCollection","features":[]}', []
+        self._lightning = None   # (data time ms, [[lat, lon], ...])
+        self.lightning_time = None  # WMS time of the last image fetched
+
+    # Served as properties so that the endpoints (rainy_server.py, read under self.lock) never show warnings that
+    # expired or lightning that went stale since the last successful refresh, e.g. while the DWD / EUMETSAT fetch
+    # fails (server-v1.79). devtools scenarios set both directly.
+    @property
+    def geojson(self):
+        """Map areas (GeoJSON bytes) without the warnings that have expired by now."""
+        raw, feats = self._geojson, self._feats
+        if feats is None:
+            return raw
+        now = int(time.time() * 1000)
+        live = [f for f in feats if f["properties"]["expires"] > now]
+        return raw if len(live) == len(feats) else json.dumps({"type": "FeatureCollection", "features": live}).encode()
+
+    @geojson.setter
+    def geojson(self, body):
+        self._geojson, self._feats = body, None
+
+    @property
+    def lightning(self):
+        """(data time ms, flash clusters) or None when the data is older than LIGHTNING_MAX_AGE_MS."""
+        li = self._lightning
+        return li if li and time.time() * 1000 - li[0] <= LIGHTNING_MAX_AGE_MS else None
+
+    @lightning.setter
+    def lightning(self, li):
+        self._lightning = li
 
     # ---------- warnings ----------
     def refresh_warnings(self):
@@ -63,11 +127,12 @@ class Thunder:
         out, feats = [], []
         for f in d.get("features", []):
             p, g = f["properties"], f.get("geometry") or {}
-            # GeoServer's WFS 2.0 answers EPSG:4326 in lat/lon axis order; GeoJSON, Leaflet and inside() want lon/lat
-            # (until 18.11.2026 the order was not swapped: no place ever matched, thunder pushes never fired, and the
-            # map areas were drawn off-map)
-            flip = lambda c: [c[1], c[0]] if c and not isinstance(c[0], list) else [flip(x) for x in c]
-            g = {**g, "coordinates": flip(g.get("coordinates", []))}
+            # GeoJSON, Leaflet and inside() want lon/lat; the WFS mixes both orders (see lon_lat)
+            coords = lon_lat(g.get("coordinates") or [])
+            if coords is None:
+                self.log(f"thunder: skipped warning {p.get('ID_ALERT')}: coordinates outside the DWD area")
+                continue
+            g = {**g, "coordinates": coords}
             polys = g.get("coordinates", []) if g.get("type") == "MultiPolygon" else [g.get("coordinates", [])] if g.get("type") == "Polygon" else []
             rings = [poly[0] for poly in polys if poly]
             if not rings:
@@ -79,7 +144,7 @@ class Thunder:
             feats.append({"type": "Feature", "geometry": g, "properties": {k: w[k] for k in ("group", "level", "severity", "onset", "expires")}})
         with self.lock:
             self.warnings = out
-            self.geojson = json.dumps({"type": "FeatureCollection", "features": feats}).encode()
+            self._geojson, self._feats = json.dumps({"type": "FeatureCollection", "features": feats}).encode(), feats
 
     def at(self, lat, lon, now_ms=None, within_ms=3600_000):
         """Warnings covering a place that are active now or start within the next hour, earliest first."""
@@ -91,13 +156,24 @@ class Thunder:
 
     # ---------- lightning ----------
     def refresh_lightning(self):
+        # the data time from the layer's own capabilities (~7 KB): the map gets the time of the flashes, not of our
+        # fetch, and an unchanged time step is not fetched again (server-v1.79)
+        t = None
+        try:
+            m = re.search(rb'<Dimension name="time" default="([0-9T:.Z-]+)"', self.fetch(LIGHTNING_TIME, timeout=30))
+            t = m.group(1).decode() if m else None
+        except Exception as e:
+            self.log(f"thunder: lightning time failed: {e}")
+        if t and t == self.lightning_time:
+            return
         (x0, x1), (y0, y1) = merc(np.array(LIGHTNING_BOX[0::2]), np.array(LIGHTNING_BOX[1::2]))
         url = (f"{EUM}?service=WMS&version=1.3.0&request=GetMap&layers=mtg_fd:li_afa&styles=&crs=EPSG:3857"
                f"&bbox={x0},{y0},{x1},{y1}&width={LIGHTNING_SIZE[0]}&height={LIGHTNING_SIZE[1]}&format=image/png&transparent=true")
-        img = Image.open(io.BytesIO(self.fetch(url, timeout=60))).convert("RGBA")
-        self.set_lightning(np.asarray(img)[..., 3] > 0)
+        img = Image.open(io.BytesIO(self.fetch(url + (f"&time={t}" if t else ""), timeout=60))).convert("RGBA")
+        self.set_lightning(np.asarray(img)[..., 3] > 0, iso_ms(t) if t else None)
+        self.lightning_time = t
 
-    def set_lightning(self, flash):
+    def set_lightning(self, flash, ts=None):
         """Flash areas (image over LIGHTNING_BOX in Web Mercator) -> one point per flash cluster for the map."""
         n, _, _, cent = cv2.connectedComponentsWithStats(flash.astype(np.uint8), connectivity=8)
         h, w = flash.shape
@@ -109,7 +185,7 @@ class Thunder:
             lat = np.degrees(2 * np.arctan(np.exp(my / 20037508.342789244 * np.pi)) - np.pi / 2)
             pts.append([round(float(lat), 3), round(float(lon), 3)])
         with self.lock:
-            self.lightning = (int(time.time() * 1000), pts)
+            self.lightning = (ts or int(time.time() * 1000), pts)
 
     def loop(self):
         while True:

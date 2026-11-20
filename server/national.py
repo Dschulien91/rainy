@@ -43,6 +43,7 @@ impressum pages) when it beats OPERA at the gauges on several rainy days.
 """
 import io
 import json
+import os
 import re
 import tarfile
 import threading
@@ -363,6 +364,32 @@ class GermanyRv(Layer):
     name, credit = "de", "Deutscher Wetterdienst (open data)"
     RV = "https://opendata.dwd.de/weather/radar/composite/rv/"
     GAIN = 1.5
+    # BORDER_KM (server-v1.79, 20.11.2026; OFF unless DE_BORDER_KM is set, e.g. 30): the RV composite only within this
+    # distance of Germany (germany.json) - weight 1 at the border, 0 at BORDER_KM (FEATHER_KM). Without it the layer
+    # counts with full weight far into Alsace / Lorraine, Benelux, W Czechia, W Poland, N Austria, N Switzerland, where
+    # it reads like this at the gauges. Offline (natobs 16.-20.11., the composite recomputed per gauge from OPERA and
+    # each layer alone - 0.4 % from the recorded one; gauges where DE counts >= .5; unadjusted amount; hourly CSI at
+    # 0.5 / 2 mm), today -> 30 km (OPERA alone): Austria north x1.70 .36/.21 -> x1.47 .38/.23 (x1.25 .41/.24), Czechia
+    # x0.79 .53/.23 -> x0.88 .58/.24 (x0.91 .61/.24), Poland west x0.76 .47/.15 -> x0.87 .55/.19 (x0.83 .55/.18),
+    # Belgium / Luxembourg / E Netherlands x0.89 .64/.46 -> x1.10 .68/.49 (x1.17 .67/.47), Denmark south x0.94 .43/.28
+    # -> x0.89 .51/.17, Switzerland north x1.36 .53/.34 -> x1.44 .54/.36, Germany x1.15 .64/.41 -> x1.15 .64/.40.
+    BORDER_KM = float(os.environ.get("DE_BORDER_KM", "0") or 0) or None
+
+    def _window(self):
+        super()._window()
+        if not self.BORDER_KM:
+            return
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "germany.json"), encoding="utf-8") as f:
+            g = json.load(f)
+        tr = Transformer.from_crs("EPSG:4326", self.PROJ, always_xy=True)
+        im = Image.new("L", (self.NX, self.NY), 0)
+        draw = ImageDraw.Draw(im)
+        for poly in g["coordinates"]:
+            x, y = tr.transform(*zip(*poly[0]))
+            draw.polygon([((a - self.X0) / self.CELL, (self.Y1 - b) / self.CELL) for a, b in zip(x, y)], fill=1)
+        out_km = cv2.distanceTransform(1 - np.asarray(im, np.uint8), cv2.DIST_L2, 5) * self.CELL / 1000.0
+        near = out_km <= self.BORDER_KM
+        self.area = near if self.area is None else self.area & near
 
     def _runs(self):
         names = re.findall(r"composite_rv_(\d{8}_\d{4})\.tar", self._get(self.RV, timeout=60).decode("latin-1"))

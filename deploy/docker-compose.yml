@@ -1,5 +1,14 @@
 # rainy production stack: app + radar server + self-hosted Open-Meteo behind Caddy (automatic HTTPS).
 # Usage on the server (see deploy/README.md):  cp .env.example .env  &&  docker compose up -d
+# Docker's json-file logs had no size limit (audit 20.11.2026: caddy 17 MB in 12 days, growing without end); 3 x 10 MB
+# per container keeps several days of the 5-minute run logs. (A changed logging block recreates the container on the
+# next `up -d`.)
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 volumes:
   open-meteo-data:
   caddy-data:
@@ -15,6 +24,7 @@ services:
     cpu_shares: 2048  # CPU priority when all instances compute at once (20.11.2026): Germany + alerts and what users wait for first
     build: ../server
     restart: always
+    logging: *logging
     environment:
       PORT: "8771"
       EDITION: ${EDITION:-de}   # de = first public version (Germany); full = Europe/USA radar + clouds (needs ~8 GB more RAM)
@@ -56,6 +66,7 @@ services:
     cpu_shares: 512
     build: ../server
     restart: always
+    logging: *logging
     mem_limit: 3400m
     environment:
       PORT: "8771"
@@ -84,6 +95,7 @@ services:
     cpu_shares: 1536
     build: ../server
     restart: always
+    logging: *logging
     mem_limit: 2800m
     cpus: 1.5
     environment:
@@ -115,6 +127,7 @@ services:
     cpu_shares: 1024
     build: ../server
     restart: always
+    logging: *logging
     mem_limit: 3000m   # + sunny for the Americas (GOES, ~0.5 GB more)
     cpus: 1.5
     environment:
@@ -141,6 +154,7 @@ services:
     cpu_shares: 2048
     image: ghcr.io/open-meteo/open-meteo
     restart: always
+    logging: *logging
     volumes:
       - open-meteo-data:/app/data
     environment:
@@ -153,6 +167,7 @@ services:
   openmeteo-sync:
     image: ghcr.io/open-meteo/open-meteo
     restart: always
+    logging: *logging
     volumes:
       - open-meteo-data:/app/data
     command: >
@@ -166,6 +181,7 @@ services:
   openmeteo-sync-na:
     image: ghcr.io/open-meteo/open-meteo
     restart: always
+    logging: *logging
     volumes:
       - open-meteo-data:/app/data
     command: >
@@ -179,6 +195,7 @@ services:
     cpu_shares: 2048
     image: caddy:2
     restart: always
+    logging: *logging
     ports:
       - "80:80"
       - "443:443"

@@ -1225,13 +1225,104 @@ def _day_file(day):
     return os.path.join(TRUTH_DIR, time.strftime("%Y%m%d", time.gmtime(day * 86400)) + ".npz")
 
 
-def _day_load(day):
-    """{"country:id": float32[144]} (mm in the 10 minutes ending at 00:00, 00:10, ... UTC; NaN = not known)."""
+def _day_load(day, rejected=None):
+    """{"country:id": float32[144]} (mm in the 10 minutes ending at 00:00, 00:10, ... UTC; NaN = not known).
+    Implausible values (implausible()) read as NaN; rejected: a dict that collects {key: largest dropped mm}."""
     try:
         z = np.load(_day_file(day))
-        return dict(zip((str(x) for x in z["ids"]), z["mm"].astype(np.float32)))
+        ids, mm = [str(x) for x in z["ids"]], z["mm"].astype(np.float32)
     except (OSError, ValueError, KeyError):
         return {}
+    _drop_implausible(ids, mm, rejected)
+    return dict(zip(ids, mm))
+
+
+# ---------- plausibility of the gauge values (server-v1.79, 20.11.2026) ----------
+# 20.11.: one England gauge (en:1552, radar dry) reported 580 and 1161 mm in 10 minutes - 97 % of all English gauge
+# rain in the gauge adjustment's 12 h window: England's factor went from x1.0 to the x3.0 cap for 12 h; a Swedish
+# gauge (se:22228110) 120 mm six times in a row. No check existed. Archive 13.-20.11. (6200 gauges): apart from
+# these, the largest 10-minute values were 21 mm (dk:05140, radar dry) and 12 mm (en:52148, radar 11 mm/h: real).
+# Dropped where the archive is written and read (archive_truth, _day_load: the gauge adjustment and every score).
+# The archive holds 10-minute sums for every network; longer sums were spread evenly (_spread15, hourly / 6, ...):
+NATIVE_MIN = {"ie": 15, "se": 15, "en": 15, "sc": 15, "bf": 15, "tn": 15, "ct": 30, "pt": 60, "sy": 60}
+MAX_10MIN_MM = 30.0   # per 10 min; over a native interval of m minutes 30 * sqrt(m / 10) mm (world records ~ D^0.5)
+REPEAT_N, REPEAT_MM = 4, 2.0  # the same value >= 2 mm in >= 4 native intervals in a row: a stuck gauge (13.-20.11.:
+                              # real rain repeated <= 1.4 mm 4 times in the 10-minute networks)
+# a spike: >= 3 mm in 10 min while >= 3 gauges within 20 km all read < 5 % of it within +-1 native interval.
+# 13.-20.11.: 16 values at 9 gauges, 15 of them with the radar dry there (< 0.3 mm/h, one shower in Galicia, radar
+# 6 mm/h); at 10 % also 6 more showers (radar 1-4 mm/h, Galicia / Wallonia / Austria) would have gone
+NB_KM, NB_N, NB_MIN_MM, NB_FRAC = 20.0, 3, 3.0, 0.05
+_COORDS = {}
+
+
+def _coords():
+    """{"net:id": (lat, lon)} of stations(), re-read when the list changes."""
+    fp = os.path.join(ROOT, "eun", "natobs", "stations.json")
+    try:
+        m = os.path.getmtime(fp)
+    except OSError:
+        return {}
+    if _COORDS.get("mtime") != m:
+        _COORDS.clear()
+        _COORDS.update(mtime=m, xy={f"{s[0]}:{s[1]}": (float(s[2]), float(s[3])) for s in stations()})
+    return _COORDS["xy"]
+
+
+def implausible(ids, mm):
+    """ids: "net:id" per row, mm: float (n, 144) 10-minute sums of one UTC day -> bool (n, 144): values to drop
+    (too large for the network's interval, a stuck repeat, or a spike that no gauge around it sees)."""
+    mm = np.asarray(mm, np.float32)
+    bad = np.zeros(mm.shape, bool)
+    if not len(ids):
+        return bad
+    nat = np.array([NATIVE_MIN.get(k.split(":", 1)[0], 10) for k in ids], np.float32)
+    v = np.where(np.isfinite(mm), mm, -1.0)
+    bad |= v > (MAX_10MIN_MM / np.sqrt(nat / 10))[:, None]
+    # stuck repeats
+    same = (v[:, 1:] == v[:, :-1]) & (v[:, 1:] >= REPEAT_MM)
+    for i in np.flatnonzero(same.any(1)):
+        need = int(np.ceil(REPEAT_N * nat[i] / 10))
+        j = 0
+        while j < 143:
+            if same[i, j]:
+                e = j
+                while e < 143 and same[i, e]:
+                    e += 1
+                if e - j + 1 >= need:  # steps j .. e hold the same value
+                    bad[i, j:e + 1] = True
+                j = e
+            j += 1
+    # spikes against the neighbours (only where positions are known and >= NB_N neighbours report)
+    cand = np.argwhere((v >= NB_MIN_MM) & ~bad)
+    xy = _coords() if len(cand) else {}
+    if len(cand) and xy:
+        lat = np.array([xy.get(k, (np.nan, np.nan))[0] for k in ids])
+        lon = np.array([xy.get(k, (np.nan, np.nan))[1] for k in ids])
+        for i, j in cand:
+            if not np.isfinite(lat[i]):
+                continue
+            d = np.hypot((lat - lat[i]) * 111.2, (lon - lon[i]) * 111.2 * np.cos(np.radians(lat[i])))
+            nb = np.flatnonzero(d <= NB_KM)
+            nb = nb[nb != i]
+            w = max(1, int(round(nat[i] / 10)))
+            win = mm[nb, max(0, j - w):j + w + 1]
+            known = np.isfinite(win).any(1)
+            if known.sum() >= NB_N and np.nanmax(win[known]) < NB_FRAC * v[i, j]:
+                bad[i, j] = True
+    # a 15-minute sum lands unevenly on two 10-minute steps (1/3, 2/3): drop the steps next to a bad one too
+    odd = (nat % 10 != 0)[:, None]
+    bad |= odd & (np.pad(bad[:, 1:], ((0, 0), (0, 1))) | np.pad(bad[:, :-1], ((0, 0), (1, 0))))
+    return bad
+
+
+def _drop_implausible(ids, mm, rejected=None):
+    """Set implausible values of a day (implausible()) to NaN in place; rejected collects {key: largest mm}."""
+    bad = implausible(ids, mm)
+    for i in np.flatnonzero(bad.any(1)):
+        if rejected is not None:
+            rejected[ids[i]] = max(rejected.get(ids[i], 0.0), float(np.nanmax(mm[i][bad[i]])))
+        mm[i][bad[i]] = np.nan
+    return bad
 
 
 def archive_truth(st, hours=6.0):
@@ -1256,12 +1347,19 @@ def archive_truth(st, hours=6.0):
                     row[(t % 86400_000) // 600_000] = v
                     n += 1
     os.makedirs(TRUTH_DIR, exist_ok=True)
+    rejected = {}
     for day, d in days.items():
         if d:
             ids = sorted(d)
+            mm = np.stack([d[i] for i in ids]).astype(np.float32)
+            _drop_implausible(ids, mm, rejected)  # never kept (server-v1.79)
             tmp = _day_file(day) + ".tmp.npz"
-            np.savez_compressed(tmp, ids=np.array(ids), mm=np.stack([d[i] for i in ids]).astype(np.float32))
+            np.savez_compressed(tmp, ids=np.array(ids), mm=mm)
             os.replace(tmp, _day_file(day))
+    if rejected:  # one short line per hourly run
+        top = sorted(rejected.items(), key=lambda x: -x[1])
+        print(f"gauge archive: implausible values dropped at {len(top)} gauges: "
+              + ", ".join(f"{k} {v:.1f}" for k, v in top[:8]) + (" ..." if len(top) > 8 else ""), flush=True)
     old = time.time() - TRUTH_DAYS * 86400
     for fp in glob.glob(os.path.join(TRUTH_DIR, "*.npz")):
         if os.path.getmtime(fp) < old:

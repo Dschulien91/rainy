@@ -16,7 +16,8 @@ How:
     10-minute steps where the gauge or the picture is at least WET mm/h:
         factor = (sum of gauge mm + PRIOR) / (sum of picture mm + PRIOR), clipped to [MIN_F, MAX_F]
     (a ratio of sums - wet hours dominate; a dry network stays at 1); truth = the gauge archive (gaugetruth, written
-    hourly by the OPERA instance) - only values the gauges really reported count;
+    hourly by the OPERA instance) - only values the gauges really reported count, without implausible ones
+    (check_national_gauges.implausible) and with no gauge above SHARE_MAX of its network's sum (server-v1.79);
   * the factor field: every gauge carries its network's factor (log), spread with a Gaussian of FIELD_KM on a
     ~16 km grid, fading to 1 where gauges are few or none (FIELD_D0); multiplied into every rain pixel of the image
     (no data and dry pixels stay as they are).
@@ -59,10 +60,34 @@ EVERY_S = 600
 # Veneto 3 mm .27 -> .08 with no amount gain - the factor cuts the heavy cores there. GAUGE_ADJUST_SKIP= (empty) = none.
 SKIP = {s.strip() for s in os.environ.get("GAUGE_ADJUST_SKIP", "ch,iv").split(",") if s.strip()}
 MS10 = 600_000
+# no single gauge may carry more than SHARE_MAX of its network's gauge sum - a safety net behind the plausibility
+# check (server-v1.79, 20.11.2026: en:1552 with a faulty 1742 mm was 97 % of England's sum -> x3.0 for 12 h; with
+# this cap alone x1.4-1.5). Its gauge and picture sums are scaled down together, so a real heavy shower keeps its
+# ratio, only its weight. Networks with fewer than SHARE_MIN_N wet gauges: no cap. Replay 14.-20.11. (54 runs):
+# 1/3 + 20 changed one legit factor (se 2.83 -> 2.70); 0.2 + 10 changed 63, mostly small SYNOP countries (up to -0.7)
+SHARE_MAX, SHARE_MIN_N = 1 / 3, 20
 
 
 def group(s):
     return f"sy-{s[1].split('-', 1)[0]}" if s[0] == "sy" else s[0]
+
+
+def network_factors(gs, rs, groups, seen):
+    """Per gauge sums of the gauge (gs) and picture (rs, mm) over the window -> (factor per gauge, {network: (factor,
+    gauges, gauge mm)}). seen: the gauges that take part."""
+    fac = np.ones(len(gs), np.float32)
+    factors = {}
+    for g in np.unique(groups[seen]):
+        m = seen & (groups == g)
+        a, b = gs[m].astype(np.float64), rs[m].astype(np.float64)
+        if (a > 0).sum() >= SHARE_MIN_N:
+            cap = SHARE_MAX / (1 - SHARE_MAX) * (a.sum() - a)   # SHARE_MAX of the sum with the others as they are
+            w = np.where(a > cap, cap / np.maximum(a, 1e-9), 1.0)
+            a, b = a * w, b * w
+        f = float(np.clip((a.sum() + PRIOR) / (b.sum() + PRIOR), MIN_F, MAX_F))
+        fac[m] = f
+        factors[g] = (round(f, 2), int(m.sum()), round(float(a.sum()), 1))
+    return fac, factors
 
 
 class GaugeAdjust:
@@ -135,12 +160,12 @@ class GaugeAdjust:
             R = np.stack([self.pic[t] for t in ts]).astype(np.float32) if ts else None
         if R is None:
             return
-        n = len(self.st)
         G = np.full(R.shape, np.nan, np.float32)
         idx = {f"{s[0]}:{s[1]}": k for k, s in enumerate(self.st)}
         ts_a = np.array(ts, np.int64)
+        rejected = {}  # implausible gauge values (check_national_gauges.implausible), dropped by _day_load
         for day in sorted({t // 86400_000 for t in ts}):
-            rows = cng._day_load(day)
+            rows = cng._day_load(day, rejected)
             sel = np.flatnonzero(ts_a // 86400_000 == day)
             col = (ts_a[sel] % 86400_000) // MS10
             for key, row in rows.items():
@@ -152,13 +177,7 @@ class GaugeAdjust:
         gs = np.where(wet, G, 0).sum(0)
         rs = np.where(wet, R / 6, 0).sum(0)
         seen = ok.any(0) & self.use
-        fac = np.ones(n, np.float32)
-        factors = {}
-        for g in np.unique(self.groups[seen]):
-            m = seen & (self.groups == g)
-            f = float(np.clip((gs[m].sum() + PRIOR) / (rs[m].sum() + PRIOR), MIN_F, MAX_F))
-            fac[m] = f
-            factors[g] = (round(f, 2), int(m.sum()), round(float(gs[m].sum()), 1))
+        fac, factors = network_factors(gs, rs, self.groups, seen)
         # the field: log factors of the gauges, spread and faded to 1 where there are few
         col, row, inside = self.host.gauge_px
         c = max(1, int(round(CELL_KM / self.host.KM_PER_PX)))
@@ -178,6 +197,10 @@ class GaugeAdjust:
             self.logged = time.time()
             top = sorted(factors.items(), key=lambda x: -x[1][2])[:16]
             self.log("gauge adjust (" + self.key + "): " + ", ".join(f"{g} x{f[0]}" for g, f in top))
+            if rejected:
+                bad = sorted(rejected.items(), key=lambda x: -x[1])
+                self.log(f"gauge adjust ({self.key}): implausible values dropped at {len(bad)} gauges: "
+                         + ", ".join(f"{k} {v:.1f}" for k, v in bad[:8]) + (" ..." if len(bad) > 8 else ""))
 
     def loop(self):
         time.sleep(60)

@@ -8,7 +8,7 @@ a radar, not spots.
 
 Method (data-driven, nothing hand-placed). Every image of the instance's own picture is counted BEFORE the mask is
 applied (a mask built from masked pictures would vanish the next day), on the verification grid (grid / COUNT_DOWN,
-the resolution of the obs_eu archive), with counters that decay with a time constant of WINDOW_DAYS. Two tests:
+the resolution of the obs_eu archive), with counters that decay with a time constant of WINDOW_DAYS. Tests:
 1. "spot": counted are only the images in which the ring RING_KM around the cell is dry (<= RING_DRY of its area
    wet); a cell that is wet in >= COND_MIN of those is clutter. Real rain is almost never wet in one spot while
    everything 20-40 km around it is dry, and if, it moves on; clutter stays. Connected areas > MAX_AREA_KM2: never.
@@ -17,6 +17,27 @@ the resolution of the obs_eu archive), with counters that decay with a time cons
 2. "hot": the mean rate over the window >= HOT_MM_H and >= HOT_RATIO x the ring's mean rate, wet in >= HOT_WET
    of the images, connected area <= HOT_AREA_KM2. Dublin is not a spot but a ~1300 km2 area wet in 80 % of the images (the ring is never dry) with a
    core of 8-23 mm/h MEAN over three days (= 600-1600 mm) next to 0.5 mm/h around it - no rain does that.
+3. "weak" (server-v1.79, 20.11.2026): wet in >= WEAK_COND of the dry-ring images AND a mean rate >= WEAK_RATIO x
+   and a wet share >= WEAK_WET x the ring's - fixed echoes too faint for test 1 or 2 (wind farms: Blakliden 64.22 N
+   18.48 E cond .35, mean .45 vs ring .04 mm/h, wet .51 vs .15; Pretul 47.56 N 15.74 E cond .38, 1.28 vs .12,
+   .49 vs .14). Connected areas > MAX_AREA_KM2: never.
+GROWING (server-v1.79, 20.11.2026): the tests find the core of a fixed echo, not all of it - Markbygden (65.35 N
+20.76 E, ~20 x 20 km) was masked with 3 of its 20 cells (only those reached 3 mm/h; the 16 cells wet in >= .5 of the
+dry-ring images were one area > MAX_AREA_KM2, and on 16.-19.11. no cell reached 3 mm/h: not masked at all), and eun's
+x3 Sweden gauge factor then showed the rest at 9-19 mm/h. So test 1 takes areas up to SPOT_AREA_KM2 (what that adds
+on 16.-20.11.: Markbygden, Rost radar 14 cells, the sea 20 km NW of the radar-site echo 59.85 N 5.08 E (wet .91,
+cond .71), 47.46 N 24.62 E (wet .86, cond .69) - all wet in >= .64 of the dry-ring images), and every found spot is
+grown into the connected cells that are wet in >= GROW_COND of the dry-ring images, or have a
+mean rate >= GROW_MM_H and >= GROW_RATIO x the ring's (wet >= HOT_WET); a grown area > GROW_AREA_KM2 keeps its seed
+only. Replay (30-min archive copy, 72 h windows to 16./17./18./19.11. 12 UTC, eu and eun): 49-82 -> 162-229 cells
+(800-1300 -> 2600-3700 km2, all Europe; live counters 20.11.: eu 63 -> 198, eun 71 -> 208, na 1 -> 4: Mount Rainier
+next to Mount Baker); gauge rain in or next to the new cells 0.00-0.03 % of
+all gauge rain (at most 2 gauges: 17.5 mm next to a spot in the Bukk 48.10 N 20.50 E, picture 22.6, ring 16.3);
+the next 24 h (out of sample), 2-8 gauges within 12 km of new cells: gauges 4.1 / 4.5 / 27.7 mm, picture with the
+old mask 12.1 / 11.1 / 17.6, with the new 12.3 / 10.8 / 17.1 (eu). Alps: no new cell but Pretul; W Norway: only
+around the radar-site echo 59.85 N 5.08 E (incl. the sea 20 km NW of it, wet 88-100 % of the day on 13.-15.11. while
+Bergen was 6-60 %, dry gauge no-1418) and 58.55 N 6.8 E. CLUTTER_GROW=0 switches test 3, the larger spots and the
+growing off (the server-v1.61 mask).
 The mask is upsampled to the picture's grid and grown by GROW_KM; in each image its pixels get the mean of the valid,
 unmasked pixels within FILL_KM: dry country -> 0, real rain passing over -> the surrounding rain, no hole.
 Rebuilt every REBUILD_H hours; counters and mask in <log dir>/clutter/. A new instance bootstraps the counters from
@@ -46,6 +67,16 @@ HOT_RATIO = 8.0       # ... and >= 8 x the mean rate of the ring around it
 HOT_WET = 0.25        # ... and wet in >= 25 % of the images: a fixed echo, not one extreme storm that stayed for hours
 HOT_AREA_KM2 = 800.0
 MIN_VALID = 0.5       # judged once the decayed valid count is >= 0.5 x TAU_IMAGES (~2 days of images)
+# test 3, "weak", and growing the found spots (server-v1.79, 20.11.2026; see above)
+GROW = os.environ.get("CLUTTER_GROW", "1") == "1"
+WEAK_COND = 0.33
+WEAK_RATIO = 8.0      # mean rate >= 8 x the ring's
+WEAK_WET = 3.0        # wet share >= 3 x the ring's
+GROW_COND = 0.25
+GROW_MM_H = 1.0
+GROW_RATIO = 4.0
+GROW_AREA_KM2 = 800.0
+SPOT_AREA_KM2 = 400.0  # test 1 up to this area (MAX_AREA_KM2 without GROW)
 GROW_KM = 2.0
 FILL_KM = 10.0
 WINDOW_DAYS = 3
@@ -108,34 +139,52 @@ def build_mask(c, km_per_px, n_eff):
     cond = np.where(ok_d, c["dwet"] / np.maximum(dvalid, 1e-6), 0.0).astype(np.float32)
     ok_v = valid >= MIN_VALID * n_eff
     mean = np.where(ok_v, c["rsum"] / np.maximum(valid, 1e-6), 0.0).astype(np.float32)
-    wet = np.where(ok_v, c["wet"] / np.maximum(valid, 1e-6), 0.0)
+    wet = np.where(ok_v, c["wet"] / np.maximum(valid, 1e-6), 0.0).astype(np.float32)
     k = ring_kernel(km_per_px)
     num = cv2.filter2D(mean * ok_v, -1, k, borderType=cv2.BORDER_CONSTANT)
     den = cv2.filter2D(ok_v.astype(np.float32), -1, k, borderType=cv2.BORDER_CONSTANT)
-    ring_mean = np.where(den >= 0.5 * k.sum(), num / np.maximum(den, 1e-6), np.inf)
-    tests = (("spot", ok_d & (cond >= COND_MIN), MAX_AREA_KM2),
-             ("hot", ok_v & (mean >= HOT_MM_H) & (mean >= HOT_RATIO * ring_mean) & (wet >= HOT_WET), HOT_AREA_KM2))
-    mask = np.zeros(valid.shape, np.uint8)
-    blobs = []
-    for kind, cand, max_km2 in tests:
+    full = den >= 0.5 * k.sum()
+    ring_mean = np.where(full, num / np.maximum(den, 1e-6), np.inf)
+    tests = [("spot", ok_d & (cond >= COND_MIN), SPOT_AREA_KM2 if GROW else MAX_AREA_KM2),
+             ("hot", ok_v & (mean >= HOT_MM_H) & (mean >= HOT_RATIO * ring_mean) & (wet >= HOT_WET), HOT_AREA_KM2)]
+    if GROW:
+        ring_wet = np.where(full, cv2.filter2D(wet * ok_v, -1, k, borderType=cv2.BORDER_CONSTANT) / np.maximum(den, 1e-6),
+                            np.inf)
+        tests.append(("weak", ok_d & (cond >= WEAK_COND) & (mean >= WEAK_RATIO * ring_mean) & (wet >= WEAK_WET * ring_wet),
+                      MAX_AREA_KM2))
+    px_km2 = km_per_px * km_per_px
+    kinds = np.zeros(valid.shape, np.uint8)   # bit per test that found the cell
+    for bit, (kind, cand, max_km2) in enumerate(tests):
         if not cand.any():
             continue
         n, lab, stats, _ = cv2.connectedComponentsWithStats(cand.astype(np.uint8), connectivity=8)
-        max_px = max_km2 / (km_per_px * km_per_px)
-        for i in range(1, n):
-            area = int(stats[i, cv2.CC_STAT_AREA])
-            if area > max_px:
-                continue
-            x0, y0, w, h = (int(stats[i, j]) for j in (cv2.CC_STAT_LEFT, cv2.CC_STAT_TOP, cv2.CC_STAT_WIDTH, cv2.CC_STAT_HEIGHT))
-            sub = lab[y0:y0 + h, x0:x0 + w] == i
-            mask[y0:y0 + h, x0:x0 + w][sub] = 1
-            rr, cc = np.nonzero(sub)
-            j = int(np.argmax(mean[y0:y0 + h, x0:x0 + w][sub]))
-            r_, c_ = y0 + int(rr[j]), x0 + int(cc[j])
-            blobs.append({"kind": kind, "row": r_, "col": c_, "px": area, "cond": round(float(cond[r_, c_]), 2),
-                          "ndry": round(float(dvalid[r_, c_])), "mean": round(float(mean[r_, c_]), 2),
-                          "ring_mean": round(float(min(ring_mean[r_, c_], 99)), 2)})
-    return mask.astype(bool), blobs
+        keep = stats[:, cv2.CC_STAT_AREA] <= max_km2 / px_km2
+        keep[0] = False
+        kinds[keep[lab]] |= np.uint8(1 << bit)
+    mask = kinds > 0
+    if GROW and mask.any():   # each found spot -> the connected area of its fixed echo
+        reg = mask | (ok_d & (cond >= GROW_COND)) | (ok_v & (mean >= GROW_MM_H) & (mean >= GROW_RATIO * ring_mean) &
+                                                   (wet >= HOT_WET))
+        n, lab, stats, _ = cv2.connectedComponentsWithStats(reg.astype(np.uint8), connectivity=8)
+        ok = np.zeros(n, bool)
+        ok[np.unique(lab[mask])] = True
+        ok &= stats[:, cv2.CC_STAT_AREA] <= GROW_AREA_KM2 / px_km2
+        ok[0] = False
+        mask |= ok[lab]
+    blobs = []
+    n, lab, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8), connectivity=8)
+    for i in range(1, n):
+        x0, y0, w, h = (int(stats[i, j]) for j in (cv2.CC_STAT_LEFT, cv2.CC_STAT_TOP, cv2.CC_STAT_WIDTH, cv2.CC_STAT_HEIGHT))
+        sub = lab[y0:y0 + h, x0:x0 + w] == i
+        bits = int(np.bitwise_or.reduce(kinds[y0:y0 + h, x0:x0 + w][sub]))
+        rr, cc = np.nonzero(sub)
+        j = int(np.argmax(mean[y0:y0 + h, x0:x0 + w][sub]))
+        r_, c_ = y0 + int(rr[j]), x0 + int(cc[j])
+        blobs.append({"kind": "+".join(t[0] for b, t in enumerate(tests) if bits >> b & 1), "row": r_, "col": c_,
+                      "px": int(stats[i, cv2.CC_STAT_AREA]), "cond": round(float(cond[r_, c_]), 2),
+                      "ndry": round(float(dvalid[r_, c_])), "mean": round(float(mean[r_, c_]), 2),
+                      "ring_mean": round(float(min(ring_mean[r_, c_], 99)), 2)})
+    return mask, blobs
 
 
 def full_mask(mask, f, shape, km_per_px):

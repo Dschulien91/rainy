@@ -28,7 +28,10 @@ import monitor
 EVERY_S = 300
 NO_ROW_S = 15 * 60
 RAIN_MAX_MIN, SUN_MAX_MIN = 25, 50
-SOURCE_MAX_MIN = {"opera": 30, "mrms": 25, "dwd": 25, "sunny": 50, "default": 30}  # per source (health rows "src")
+SOURCE_MAX_MIN = {"opera": 30, "mrms": 25, "dwd": 25, "sunny": 50, "default": 30,  # per source (health rows "src")
+                  # server-v1.79: thunder / lightning / official warnings in "src" - lightning arrives 10-16 min late,
+                  # a warnings round (NWS zones, all MeteoAlarm countries) can take a while
+                  "thunder": 30, "lightning": 40, "warn": 60}
 STARTS_MAX, STARTS_WINDOW_S = 3, 30 * 60
 AGAIN_S = 6 * 3600
 NAMES = {"de": "Deutschland", "eu": "Europa", "eun": "Europa (eigenes Modell)", "na": "Nordamerika"}
@@ -81,7 +84,7 @@ def problems(now=None, editions=("de", "eu", "eun", "na")):
         for src, age in (r.get("src") or {}).items():
             if ed == "eun" and src == "opera":  # the same OPERA as api-eu: reported once
                 continue
-            limit = SOURCE_MAX_MIN.get(src, SOURCE_MAX_MIN["default"])
+            limit = SOURCE_MAX_MIN.get(src.split(":")[0], SOURCE_MAX_MIN["default"])  # "warn:nws" -> "warn"
             if age is None or age > limit:
                 out[f"{ed}:src:{src}"] = f"{name}: Quelle {src} seit {int(age)} Min. ohne neue Daten" if age is not None                     else f"{name}: Quelle {src} hat keine Daten"
     starts = {}

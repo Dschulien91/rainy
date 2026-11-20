@@ -106,7 +106,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v1.78"
+VERSION = "server-v1.79"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -863,7 +863,7 @@ class OwnNowcast:
     THR = 0.03
 
     def __init__(self, de):
-        self.de, self.done = de, None
+        self.de, self.done, self.skipped = de, None, None
         self.model = ModelRain(DeModelArea(de))
 
     def step(self):
@@ -877,6 +877,13 @@ class OwnNowcast:
         near = lambda dt: obs.get(ref - dt * 60_000)
         seq, mot = [near(10), near(5), near(0)], [near(30), near(15), near(0)]
         if any(g is None for g in seq + mot):
+            # until server-v1.79 this was silent: the run kept DWD's forecast under the "own" choice and nobody knew
+            # (audit 20.11.2026); logged once per run - a missing image may still arrive, then the run is made after all
+            if self.skipped != ref:
+                self.skipped = ref
+                gone = [dt for dt in (30, 15, 10, 5) if near(dt) is None]
+                log(f"[{datetime.now():%H:%M:%S}] own nowcast: run {datetime.fromtimestamp(ref / 1000, timezone.utc):%H:%M}Z "
+                    f"waits - no DWD image {gone} min before it (DWD's forecast is served for 'own' meanwhile)")
             return
         started = time.time()
         motion = {}
@@ -1754,6 +1761,9 @@ class SatelliteRain(Region):
 ll_to_3857 = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
 EU_NATIONAL = EDITION == "eu" and os.environ.get("EU_NATIONAL") == "1"
 NA = EDITION == "eu" and os.environ.get("NA") == "1"   # the North America instance (NOAA MRMS), behind /na/
+# which of the four instances this is, for logs and /api/health (all three non-German ones are EDITION "eu" - the
+# North America one logged "eu edition" and "eu: +1 frames", audit 20.11.2026; region names stay "eu": files use them)
+INSTANCE = "na" if NA else "eun" if EU_NATIONAL else EDITION
 REGIONS = {r.name: r for r in (EuropeNational() if EU_NATIONAL else NorthAmericaMrms() if NA else EuropeOpera(),
                                UsaNowcoast(), SatelliteRain())}
 
@@ -1765,7 +1775,7 @@ def update_loop(region):
             n = region.update()
             if n:
                 _, ref = region.frames()
-                log(f"[{datetime.now():%H:%M:%S}] {region.name}: +{n} frames, latest "
+                log(f"[{datetime.now():%H:%M:%S}] {INSTANCE if EDITION == 'eu' else region.name}: +{n} frames, latest "
                       f"{datetime.fromtimestamp(ref / 1000, timezone.utc):%H:%M}Z, {time.time() - started:.1f}s")
         except Exception as e:  # keep serving the last good data
             import traceback  # where it failed (a bare message like "NoneType / int" cannot be traced afterwards)
@@ -1949,7 +1959,9 @@ class Handler(BaseHTTPRequestHandler):
                 info = {name: {"frames": len(r.frames()[0]), "ref": r.ref} for name, r in REGIONS.items()}
                 info["clouds"] = {"frames": len(CLOUDS.frames()[0]), "ref": CLOUDS.ref}
                 info["sunny"] = SUNNY.health()  # Germany edition's sunny source (DWD satellite)
-                info["de"] = {"frames": len(DE.frames()[0]), "ref": DE.ref, "vetoed_px": getattr(DE, "vetoed", 0)}
+                info["de"] = {"frames": len(DE.frames()[0]), "ref": DE.ref, "vetoed_px": getattr(DE, "vetoed", 0),
+                              # our own forecast's run (server-v1.79): own_ref != ref = "own" serves DWD's forecast now
+                              "own_ref": DE.own_ref, "own_current": DE.ref is not None and DE.own_ref == DE.ref}
                 info["sources"] = source_ages(time.time() * 1000)  # minutes since each source's newest data (v1.70)
                 if EU_NATIONAL:  # per layer: its newest image, and in how many of the map's images it is
                     eu_r = REGIONS["eu"]
@@ -1959,7 +1971,7 @@ class Handler(BaseHTTPRequestHandler):
                 if REGIONS["eu"].spoke_last:  # interference lines removed from the newest image: (km, radar)
                     info["spokes"] = {"ref": REGIONS["eu"].spoke_last[0], "lines": [l[:2] for l in REGIONS["eu"].spoke_last[1]]}
                 info["ptype"] = {"frames": len(PTYPE.grids), "ref": max(PTYPE.grids) if PTYPE.grids else None}
-                body = {"version": VERSION, "edition": EDITION, "regions": info, "openmeteo": openmeteo_available(), "rss_mb": rss_mb(),
+                body = {"version": VERSION, "edition": EDITION, "instance": INSTANCE, "regions": info, "openmeteo": openmeteo_available(), "rss_mb": rss_mb(),
                         "auth": AUTH.providers(),  # sign-in methods the app may offer
                         "tiles": MOSAIC.render_summary()}  # rain tile render time per zoom (server CPU)
                 return self.send(200, json.dumps(body).encode(), "application/json", 10)
@@ -2066,7 +2078,12 @@ class Handler(BaseHTTPRequestHandler):
                 ck = (MOSAIC.key(variant), lat, lon, de)  # one answer per ~1 km square and radar run, shared by all users
                 body = POINT_CACHE.get(ck)
                 if body is None:
-                    body = {"key": ck[0], "series": MOSAIC.rain_point(lat, lon, de, variant), "covered": MOSAIC.covered(lat, lon)}
+                    cov = MOSAIC.covered(lat, lon)
+                    # no radar here (Europe / North America instances, server-v1.79): no series, so the app shows the
+                    # weather model instead of a run of zeros ("dry for 2 hours" under the hatching); the Germany
+                    # edition keeps its series (the app uses the model there itself when covered is false)
+                    series = MOSAIC.rain_point(lat, lon, de, variant) if cov or EDITION == "de" else []
+                    body = {"key": ck[0], "series": series, "covered": cov}
                     POINT_CACHE[ck] = body
                     while len(POINT_CACHE) > 20000:
                         POINT_CACHE.pop(next(iter(POINT_CACHE)))
@@ -2201,6 +2218,26 @@ SKY = SUNNY if SUNNY_ON else CLOUDS
 MOSAIC = mosaic.Mosaic(REGIONS, DE, SKY, sample, palette.paint, log, de_only=EDITION == "de", ptype=PTYPE)
 THUNDER = thunder.Thunder(fetch, log)
 WARNINGS = None  # official warnings (official_warnings.py): DWD in the de instance, MeteoAlarm in api-eu, NWS/ECCC in api-na
+# Last successful refresh (ms) of the thunder and warning feeds, for source_ages (server-v1.79): a failing feed kept
+# its old areas on the map with nothing watching it (audit 20.11.2026: 3 failed lightning fetches on 19.11. unnoticed).
+FEED_OK = {}
+STARTED_MS = time.time() * 1000
+
+
+def watch_feed(obj, method, name):
+    """Wrap obj.method so each run that does not raise stamps FEED_OK[name] (or FEED_OK[name + ":" + arg])."""
+    fn = getattr(obj, method, None)
+    if fn is None:
+        return
+
+    def run(*a, **k):
+        out = fn(*a, **k)
+        FEED_OK[f"{name}:{a[0]}" if a else name] = time.time() * 1000
+        return out
+    setattr(obj, method, run)
+
+
+watch_feed(THUNDER, "refresh_warnings", "thunder")
 
 
 def warnings_start(regions):
@@ -2209,6 +2246,9 @@ def warnings_start(regions):
     global WARNINGS
     import official_warnings
     WARNINGS = official_warnings.Warnings(fetch, log, os.path.join(DATA_DIR, "warnings"), regions=regions)
+    watch_feed(WARNINGS, "refresh", "warn")  # one age per source: warn:dwd, warn:meteoalarm, warn:nws, ...
+    for s in WARNINGS.sources:
+        FEED_OK.setdefault(f"warn:{s}", None)
     threading.Thread(target=WARNINGS.loop, daemon=True).start()
     # 18.11.2026: the warnings check our own data (warn_check.py) - archive them and our forecasts for the daily check
     import warn_check
@@ -2255,6 +2295,12 @@ def source_ages(now):
                 out[l.name] = l.newest_ts()
         if SUNNY_ON or NA:
             out["sunny"] = SUNNY.ref
+        feeds = {k: v for k, v in FEED_OK.items() if k.startswith("warn:")}  # official warnings per source
+        if EDITION == "de":  # the thunder feeds run in the Germany instance only (server-v1.79)
+            feeds["thunder"] = FEED_OK.get("thunder")  # DWD NowCastMIX warning areas
+            feeds["lightning"] = THUNDER.lightning[0] if THUNDER.lightning else None  # EUMETSAT MTG LI
+        # a feed that has not answered yet counts as missing only after the first 15 min (no alarm at every start)
+        out.update({k: v for k, v in feeds.items() if v or now - STARTED_MS > 15 * 60_000})
     except Exception as e:
         log(f"source ages failed: {e}")
     return {k: round((now - v) / 60_000, 1) if v else None for k, v in out.items()}
@@ -2426,7 +2472,7 @@ def main_eu():
     threading.Thread(target=memory_loop, daemon=True).start()
     log(f"nowcast: {'pySTEPS S-PROG' if HAVE_PYSTEPS else 'simple (pySTEPS not installed)'}, Europe grid {EU_KM} km"
         f"{', national layers: ' + ', '.join(l.name for l in eu.layers) if EU_NATIONAL else ''}")
-    log(f"rainy {VERSION} (eu edition) on http://0.0.0.0:{PORT}")
+    log(f"rainy {VERSION} ({INSTANCE} instance, eu edition) on http://0.0.0.0:{PORT}")
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
 
 

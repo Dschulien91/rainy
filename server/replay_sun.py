@@ -11,6 +11,13 @@ Files in --cache: SIDhr<YYYYmmddHHMM>EUv4.nc.bz2, CTHin<...>nEU.nc.bz2, SISfc<YY
 weather/satellite/radiation/sid, clouds/CTH, radiation/sis; download them politely, one at a time).
 
   python replay_sun.py --cache DIR --from 202611080700 --to 202611081530 --out DIR [--model] [--calib]
+         [--low-f 0.3] [--ir-f 0.3] [--europe] [--model-cache FILE] [--extra-truth FILE]
+--low-f / --ir-f: the instance's low_f (sunny_de.LOW_F / LOW_F_DE) / sunny_de.IR_F for this replay (the low-sun clear
+beam factor, the IR clear beam factor; 1 = none). --europe: the Europe instance's grid (sunny_de.EUROPE, ICON-EU, files
+eusun*), scored at the DWD stations (+ --extra-truth); station rows carry "by" = the id's network prefix (de / at). --model-cache: the weather model's fields are
+fetched once and kept in FILE (.npz), so that several replays of the same period ask Open-Meteo only once.
+--extra-truth: a JSON file with further stations ({"stations": {id: [lat, lon]}, "values": {id: {end ms: share}}},
+e.g. GeoSphere TAWES "SO" / 600 from the historical tawes-v1-10min API) next to the DWD ones.
 """
 import argparse
 import glob
@@ -44,7 +51,7 @@ def get(url, tries=4):
 class ReplayStations:
     """Station truth from the recorder's daily files: {id: {end time ms: share}}; everything counts as arrived."""
 
-    def __init__(self, truth_dir, days):
+    def __init__(self, truth_dir, days, extra=None):
         text = get(f"{sd.SOLAR}zehn_now_sd_Beschreibung_Stationen.txt").decode("latin-1")
         self.stations = {}
         for line in text.splitlines()[2:]:
@@ -58,6 +65,10 @@ class ReplayStations:
                 for sid, vals in json.load(open(fp)).items():
                     self.values.setdefault(sid, {}).update({int(t): min(1.0, v * 6.0) for t, v in vals.items() if v >= 0})
         self.values = {s: v for s, v in self.values.items() if s in self.stations}
+        if extra:  # further stations: {"stations": {id: [lat, lon]}, "values": {id: {end time ms: share 0..1}}}
+            x = json.load(open(extra))
+            self.stations.update({sid: tuple(ll) for sid, ll in x["stations"].items()})
+            self.values.update({sid: {int(t): float(v) for t, v in vals.items()} for sid, vals in x["values"].items()})
 
     def truth(self, end_ts):
         return {sid: v[end_ts] for sid, v in self.values.items() if end_ts in v}
@@ -79,16 +90,33 @@ def replay(a):
     log = lambda m: print(m, flush=True)
     de = GermanyDwd(None, log)
     days = sorted({sd.ts_stamp(t)[:8] for t in slots(a.start, a.end)})
-    st = ReplayStations(a.truth, days)
+    st = ReplayStations(a.truth, days, a.extra_truth)
     om = os.environ.get("OPENMETEO_URL", "http://127.0.0.1:8080")
-    sun = sd.SunnyDE(None, log, de, om if a.model else None, lambda: True, stations=False, log_dir=a.out)
+    if a.ir_f is not None:
+        sd.IR_F = a.ir_f
+    area = sd.EUROPE if a.europe else None
+    sun = sd.SunnyDE(None, log, None if area else de, om if a.model else None, lambda: True, stations=False,
+                     log_dir=a.out, area=area)
     sun.stations = sun.verify.stations = st
-    if a.model:  # one request for the whole replay period (past values of the runs at the time: optimistic)
+    if a.low_f is not None:  # the instance's low-sun factor (and the other one as its shadow)
+        sun.low_f, sun.low_f_shadow = a.low_f, (1.0 if a.low_f < 1.0 else 0.3)
+    # station rows also by network ("by": de / at ..., the id's prefix): score_sun.py --by
+    sun.verify.group = lambda sid: sid.split(":")[0].lower() if ":" in sid else "de"
+    if a.model and a.model_cache and os.path.exists(a.model_cache):
+        z = np.load(a.model_cache)
+        m = sun.model
+        m.times, m.share, m.dni, m.low_times, m.low = (z[k] for k in ("times", "share", "dni", "low_times", "low"))
+        log(f"model: {len(m.times)} steps from {a.model_cache}")
+    elif a.model:  # one request for the whole replay period (past values of the runs at the time: optimistic)
         hours_back = (time.time() * 1000 - sd.stamp_ts(a.start)) / 3600_000 + 1
         sun.model.refresh(sun.inside(), past_steps=int(hours_back * 4) + 4, forecast_steps=16)
         log(f"model: {len(sun.model.times)} steps")
+        if a.model_cache:
+            m = sun.model
+            np.savez_compressed(a.model_cache, times=m.times, share=m.share, dni=m.dni, low_times=m.low_times, low=m.low)
+    log(f"low_f {sun.low_f} (shadow {sun.low_f_shadow}), IR_F {sd.IR_F}, LOWCC_W {sd.LOWCC_W}, {'Europe' if area else 'Germany'}")
     os.makedirs(a.out, exist_ok=True)
-    for fp in glob.glob(os.path.join(a.out, "sun*_*.jsonl")):
+    for fp in glob.glob(os.path.join(a.out, "*sun*_*.jsonl")) + glob.glob(os.path.join(a.out, "timeline_*.jsonl")):
         os.remove(fp)
     t_cpu, n = 0.0, 0
     for t in slots(a.start, a.end):
@@ -226,5 +254,10 @@ if __name__ == "__main__":
     ap.add_argument("--truth", default=os.path.join(HERE, "verify_log"))
     ap.add_argument("--model", action="store_true", help="also the model shadows (self-hosted Open-Meteo, past values)")
     ap.add_argument("--calib", action="store_true")
+    ap.add_argument("--low-f", type=float, default=None, help="the low-sun factor for this replay (1 = none; default: the instance's)")
+    ap.add_argument("--ir-f", type=float, default=None, help="sunny_de.IR_F for this replay (the IR clear beam factor)")
+    ap.add_argument("--europe", action="store_true", help="the Europe instance's grid and model (sunny_de.EUROPE)")
+    ap.add_argument("--extra-truth", default=None, help="JSON with further station truth (see the module text)")
+    ap.add_argument("--model-cache", default=None, help=".npz: the model fields of the first --model replay, reused")
     a = ap.parse_args()
     calib(a) if a.calib else replay(a)

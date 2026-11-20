@@ -5,6 +5,7 @@ CSI / POD / FAR, mean share bias and MAE. Stations (verify_log/sunstation_*.json
 duration SD_10): MAE of the sun share and the hit rate of "sunny or not".
 
   python score_sun.py sat pers kpers model nwp [--hours 24 | --all | --day 20261110] [--dir verify_log] [--prefix eu] [--broken] [--by]
+         [--morning | --afternoon]
   (--by: MAE per station group, the country for --prefix eusy, rows from server-v1.60 on)
   (--prefix eusd: SYNOP hourly sunshine duration, ~340 stations in 16 countries, server-v1.62 on - the fair
    Europe-wide sunny truth; --prefix eusy = total cloud cover, a cloud truth: unfair to the sun share, see synop.HourlySun)
@@ -12,6 +13,12 @@ duration SD_10): MAE of the sun share and the hit rate of "sunny or not".
   (--prefix eu: the Europe instance's files eusungrid_* / eusunstation_*)
   (weather-model blend beyond +30 min, 17.11.2026: python score_sun.py sat satnwp nwp pers - "satnwp" is the shadow;
    with SUNNY_NWP=1 it is served as "sat" and the plain advection is "satadv"; offline test: tune_sun.py)
+  (METAR fog, server-v1.79, Europe only: python score_sun.py sat metfog pers --prefix eu [--morning] - "metfog" is the
+   forecast from the IR k capped around airports that report fog / a ceiling <= 300 ft; equal to "sat" without fog,
+   so compare it on foggy mornings; SUNNY_METAR_FOG=1 serves it)
+  (low-sun clear beam factor, server-v1.79: python score_sun.py sat lowf03 pers --afternoon (Germany: 1 served, 0.3 the
+   shadow) / sat lowf10 pers --prefix eu --morning (Europe: 0.3 served, 1 the shadow); see sunny_de.LOW_F)
+  (--morning / --afternoon: only valid times before 10 / from 13 UTC - low sun in Germany in winter)
 The last line is the analysis itself at the stations (variant "ana", lead 0): how well the newest satellite image
 says "sun or not" where a gauge measures it - no forecast can be better than that.
 """
@@ -34,6 +41,8 @@ if "--day" in args:  # one UTC day, by the time the forecast is for
     since = datetime.strptime(opt("--day", ""), "%Y%m%d").replace(tzinfo=timezone.utc).timestamp() * 1000
     until, span = since + 86400_000, opt("--day", "") + " UTC"
 ANA = []
+# time of day (UTC hour of the valid time): low sun in Germany in winter (20.11.2026: the afternoon bias hid in the means)
+hour_ok = ((lambda h: h < 10) if "--morning" in args else (lambda h: h >= 13) if "--afternoon" in args else (lambda h: True))
 
 
 def load(kind):
@@ -41,7 +50,7 @@ def load(kind):
     for fp in glob.glob(os.path.join(log_dir, f"{prefix}{kind}_*.jsonl")):
         for line in open(fp):
             r = json.loads(line)
-            if since <= r["valid"] < until:
+            if since <= r["valid"] < until and hour_ok(r["valid"] // 3600_000 % 24):
                 rows[(r["ref"], r["lead"])][r["variant"]] = r
                 if r["variant"] == "ana":
                     ANA.append(r)
