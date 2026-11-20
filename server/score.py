@@ -126,7 +126,7 @@ def score_rain(hours):
                 fc = np.interp([t - 7.5 * 60_000, t - 2.5 * 60_000], ts, series).mean()
                 preds = [("rainy", fc), ("persist", at_issue)]
                 # own: our own forecast; shadows: Europe composite only; the same without the model's new cells
-                for name in ("own", "opera", "noblend"):
+                for name in ("own", "model", "opera", "noblend"):
                     if name in r:
                         v = np.interp([t - 7.5 * 60_000, t - 2.5 * 60_000], ts, r[name][:, j]).mean()
                         if not math.isnan(v):
@@ -140,7 +140,7 @@ def score_rain(hours):
                         e[0] += wo and wf; e[1] += wo and not wf; e[2] += wf and not wo
     print("REGEN  (CSI / POD / FAR)")
     for th in ("nass", ">=1mm/h"):
-        for k in ("rainy", "own", "opera", "noblend", "persist"):
+        for k in ("rainy", "own", "model", "opera", "noblend", "persist"):
             if not any(key[0] == k and v[0] + v[2] for key, v in acc.items()):  # never wet: not recorded (zeros)
                 continue
             cells = []

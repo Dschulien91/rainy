@@ -226,6 +226,10 @@ class GermanyDwd:
                 return obs[ts]
             if variant == "own" and own is not False and fo and ts in fo:
                 return fo[ts]
+            # shadow variants of our own forecast (rainy_server.OwnNowcast, e.g. "model"): the current run only,
+            # recorded at the gauges since server-v1.73; None = not there (the caller records NaN)
+            if variant in self.fc_shadow and run is None and self.own_ref == self.ref:
+                return self.fc_shadow[variant].get(ts)
             return fc.get(ts)
 
     def _latest_run(self):
