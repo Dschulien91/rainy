@@ -311,6 +311,7 @@ class RegionVerify:
             own0 = dict(getattr(r, "fc_own0", None) or {})  # NWP_SERVE: the forecast without the blend
             oro = dict(getattr(r, "fc_oro", None) or {})  # stationary orographic part held in place (19.11.2026)
             inflow = dict(getattr(r, "fc_inflow", None) or {})  # the coverage's inflow edge filled (19.11.2026)
+            adv = dict(getattr(r, "fc_adv", None) or {})  # other hand-overs to S-PROG (ADV_SHADOWS, 20.11.2026)
         if not ref or ref not in obs:
             return
         if ref != self.done_ref:
@@ -323,7 +324,7 @@ class RegionVerify:
                 if t in fc:
                     put(("own", ref, lead), self._grid(fc[t])[0])
                 for name, src in (("cells", raw), ("sprog0", pure), ("nwp", nwp), ("own0", own0), ("oro", oro),
-                                  ("inflow", inflow)):
+                                  ("inflow", inflow), *adv.items()):
                     if t in src:
                         g = np.asarray(src[t], np.float32)
                         if g.shape != a0.shape:

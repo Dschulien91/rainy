@@ -106,7 +106,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v1.75"
+VERSION = "server-v1.76"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -452,26 +452,28 @@ def sprog_nowcast(seq, mot, steps, down, thr=0.1, probmatch="cdf", levels=6, ar_
 ADV_FADE_MIN = 60
 
 
-def advect_blend(fc, last, motion, fade_min=ADV_FADE_MIN):
+def advect_blend(fc, last, motion, fade_min=ADV_FADE_MIN, speed=1.0, steps=None):
     """fc: S-PROG steps (5 min apart, float16 grids, NODATA outside); last: the newest analysis (same grid); motion:
-    sprog_nowcast(motion_out=...). Returns the blended steps (float16)."""
+    sprog_nowcast(motion_out=...). Returns the blended steps (float16). speed scales the motion of the moved last
+    image; steps: the step number (1 = +5 min) of each grid in fc when only some steps are passed (shadows)."""
     vel, down = motion.get("velocity"), motion.get("down", 1)
     if vel is None:
         return fc
     last = np.asarray(last, np.float32)
     ny, nx = last.shape
-    u = cv2.resize(np.nan_to_num(vel[0]).astype(np.float32), (nx, ny), interpolation=cv2.INTER_LINEAR) * down
-    v = cv2.resize(np.nan_to_num(vel[1]).astype(np.float32), (nx, ny), interpolation=cv2.INTER_LINEAR) * down
+    u = cv2.resize(np.nan_to_num(vel[0]).astype(np.float32), (nx, ny), interpolation=cv2.INTER_LINEAR) * (down * speed)
+    v = cv2.resize(np.nan_to_num(vel[1]).astype(np.float32), (nx, ny), interpolation=cv2.INTER_LINEAR) * (down * speed)
     gx, gy = np.meshgrid(np.arange(nx, dtype=np.float32), np.arange(ny, dtype=np.float32))
     src = np.where(last < 0, 0, last).astype(np.float32)
     out = []
     for i, g in enumerate(fc):
-        lead = (i + 1) * STEP_MS / 60_000
+        k = steps[i] if steps is not None else i + 1
+        lead = k * STEP_MS / 60_000
         w = max(0.0, 1.0 - lead / fade_min)
         if w <= 0:
             out.append(g)
             continue
-        adv = cv2.remap(src, gx - u * (i + 1), gy - v * (i + 1), cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        adv = cv2.remap(src, gx - u * k, gy - v * k, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
         gf = np.asarray(g, np.float32)
         b = w * adv + (1.0 - w) * np.where(gf < 0, 0, gf)
         b[b < 0.05] = 0
@@ -924,6 +926,7 @@ class Region:
     FLOW_DOWN = 2     # optical flow is computed at grid resolution / FLOW_DOWN
     MODEL_DEG = None  # lat/lon spacing of the weather model rain used for blending (None: no blending)
     SPROG_DOWN = 0    # S-PROG runs at grid resolution / SPROG_DOWN (0: simple nowcast only)
+    ADV_SHADOWS = {}  # name -> (fade_min, speed): scored shadows of the moved last image's hand-over to S-PROG
     RAW_DOWN = 3      # the forecast without the model's new cells (fc_raw) is kept at grid resolution / RAW_DOWN
     ORO_DEM = None    # terrain file for the shadow "oro" (oro_forecast; EuropeOpera: dem_eu4km.npz)
     INFLOW_SHADOW = False   # the shadow "inflow" (inflow_forecast; EuropeOpera: True)
@@ -1003,7 +1006,7 @@ class Region:
             prev, last = self.obs[prev_t], self.obs[last_t]
         if prev_t == last_t:
             return len(new)
-        fc = None
+        fc = adv = None
         motion, pure, pure_small = {}, None, None
         if HAVE_PYSTEPS and self.SPROG_DOWN:
             with self.lock:
@@ -1020,6 +1023,16 @@ class Region:
                     if LOCAL_AMOUNT:  # every region keeps its rain amount (local_amount, 16.11.2026)
                         pure = local_amount(pure, last, motion, self.KM_PER_PX, keep=False)
                     fc = advect_blend(pure, last, motion)  # no break at "now" (ADV_FADE_MIN)
+                    if self.ADV_SHADOWS:  # other hand-overs, at the scored leads only, at 1 / RAW_DOWN
+                        try:
+                            ks, d = [lead // 5 for lead in INFLOW_LEADS], self.RAW_DOWN
+                            adv = {n: {last_t + k * STEP_MS: cv2.resize(np.asarray(g, np.float32), (g.shape[1] // d, g.shape[0] // d),
+                                                                        interpolation=cv2.INTER_AREA).astype(np.float16)
+                                       for k, g in zip(ks, advect_blend([pure[k - 1] for k in ks], last, motion, f, sp, steps=ks))}
+                                   for n, (f, sp) in self.ADV_SHADOWS.items()}
+                        except Exception as e:
+                            log(f"{self.name} hand-over shadows failed: {e}")
+                            adv = None
                     if LOCAL_AREA:  # off by default: wet area per window <= the moved last image's (local_area)
                         fc = local_area(fc, last, motion, self.KM_PER_PX)
                 except Exception as e:  # never lose the forecast: fall back to the simple method
@@ -1095,6 +1108,7 @@ class Region:
             self.fc_own0 = own0  # NWP_SERVE: verification shadow "own0" = the forecast without the blend, at 1 / RAW_DOWN
             self.fc_oro = oro  # verification shadow "oro": the stationary orographic part held in place, at 1 / RAW_DOWN
             self.fc_inflow = inflow  # verification shadow "inflow": the coverage's inflow edge filled, at 1 / RAW_DOWN
+            self.fc_adv = adv  # verification shadows of the hand-over (ADV_SHADOWS), at 1 / RAW_DOWN
             self.fc_nwp = nwp  # verification shadow "nwp" (fcverify.RegionVerify), at 1 / RAW_DOWN
             self.fc_raw = raw
             self.fc_cells = cells  # verification shadow "cells": with the model's new showers (served until 11.11.)
@@ -1202,7 +1216,7 @@ class EuropeOpera(Region):
             with self.lock:
                 self.obs, self.fc, self.ref = obs, fc, ref
                 self.filled = set(meta["filled"]) & set(obs)
-                self.fc_raw = self.fc_cells = self.fc_pure = self.fc_nwp = self.fc_oro = self.fc_inflow = None
+                self.fc_raw = self.fc_cells = self.fc_pure = self.fc_nwp = self.fc_oro = self.fc_inflow = self.fc_adv = None
             self.saved_filled = set(self.filled)
             log(f"{self.name}: continuing with the run of {datetime.fromtimestamp(ref / 1000, timezone.utc):%H:%MZ} "
                 f"from before the restart ({len(obs)} images)")
@@ -1255,7 +1269,8 @@ class EuropeOpera(Region):
                         for name, d in (("pure", getattr(self, "fc_pure", None)), ("cells", getattr(self, "fc_cells", None)),
                                         ("own0", getattr(self, "fc_own0", None)),  # own0: without the blend (NWP_SERVE)
                                         ("oro", getattr(self, "fc_oro", None)),  # oro: stationary orographic part
-                                        ("inflow", getattr(self, "fc_inflow", None))) if d}  # inflow: coverage edge filled
+                                        ("inflow", getattr(self, "fc_inflow", None)),  # inflow: coverage edge filled
+                                        *(getattr(self, "fc_adv", None) or {}).items()) if d}  # hand-over shadows
             if ref % 600_000 or any(g is None for g in grids):  # the gauges report every 10 minutes
                 return
             d = self.RAW_DOWN
@@ -1546,6 +1561,13 @@ class NorthAmericaMrms(EuropeOpera):
     east-west), 3500 x 1750."""
     ORO_DEM = None  # no terrain file for North America: no shadow "oro"
     credit = "NOAA MRMS"
+    # HAND-OVER (20.11.2026): the served forecast hands the moved last image over to S-PROG by +60 (ADV_FADE_MIN); on
+    # North America's ~6 km S-PROG grid that loses the scattered fine structure, and the motion of the cells is faster
+    # than that of the rain areas (78 boxes, 72 h: areas 2.4 px/h, motion field 5.6 px/h; the West's mountain rain and a
+    # stationary front in the Southeast). Offline, 47 + 35 runs, tolerant CSI >= 1 mm/h +60/+90/+120: persistence
+    # .766/.678/.616, own .748/.657/.585, fade 240 .800/.702/.623, fade 240 + motion x0.7 .803/.712/.639 (cell by cell
+    # -0.01..0.02 vs own, still +0.04..0.05 over persistence; amount .98/.95 vs .93/.91). Scored shadows first.
+    ADV_SHADOWS = {"adv240": (240, 1.0), "adv240s": (240, 0.7)}
     K = 2
     DEG = northamerica.DEG0 * K
     LAT_TOP = northamerica.LAT1 + northamerica.DEG0 / 2
