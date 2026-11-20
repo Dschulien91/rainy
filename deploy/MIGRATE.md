@@ -71,5 +71,7 @@ data age and `openmeteo: true`.
 
 - Keep OLD for a month as a cold standby (containers stopped, data in place). To fall back: start its containers and
   point the DNS back.
-- Add the nightly backup of `push-data` (README "Monitoring and backup") on NEW.
+- Add the nightly backup of `push-data` (README "Monitoring and backup") on NEW, and copy it OFF the server (user
+  decision 20.11.2026: buy the off-site backup space together with the netcup server, e.g. netcup storage or a
+  Hetzner Storage Box; until then the 7 nightly copies in /root/backup live on the same disk).
 - Measure the shared-CPU steal in the first days: `sar -u 1 60` (column `%steal`) during the 5-minute runs.

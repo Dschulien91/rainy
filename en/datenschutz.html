@@ -45,8 +45,11 @@ favourites. The message is delivered via your browser's push service (e.g. Googl
 is deleted when you sign out on that device; all alert entries are deleted when you turn off all alerts or delete your account
 (Art. 6 (1) (a) GDPR, consent). Alerts set up without an account before sign-in was introduced keep running without a link to
 an account until you turn them off or the push service invalidates the address.</p>
-<p><b>Map.</b> The map images come from OpenFreeMap (tiles.openfreemap.org); this service sees your IP address as with any
-image request. With the map design "Satellite", images are loaded from NASA (gibs.earthdata.nasa.gov).</p>
+<p><b>Map.</b> The map images come from OpenFreeMap (OpenStreetMap data) and are loaded through our own server; OpenFreeMap
+receives neither your IP address nor any other data from you. Only if our server cannot deliver the map does the app load
+it directly from OpenFreeMap (tiles.openfreemap.org) instead; this service then sees your IP address as with any image
+request. With the map design "Satellite", images are loaded directly from NASA (gibs.earthdata.nasa.gov), which sees your
+IP address.</p>
 
 <h2>Email</h2>
 <p>If you write to hey@hellorainy.com, we only use your message and address to reply. Emails are stored at our email
