@@ -41,6 +41,33 @@ www.{$DOMAIN} {
 	handle /api/* {
 		reverse_proxy api:8771
 	}
+	# Basemap (app v1.30): OpenFreeMap's styles, fonts, sprites and vector tiles through this server - under /tiles/ so
+	# the CDN rule for /tiles/* keeps them (tile URLs carry OpenFreeMap's data version). The users' browsers no longer
+	# talk to a third party (no IP address, no referrer), and tiles the CDN holds survive an outage there. Nothing that
+	# identifies the user or this site is passed on.
+	handle_path /tiles/ofm/* {
+		reverse_proxy https://tiles.openfreemap.org {
+			header_up Host tiles.openfreemap.org
+			header_up User-Agent "Mozilla/5.0"
+			header_up -X-Forwarded-For
+			header_up -X-Forwarded-Proto
+			header_up -X-Forwarded-Host
+			header_up -X-Real-IP
+			header_up -True-Client-IP
+			header_up -CF-Connecting-IP
+			header_up -CF-IPCountry
+			header_up -CF-Ray
+			header_up -CF-Visitor
+			header_up -CDN-Loop
+			header_up -Referer
+			header_up -Origin
+			header_up -Cookie
+			header_up -Authorization
+			header_down -Set-Cookie
+			header_down -Access-Control-Allow-Origin
+		}
+		header Access-Control-Allow-Origin "*"
+	}
 	handle /tiles/* {
 		reverse_proxy api:8771
 	}

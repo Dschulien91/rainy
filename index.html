@@ -30,7 +30,6 @@
     } }
   catch {}
 </script>
-<link rel="preconnect" href="https://tiles.openfreemap.org" crossorigin>
 <link rel="stylesheet" href="vendor/leaflet.css">
 <link rel="stylesheet" href="vendor/maplibre-gl.css">
 <style>
@@ -480,7 +479,7 @@
 <script src="lang/en.js"></script>
 <script>
 "use strict";
-const VERSION = "v1.29";
+const VERSION = "v1.30";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -750,11 +749,36 @@ L.control.attribution({ position: "bottomleft", prefix: false })
 map.createPane("weather").style.zIndex = 350;
 map.createPane("labels").style.zIndex = 450;
 map.getPane("labels").style.pointerEvents = "none";
+// OpenFreeMap through our own server (v1.30, deploy/Caddyfile /tiles/ofm/): the browser talks to no third party for
+// the map, and the CDN keeps the tiles, so they survive an outage there. Every OpenFreeMap address in the style and its
+// TileJSON is rewritten (MapLibre would otherwise fetch the tiles from the addresses in the TileJSON). If our route
+// fails, the map comes straight from OpenFreeMap as before.
+const OFM = "https://tiles.openfreemap.org";
+async function basemapStyle(name) {
+  const via = async (base) => {
+    const to = (u) => (typeof u === "string" ? u.replace(OFM, base) : u);
+    const style = await (await fetch(`${base}/styles/${name}`)).json();
+    for (const src of Object.values(style.sources || {})) {
+      if (src.url && src.url.startsWith(OFM)) {
+        const tj = await (await fetch(to(src.url))).json();
+        Object.assign(src, { tiles: tj.tiles, minzoom: tj.minzoom ?? src.minzoom, maxzoom: tj.maxzoom ?? src.maxzoom });
+        if (tj.bounds) src.bounds = tj.bounds;
+        delete src.url;
+      }
+      if (src.tiles) src.tiles = src.tiles.map(to);
+    }
+    style.glyphs = to(style.glyphs);
+    style.sprite = Array.isArray(style.sprite) ? style.sprite.map((x) => ({ ...x, url: to(x.url) })) : to(style.sprite);
+    return style;
+  };
+  if (API_BASE) try { return await via(`${API_BASE}/tiles/ofm`); } catch (e) { console.warn("basemap via server failed", e); }
+  return via(OFM);
+}
 // Basemap: OpenFreeMap vector tiles (free, also for commercial use). The style is split in two so the
 // weather sits between the map (below) and the place names (above).
 (async function basemap() {
   try {
-    const style = await (await fetch(`https://tiles.openfreemap.org/styles/${BASEMAP.style}`)).json();
+    const style = await basemapStyle(BASEMAP.style);
     if (MAP_STYLE.design === "plain" && mapDark) { // lift the near-black OpenFreeMap dark style to the app's dark grey, water a shade darker
       const tone = { background: "#2a2e35", water: "#1c1f24", landuse_residential: "#30343b", building: "#33373e", landcover_wood: "#2f3339", landuse_park: "#2f3339" };
       for (const l of style.layers) if (tone[l.id]) l.paint[l.type === "background" ? "background-color" : "fill-color"] = tone[l.id];
