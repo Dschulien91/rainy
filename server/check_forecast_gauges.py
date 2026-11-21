@@ -40,7 +40,7 @@ import check_national_gauges as cng
 
 HOURS = float(sys.argv[sys.argv.index("--hours") + 1]) if "--hours" in sys.argv else 24.0
 DIRS = {"European": os.path.join(cng.ROOT, "fcgauge"), "own": os.path.join(cng.ROOT, "eun", "fcgauge")}
-EXTRA = {"pure": "S-PROG", "cells": "+model", "own0": "no NWP", "oro": "oro", "inflow": "inflow"}  # own0: the forecast without the served blend (NWP_SERVE)
+EXTRA = {"pure": "S-PROG", "cells": "+model", "own0": "no NWP", "oro": "oro", "inflow": "inflow", "la50": "la50"}  # own0: the forecast without the served blend (NWP_SERVE)
 st = cng.stations()
 UNTIL = (calendar.timegm(time.strptime(sys.argv[sys.argv.index("--until") + 1], "%Y%m%d%H%M")) * 1000
          if "--until" in sys.argv else time.time() * 1000)
