@@ -474,11 +474,11 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=1.35"></script>
-<script src="lang/en.js?v=1.35"></script>
+<script src="lang/de.js?v=1.36"></script>
+<script src="lang/en.js?v=1.36"></script>
 <script>
 "use strict";
-const VERSION = "v1.35";
+const VERSION = "v1.36";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -542,48 +542,32 @@ const serverReady = API_BASE ? fetch(`${API_BASE}/api/health`).then((r) => r.jso
   if (h.openmeteo === false) OM_BASE = "https://api.open-meteo.com";
   return h;
 }).catch(() => null) : Promise.resolve(null);
-// The weather model at a place (v1.27). Our Open-Meteo answers in ~20 ms from the models on its disk (ICON-D2 / EU /
-// global; HRRR, HRDPS, GFS for North America), but for the local models its "best match" picks elsewhere in Europe
-// (Meteo-France AROME, UKMO, KNMI, DMI and MET Nordic HARMONIE) it reads Open-Meteo's remote mirror first: measured
-// 19.11.2026 1-21 s, once no answer at all. So the best match is asked first; without an answer after OM_FAST_MS the
-// same request with the models on disk runs alongside, and the first answer wins.
-// v1.32: which answer a place got is remembered for the session (per ~1 km square). Before, the slow best match
-// lost the race on the first load but was then cached by the browser / CDN, so the 5-minute refresh or a reload
-// showed the other model: temperatures jumped by up to 3-4 C between loads (audit 20.11.2026: Cork 6.2 -> 8.7,
-// Dublin, London, Warsaw, Anchorage). The models on disk follow the PLACE (North America: GFS/HRRR, else ICON), not
-// the chosen map area.
-const OM_FAST_MS = 800, OM_SLOW_MS = 6000;
-const omChoice = new Map(); // "lat,lon" (2 decimals) -> "best" | "local"
-try { for (const [k, v] of Object.entries(JSON.parse(sessionStorage.getItem("rainy.omChoice")) || {})) omChoice.set(k, v); } catch {}
-const omLocalModel = (lat, lon) => (lon < -50 && lat > 14 ? "gfs_seamless" : "icon_seamless");
-function omRemember(key, v) {
-  if (omChoice.get(key) === v) return;
-  omChoice.set(key, v);
-  try { sessionStorage.setItem("rainy.omChoice", JSON.stringify(Object.fromEntries(omChoice))); } catch {}
-}
-// v1.34: one model per place, chosen by accuracy (audit 21.11.2026: 474 METAR stations, two 14-day periods plus six
-// full 00 UTC runs, 0-72 h). ICON (icon_seamless, on our disk) was best or tied-best almost everywhere in Europe and
-// North America - there GFS/HRRR (gfs_seamless, also what best match serves) was clearly worst beyond 24 h (MAE 1.7 vs
-// 1.4 C, warm bias up to +2 C on day 3) and missed most rain hours. Exceptions: MET Nordic for NO/SE/FI and the Baltics
-// (Norway 0.5 vs 1.0-1.3 C in the first hours), UKMO for UK+IE (best up to 48 h), ECMWF for Alaska. Asking for them by
-// name gives what best match served there before, without its hidden switching (it served DMI in CZ/SK/HU and the
-// Balkans, 0.1-0.2 C worse than ICON). Replaces the v1.33 boxes. Outside these areas (not evaluated) the race stays.
-// v1.35: ICON-2I (the Italian service's own ICON run, 2.2 km) for central and southern Italy: MAE 0.99 vs 1.07 C on
-// day 2 and 1.08 vs 1.17 on day 3 at 24 stations, the same in both periods (Rome, Naples, Salerno, Palermo, Lamezia,
-// the small islands up to 0.4 C better); from Florence / Liguria / Romagna northwards ICON stays (2I 0.1-0.6 worse).
-// 2I ends after ~69 h: those last hours - and anything else a remote model leaves empty, e.g. ECMWF has no 700 hPa
-// wind - are filled from ICON (omFill), the same kind of hand-over icon_seamless itself does from D2 to EU at 48 h.
+// The weather model at a place. v1.34: one model per place, chosen by accuracy (audit 21.11.2026: 474 METAR stations,
+// two 14-day periods plus six full 00 UTC runs, 0-72 h). ICON (icon_seamless) was best or tied-best almost everywhere
+// in Europe and North America - there GFS/HRRR (what best match served) was clearly worst beyond 24 h (MAE 1.7 vs
+// 1.4 C, warm bias up to +2 C on day 3) and missed most rain hours; best match also served DMI in CZ/SK/HU and the
+// Balkans, 0.1-0.2 C worse than ICON. Exceptions: MET Nordic for NO/SE/FI and the Baltics (Norway 0.5 vs 1.0-1.3 C in
+// the first hours), UKMO for UK+IE (best up to 48 h), and v1.35 ICON-2I (the Italian service's own ICON run, 2.2 km)
+// for central and southern Italy (0.99 vs 1.07 C on day 2, 1.08 vs 1.17 on day 3, the same in both periods; from
+// Florence / Liguria / Romagna northwards ICON stays, 2I 0.1-0.6 worse).
+// v1.36: every model the app asks for is on our server's disk (server-v1.82 syncs ICON-2I, MET Nordic and UKMO 2 km
+// like ICON): before, these three were read from Open-Meteo's remote mirror and the first request at a new place took
+// 1-8 s (Rome 7.6 s); now ~0.3 s. So the regional models are asked for directly, not their "seamless" mixes (whose
+// global parts - ECMWF IFS, UKMO global - are not on disk), and the hours after their end (2I ~69 h, MET Nordic ~60 h,
+// UKMO ~54 h) plus anything else they leave empty (MET Nordic has no 700 hPa wind) are filled from ICON (omFill) - the
+// same kind of hand-over icon_seamless itself does from D2 to EU at 48 h; on day 3 ICON was as good or better than
+// those mixes anyway (UK 1.28 vs 1.43, Scandinavia 1.39 vs 1.51). Alaska now ICON too (tied with ECMWF: 1.56 vs 1.56),
+// and so is everywhere else in the world (before: a race with best match from the remote mirror, 0.8 s or more).
+const OM_SLOW_MS = 3000; // a regional model with no answer by then (server trouble): ICON answers instead
 const omModel = (lat, lon) =>
   (lat >= 55.3 && lon >= 4.5 && lon < 32 && !(lat < 57.8 && lon < 12.7 && !(lat > 56.3 && lon > 11.8))) ||
-  (lat >= 53.9 && lat < 55.3 && lon >= 22.9 && lon < 27) ? "metno_seamless" // not Denmark: ICON marginally better there
-    : lat > 49.8 && lat < 61 && lon > -11 && lon < 1.8 && !(lat < 50.2 && lon > 0) ? "ukmo_seamless" // not the French coast
-      : lat > 51 && (lon < -141 || lon > 170 || (lat > 54.6 && lat < 59.8 && lon < -130.5)) ? "ecmwf_ifs" // Alaska
-        // central + southern Italy, Sardinia, Sicily (not Corsica, Dalmatia, Albania, Tunisia; Florence and north: ICON)
-        : lat > 35.3 && lat < 43.75 && lon > 7.9 && lon < 18.6 && !(lat > 41.3 && lon < 9.8) && !(lat > 42.3 && lon > 15.5) &&
-          !(lat < 38.5 && lon < 11.5) ? "italia_meteo_arpae_icon_2i"
-        : (lat > 34 && lat < 72 && lon > -25 && lon < 45) || (lat > 24 && lat < 75 && lon > -170 && lon < -50) ? "icon_seamless"
-          : null;
-// Gaps (null) in a remote model's hourly / 15-min arrays are filled from the ICON answer to the same request.
+  (lat >= 53.9 && lat < 55.3 && lon >= 22.9 && lon < 27) ? "metno_nordic" // not Denmark: ICON marginally better there
+    : lat > 49.8 && lat < 61 && lon > -11 && lon < 1.8 && !(lat < 50.2 && lon > 0) ? "ukmo_uk_deterministic_2km" // not the French coast
+      // central + southern Italy, Sardinia, Sicily (not Corsica, Dalmatia, Albania, Tunisia; Florence and north: ICON)
+      : lat > 35.3 && lat < 43.75 && lon > 7.9 && lon < 18.6 && !(lat > 41.3 && lon < 9.8) && !(lat > 42.3 && lon > 15.5) &&
+        !(lat < 38.5 && lon < 11.5) ? "italia_meteo_arpae_icon_2i"
+        : "icon_seamless";
+// Gaps (null) in a regional model's hourly / 15-min arrays are filled from the ICON answer to the same request.
 async function omFill(d, icon) {
   const secs = ["hourly", "minutely_15"].filter((s) => d[s] && Object.entries(d[s]).some(([k, v]) => k !== "time" && v.includes(null)));
   if (!secs.length) return d;
@@ -595,37 +579,21 @@ async function omFill(d, icon) {
   }
   return d;
 }
+const omOurs = (url, lat) => API_BASE && url.startsWith(`${API_BASE}/om/`) && !/[?&]models=/.test(url) && lat != null;
 // The first URL omJSON asks for at a place - what the next start's <head> may fetch early (v1.35: before, it kept
 // the URL without a model, which omJSON no longer asks for since v1.34, so that early answer was never used).
-const omFirstUrl = (url, lat, lon) => {
-  if (!API_BASE || !url.startsWith(`${API_BASE}/om/`) || /[?&]models=/.test(url) || lat == null) return url;
-  const model = omModel(+lat, +lon);
-  return model ? `${url}&models=${model}` : omChoice.get(`${(+lat).toFixed(2)},${(+lon).toFixed(2)}`) === "local"
-    ? `${url}&models=${omLocalModel(lat, lon)}` : url;
-};
+const omFirstUrl = (url, lat, lon) => (omOurs(url, lat) ? `${url}&models=${omModel(+lat, +lon)}` : url);
 async function omJSON(url, lat, lon) {
-  if (!API_BASE || !url.startsWith(`${API_BASE}/om/`) || /[?&]models=/.test(url) || lat == null) return getJSON(url);
+  if (!omOurs(url, lat)) return getJSON(url);
   const model = omModel(+lat, +lon), icon = `${url}&models=icon_seamless`;
   if (model === "icon_seamless") return getJSON(icon);
-  if (model) { // a remote model (first request at a new place 1-8.5 s): wait; only a failure or a very slow answer -> ICON
-    let ic; const iconP = () => (ic ??= getJSON(icon)); // asked for once, only when needed
-    const m = getJSON(`${url}&models=${model}`).then((d) => omFill(d, iconP()));
-    const first = await Promise.race([m.catch(() => "failed"), new Promise((r) => setTimeout(r, OM_SLOW_MS, "late"))]);
-    if (first !== "late" && first !== "failed") return first;
-    return first === "failed" ? iconP() : Promise.any([m, iconP()]);
-  }
-  const key = `${(+lat).toFixed(2)},${(+lon).toFixed(2)}`, localUrl = `${url}&models=${omLocalModel(lat, lon)}`;
-  let won = false; // only the answer actually used counts (the other one may still arrive later)
-  const tag = (p, v) => p.then((d) => { if (!won) { won = true; omRemember(key, v); } return d; });
-  const choice = omChoice.get(key);
-  if (choice === "local") return getJSON(localUrl);
-  const best = getJSON(url);
-  // known as "best": wait for it (normally cached by now); only a failure or a very slow answer switches over
-  const wait = choice === "best" ? OM_SLOW_MS : OM_FAST_MS;
-  const first = await Promise.race([best.catch(() => "failed"), new Promise((r) => setTimeout(r, wait, "late"))]);
-  if (first !== "late" && first !== "failed") return omRemember(key, "best"), first;
-  const local = tag(getJSON(localUrl), "local");
-  return first === "failed" ? local : Promise.any([tag(best, "best"), local]);
+  // ICON is asked for at once (it fills the regional model's last hours) and answers if the regional one fails
+  const iconP = getJSON(icon);
+  iconP.catch(() => {});
+  const m = getJSON(`${url}&models=${model}`).then((d) => omFill(d, iconP));
+  const first = await Promise.race([m.catch(() => "failed"), new Promise((r) => setTimeout(r, OM_SLOW_MS, "late"))]);
+  if (first !== "late" && first !== "failed") return first;
+  return first === "failed" ? iconP : Promise.any([m, iconP]);
 }
 const isImgKind = (k) => k === "radar" || k === "sat" || k === "eu" || k === "srvus" || k === "srvsat" || k === "ca" || k === "us";
 // Canada (ECCC GeoMet): rain rate in 14 discrete classes, observations every 6 min plus a 72 min nowcast.
