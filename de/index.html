@@ -485,11 +485,11 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=1.33"></script>
-<script src="lang/en.js?v=1.33"></script>
+<script src="lang/de.js?v=1.34"></script>
+<script src="lang/en.js?v=1.34"></script>
 <script>
 "use strict";
-const VERSION = "v1.33";
+const VERSION = "v1.34";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -572,27 +572,31 @@ function omRemember(key, v) {
   omChoice.set(key, v);
   try { sessionStorage.setItem("rainy.omChoice", JSON.stringify(Object.fromEntries(omChoice))); } catch {}
 }
-// v1.33: where the two models clearly differ, the region decides instead of the race - against 140 METAR stations
-// over 24 h (audit 20./21.11.2026) best match (MET Nordic, UKMO) was closer in Scandinavia, the Baltics and the UK
-// (MAE 0.54 vs 0.94 C in Scandinavia; ICON +3.6 C all day at Stavanger), ICON in the Benelux and Poland (0.60 vs 0.91;
-// best match missed the evening fog: Schiphol 6.9 C forecast, 3 C observed). Elsewhere (Germany, Alps, Italy: the
-// same model either way; France, Balkans: a tie) the race stays. Rough boxes, first match wins.
-const omRegion = (lat, lon) =>
-  (lat > 54.95 && lon > 4 && lon < 32) || (lat > 53.9 && lat < 59.7 && lon > 21 && lon < 28.5) ||
-  (lat > 49.8 && lat < 61 && lon > -11 && lon < 1.8) ? "best"
-    : (lat > 49.4 && lat < 53.6 && lon > 2.5 && lon < 7.2) || (lat > 49 && lat < 54.9 && lon > 14.1 && lon < 24.2) ? "local"
-      : null;
+// v1.34: one model per place, chosen by accuracy (audit 21.11.2026: 474 METAR stations, two 14-day periods plus six
+// full 00 UTC runs, 0-72 h). ICON (icon_seamless, on our disk) was best or tied-best almost everywhere in Europe and
+// North America - there GFS/HRRR (gfs_seamless, also what best match serves) was clearly worst beyond 24 h (MAE 1.7 vs
+// 1.4 C, warm bias up to +2 C on day 3) and missed most rain hours. Exceptions: MET Nordic for NO/SE/FI and the Baltics
+// (Norway 0.5 vs 1.0-1.3 C in the first hours), UKMO for UK+IE (best up to 48 h), ECMWF for Alaska. Asking for them by
+// name gives what best match served there before, without its hidden switching (it served DMI in CZ/SK/HU and the
+// Balkans, 0.1-0.2 C worse than ICON). Replaces the v1.33 boxes. Outside these areas (not evaluated) the race stays.
+const omModel = (lat, lon) =>
+  (lat >= 55.3 && lon >= 4.5 && lon < 32 && !(lat < 57.8 && lon < 12.7 && !(lat > 56.3 && lon > 11.8))) ||
+  (lat >= 53.9 && lat < 55.3 && lon >= 22.9 && lon < 27) ? "metno_seamless" // not Denmark: ICON marginally better there
+    : lat > 49.8 && lat < 61 && lon > -11 && lon < 1.8 && !(lat < 50.2 && lon > 0) ? "ukmo_seamless" // not the French coast
+      : lat > 51 && (lon < -141 || lon > 170 || (lat > 54.6 && lat < 59.8 && lon < -130.5)) ? "ecmwf_ifs" // Alaska
+        : (lat > 34 && lat < 72 && lon > -25 && lon < 45) || (lat > 24 && lat < 75 && lon > -170 && lon < -50) ? "icon_seamless"
+          : null;
 async function omJSON(url, lat, lon) {
   if (!API_BASE || !url.startsWith(`${API_BASE}/om/`) || /[?&]models=/.test(url) || lat == null) return getJSON(url);
-  const key = `${(+lat).toFixed(2)},${(+lon).toFixed(2)}`, localUrl = `${url}&models=${omLocalModel(lat, lon)}`;
-  const region = omRegion(+lat, +lon);
-  if (region === "local") return getJSON(localUrl);
-  if (region === "best") { // wait for the better model; only a failure or a very slow answer falls back (not remembered)
-    const best = getJSON(url);
-    const first = await Promise.race([best.catch(() => "failed"), new Promise((r) => setTimeout(r, OM_SLOW_MS, "late"))]);
+  const model = omModel(+lat, +lon), icon = `${url}&models=icon_seamless`;
+  if (model === "icon_seamless") return getJSON(icon);
+  if (model) { // a remote model (first request at a new place 1-8.5 s): wait; only a failure or a very slow answer -> ICON
+    const m = getJSON(`${url}&models=${model}`);
+    const first = await Promise.race([m.catch(() => "failed"), new Promise((r) => setTimeout(r, OM_SLOW_MS, "late"))]);
     if (first !== "late" && first !== "failed") return first;
-    return first === "failed" ? getJSON(localUrl) : Promise.any([best, getJSON(localUrl)]);
+    return first === "failed" ? getJSON(icon) : Promise.any([m, getJSON(icon)]);
   }
+  const key = `${(+lat).toFixed(2)},${(+lon).toFixed(2)}`, localUrl = `${url}&models=${omLocalModel(lat, lon)}`;
   let won = false; // only the answer actually used counts (the other one may still arrive later)
   const tag = (p, v) => p.then((d) => { if (!won) { won = true; omRemember(key, v); } return d; });
   const choice = omChoice.get(key);
