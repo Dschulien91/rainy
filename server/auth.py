@@ -6,7 +6,11 @@ Storage (SQLite, DATA_DIR/users.db): users, sessions, login_tokens, user_data. S
 only as SHA-256 hashes, so a copy of the database cannot be used to log in.
 
 Endpoints (all answers carry Cache-Control: no-store; writes need a same-site Origin/Referer):
-  GET  /api/me                          -> {"email", "providers": {"google", "email"}}  (401 with email null when logged out)
+  GET  /api/me                          -> {"email", "name", "picture", "providers": {"google", "email"}}  (401 with email
+                                           null when logged out; name / picture (bool) only from a Google sign-in)
+  GET  /api/user/picture                -> the Google profile picture (JPEG/PNG, ~96 px), 404 without one. Fetched once
+                                           per Google sign-in by this server and kept in users.db, so the app never
+                                           loads it from Google (the device's address stays with us, as for search)
                                            (the app asks only when the readable companion cookie rainy_in=1 exists;
                                            the sign-in methods for anonymous visitors come from /api/health "auth")
   GET  /api/auth/google?return=/path    -> 302 to Google (503 when GOOGLE_CLIENT_ID/SECRET are not set)
@@ -226,6 +230,11 @@ class Auth:
                 CREATE TABLE IF NOT EXISTS user_data (user_id INTEGER PRIMARY KEY, json TEXT NOT NULL,
                     updated INTEGER NOT NULL);
             """)
+            # server-v1.83: name and profile picture from the Google sign-in (scope "profile"), shown in the settings
+            cols = {r[1] for r in self.db.execute("PRAGMA table_info(users)")}
+            for col, typ in (("name", "TEXT"), ("picture", "BLOB"), ("picture_type", "TEXT")):
+                if col not in cols:
+                    self.db.execute(f"ALTER TABLE users ADD COLUMN {col} {typ}")
         self.public_origin = _origin(PUBLIC_URL)
         self.secure = not DEV  # local development runs on plain http
         log(f"auth: google {'on' if self.google_on() else 'off'}, email {'on' if self.email_on() else 'off'}"
@@ -343,7 +352,7 @@ class Auth:
         if not token or len(token) > 100:
             return None
         with self.lock:
-            return self.db.execute("SELECT u.id, u.email FROM sessions s JOIN users u ON u.id = s.user_id "
+            return self.db.execute("SELECT u.id, u.email, u.name, u.picture IS NOT NULL FROM sessions s JOIN users u ON u.id = s.user_id "
                                    "WHERE s.token_hash = ? AND s.expires > ?", (_hash(token), int(time.time()))).fetchone()
 
     def session_info(self, h):
@@ -397,7 +406,21 @@ class Auth:
                 user = self.session_user(h)
                 if not user:  # also drop a stale companion cookie, so the app stops asking
                     return self.reply(h, 401, {"email": None, "providers": self.providers()}, self.end_session_cookies())
-                return self.reply(h, 200, {"email": user[1], "providers": self.providers()})
+                return self.reply(h, 200, {"email": user[1], "name": user[2], "picture": bool(user[3]), "providers": self.providers()})
+            if path == "/api/user/picture" and method == "GET":
+                user = self.session_user(h)
+                with self.lock:
+                    row = user and self.db.execute("SELECT picture, picture_type FROM users WHERE id = ?", (user[0],)).fetchone()
+                if not row or not row[0]:
+                    return self.reply(h, 404, {"error": "no picture"})
+                h.send_response(200)
+                h.send_header("Content-Type", row[1] or "image/jpeg")
+                h.send_header("Cache-Control", "private, max-age=86400")
+                self.cors(h)
+                h.send_header("Content-Length", str(len(row[0])))
+                h.end_headers()
+                h.wfile.write(row[0])
+                return None
             if path == "/api/auth/google" and method == "GET":
                 return self.google_start(h, q)
             if path == "/api/auth/google/callback" and method == "GET":
@@ -501,7 +524,7 @@ class Auth:
             return self.reply(h, 503, {"error": "google login not configured"})
         state, nonce, verifier = secrets.token_urlsafe(24), secrets.token_urlsafe(24), secrets.token_urlsafe(48)
         challenge = _b64(hashlib.sha256(verifier.encode()).digest())
-        params = {"response_type": "code", "client_id": GOOGLE_CLIENT_ID, "scope": "openid email",
+        params = {"response_type": "code", "client_id": GOOGLE_CLIENT_ID, "scope": "openid email profile",
                   "redirect_uri": f"{API_URL}/api/auth/google/callback", "state": state, "nonce": nonce,
                   "code_challenge": challenge, "code_challenge_method": "S256", "prompt": "select_account"}
         flow = self.sign({"s": state, "n": nonce, "v": verifier, "r": safe_return(q.get("return")), "exp": int(time.time()) + OAUTH_S})
@@ -551,8 +574,33 @@ class Auth:
                 or not hmac.compare_digest(str(claims.get("nonce") or ""), flow["n"])
                 or not verified or not email or not claims.get("sub")):
             return fail("claims")
-        session = self.start_session(self.user_by_google(str(claims["sub"]), email))
+        uid = self.user_by_google(str(claims["sub"]), email)
+        self.save_profile(uid, claims)
+        session = self.start_session(uid)
         return self.redirect(h, PUBLIC_URL + back, clear + session)
+
+    def save_profile(self, uid, claims):
+        """Name and profile picture from the Google claims (scope "profile"). The picture is fetched here once, small,
+        with a generic client name; any failure just leaves the old one (sign-in never depends on it)."""
+        name = str(claims.get("name") or "").strip()[:80] or None
+        pic, typ = None, None
+        url = str(claims.get("picture") or "")
+        if url.startswith("https://") and urllib.parse.urlparse(url).hostname.endswith(".googleusercontent.com"):
+            url = re.sub(r"=s\d+(-c)?$", "", url) + "=s128-c"  # Google's size suffix: 128 px, square
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=8, context=ssl.create_default_context()) as r:
+                    typ = (r.headers.get("Content-Type") or "").split(";")[0].strip()
+                    data = r.read(200_001)
+                if typ in ("image/jpeg", "image/png", "image/webp") and 0 < len(data) <= 200_000:
+                    pic = data
+            except Exception as e:
+                self.log(f"auth: profile picture not fetched ({type(e).__name__})")
+        with self.lock:
+            if pic:
+                self.db.execute("UPDATE users SET name = ?, picture = ?, picture_type = ? WHERE id = ?", (name, pic, typ, uid))
+            else:
+                self.db.execute("UPDATE users SET name = COALESCE(?, name) WHERE id = ?", (name, uid))
 
     # ---------- email link ----------
     def email_start(self, h):

@@ -223,11 +223,18 @@
   "settings.forecast": "Forecast",
   "settings.fcDwd": "DWD",
   "settings.fcOwn": "rainy",
+  "settings.advanced": "Advanced",
+  "settings.advancedHint": "Technical options we are testing.",
+  "settings.designFor": "Design for",
+  "settings.back": "Back",
   "design.plain": "Plain",
   "design.liberty": "Colourful",
   "design.bright": "Classic",
   "design.fiord": "Night blue",
   "design.earth": "Satellite (coarse)",
+  "design.gray": "Greyscale",
+  "design.vintage": "Vintage",
+  "design.night": "Night lights",
 
   // favourites panel
   "favs.add": "Add a place",

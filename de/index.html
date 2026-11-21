@@ -217,6 +217,25 @@
   .alert-card .acct-del { display: flex; justify-content: flex-end; margin: -4px 0 6px; }
   .alert-card .acct-del .off { border: 0; background: none; font: inherit; font-size: 12px; cursor: pointer; padding: 2px 0; }
   .alert-card .seg button.danger { background: var(--temp); border-color: var(--temp); color: #fff; }
+  /* settings pages (v1.37): account with picture, sub-page heads, rows that open a page, design pictures */
+  .alert-card .acct-row { display: flex; align-items: center; gap: 10px; padding: 10px 0 8px; border-top: 1px solid var(--line); }
+  .alert-card .avatar { width: 40px; height: 40px; border-radius: 50%; flex: none; object-fit: cover; background: var(--rain); color: #fff;
+    display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 17px; }
+  .alert-card .acct-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  .alert-card .acct-name { font-weight: 600; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .alert-card .acct-mail { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .alert-card .set-head { display: flex; align-items: center; gap: 4px; margin: -4px 0 6px; }
+  .alert-card .set-head h3 { margin: 0; }
+  .alert-card .set-back { border: 0; background: none; color: var(--fg); font-size: 26px; line-height: 1; padding: 0 10px 4px 0; cursor: pointer; }
+  .alert-card button.row.nav { width: 100%; background: none; border: 0; border-top: 1px solid var(--line); color: var(--fg); font: inherit; font-size: 14px; text-align: left; cursor: pointer; }
+  .alert-card .nav-sub { color: var(--muted); font-size: 13px; white-space: nowrap; }
+  .alert-card .adv-hint { margin: 0 0 6px; }
+  .alert-card .designs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; padding: 10px 0 6px; border-top: 1px solid var(--line); }
+  .alert-card .dsg { border: 2px solid transparent; border-radius: 12px; padding: 2px; background: none; color: var(--fg); font: inherit; font-size: 13px; cursor: pointer; text-align: left; }
+  .alert-card .dsg img { display: block; width: 100%; aspect-ratio: 3 / 2; object-fit: cover; background: var(--line); border-radius: 9px; }
+  .alert-card .dsg span { display: block; padding: 4px 2px 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .alert-card .dsg.on { border-color: var(--rain); }
+  .alert-card .dsg.on span { font-weight: 600; }
   .login-body { width: 100%; max-width: 420px; margin: 16px auto 0; display: flex; flex-direction: column; gap: 12px; }
   .login-body p { margin: 0; font-size: 14px; line-height: 1.45; color: var(--muted); }
   .login-body p.msg { color: var(--fg); }
@@ -485,11 +504,11 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=1.36"></script>
-<script src="lang/en.js?v=1.36"></script>
+<script src="lang/de.js?v=1.37"></script>
+<script src="lang/en.js?v=1.37"></script>
 <script>
 "use strict";
-const VERSION = "v1.36";
+const VERSION = "v1.37";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -692,6 +711,8 @@ const state = {
   views: {},             // "rain-short" etc. -> { frames, nowIdx, idx, split }
   playing: null,
 };
+// v1.37: a reload from the settings (new design or colours) comes back in the mode it left (sunny or rainy)
+try { if (sessionStorage.getItem("rainy.reloadMode") === "sun") state.mode = "sun"; sessionStorage.removeItem("rainy.reloadMode"); } catch {}
 const cur = () => state.views[`${state.mode}-${state.range}`] || { frames: [], nowIdx: 0, idx: 0 };
 let locRequest = 0;      // increments per location load; stale responses are dropped
 const EARLY_URLS = [];   // the place's radar and weather-model URLs, kept with rainy.last for the next start's <head>
@@ -706,12 +727,15 @@ const imgFrames = new Map();
 // fc = "own" (our own forecast on DWD's radar, the default since v1.28: better than DWD's at the gauges from +30 min
 // every day, user decision 20.11.2026) | "dwd" (DWD's 2 h radar forecast). fcPick: chosen in the settings - before
 // v1.28 every saved style held fc "dwd", so only an explicit pick keeps DWD.
+const DESIGN_KEYS = ["plain", "liberty", "bright", "fiord", "earth", "gray", "vintage", "night"];
 const MAP_STYLE = (() => {
   let st = {};
   try { st = JSON.parse(localStorage.getItem("rainy.style")) || {}; } catch {}
   return { sat: st.sat === "photo" ? "photo" : "clouds", theme: ["light", "dark", "auto"].includes(st.theme) ? st.theme : "dark", // dark by default (07.11.)
     rain: st.rain === "eu" ? "eu" : "mix", area: ["de", "na"].includes(st.area) ? st.area : "eu", eusrc: st.eusrc === "opera" ? "opera" : "nat" /* own Europe picture by default (user, 14.11.2026) */, render: st.render === "img" ? "img" : "gl", // WebGL by default (10.11.); pictures without WebGL
-    fc: (new URLSearchParams(location.search).get("fc") || (st.fcPick ? st.fc : "own")) === "dwd" ? "dwd" : "own", fcPick: st.fcPick === true, design: ["liberty", "bright", "fiord", "earth"].includes(st.design) ? st.design : "plain",
+    fc: (new URLSearchParams(location.search).get("fc") || (st.fcPick ? st.fc : "own")) === "dwd" ? "dwd" : "own", fcPick: st.fcPick === true, design: DESIGN_KEYS.includes(st.design) ? st.design : "plain",
+    // v1.37: sunny has its own map design (before: one for both; that one stays sunny's until changed there)
+    designSun: DESIGN_KEYS.includes(st.designSun) ? st.designSun : DESIGN_KEYS.includes(st.design) ? st.design : "plain",
     warn: st.warn === "on" ? "on" : "off" /* warnings + lightning on the map and the warning line: off by default (user, 18.11.2026) */ };
 })();
 // Edition: "de" = first public version (Germany: rain radar 2 h + 24 h / 3 days; sunny 2 h from the server's DWD satellite
@@ -760,17 +784,26 @@ const FC_OWN = DE_ONLY && !EU_AREA && MAP_STYLE.fc === "own"; // our own forecas
 if (MAP_STYLE.theme !== "auto") document.documentElement.classList.add(`theme-${MAP_STYLE.theme}`);
 const dark = MAP_STYLE.theme === "auto" ? window.matchMedia("(prefers-color-scheme: dark)").matches : MAP_STYLE.theme === "dark";
 document.body.classList.toggle("dark", dark);
-// Map designs, all free also for commercial use: OpenFreeMap styles (OpenStreetMap data) and NASA Blue Marble.
-// "plain" follows the app theme (light / dark); the others have their own look.
+// Map designs, all free also for commercial use: OpenFreeMap styles (OpenStreetMap data) and NASA imagery (public
+// domain). "plain" follows the app theme (light / dark); the others have their own look. v1.37: "gray" and "vintage"
+// are OpenFreeMap Liberty through a colour filter, "night" is NASA's Black Marble (city lights, VIIRS 2016) - like
+// "earth" a picture of ~500 m pixels under our own borders and names. Rainy and sunny each have their own design.
+const NASA = "https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/";
 const MAP_DESIGNS = {
   plain: { label: t("design.plain"), style: dark ? "dark" : "positron", dark },
   liberty: { label: t("design.liberty"), style: "liberty", dark: false },
   bright: { label: t("design.bright"), style: "bright", dark: false },
   fiord: { label: t("design.fiord"), style: "fiord", dark: true },
-  earth: { label: t("design.earth"), style: "dark", dark: true },
+  gray: { label: t("design.gray"), style: "liberty", dark: false, filter: "grayscale(1) contrast(1.05)" },
+  vintage: { label: t("design.vintage"), style: "liberty", dark: false, filter: "sepia(0.65) saturate(0.8) brightness(0.97)" },
+  earth: { label: t("design.earth"), style: "dark", dark: true,
+    tiles: `${NASA}BlueMarble_ShadedRelief_Bathymetry/default/GoogleMapsCompatible_Level8/{z}/{y}/{x}.jpeg` },
+  night: { label: t("design.night"), style: "dark", dark: true,
+    tiles: `${NASA}VIIRS_Black_Marble/default/2016-01-01/GoogleMapsCompatible_Level8/{z}/{y}/{x}.png` },
 };
-const BASEMAP = MAP_DESIGNS[MAP_STYLE.design] || MAP_DESIGNS.plain;
-const mapDark = BASEMAP.dark;
+const designFor = (mode) => (mode === "sun" ? MAP_STYLE.designSun : MAP_STYLE.design);
+let curDesign = designFor(state.mode); // the design on the map now (changes with the mode, see applyView)
+let mapDark = MAP_DESIGNS[curDesign].dark;
 // Zoom out at most to about Germany and its neighbours (any screen size), and stay over Europe.
 const EUROPE = NA_AREA ? L.latLngBounds([[25, -124], [50, -67]]) : L.latLngBounds([[36, -10], [60, 30]]); // widest useful view
 const map = L.map("map", {
@@ -825,10 +858,22 @@ async function basemapStyle(name) {
 }
 // Basemap: OpenFreeMap vector tiles (free, also for commercial use). The style is split in two so the
 // weather sits between the map (below) and the place names (above).
-(async function basemap() {
+// v1.37: built again when the mode switches to one with another design (rainy and sunny each have their own); the
+// old layers stay until the new map has drawn, so there is no empty flash. Styles are fetched once per session.
+const styleCache = {};
+let basemapToken = 0, basemapPic = null;
+async function buildBasemap(key) {
+  const d = MAP_DESIGNS[key] || MAP_DESIGNS.plain, token = ++basemapToken;
+  curDesign = key; // at once: a switch back while this one loads builds the old one again (and cancels this one)
   try {
-    const style = await basemapStyle(BASEMAP.style);
-    if (MAP_STYLE.design === "plain" && mapDark) { // lift the near-black OpenFreeMap dark style to the app's dark grey, water a shade darker
+    const style = structuredClone(await (styleCache[d.style] ??= basemapStyle(d.style).catch((e) => { delete styleCache[d.style]; throw e; })));
+    if (token !== basemapToken) return; // another design was asked for meanwhile
+    const old = [basemapBase, basemapTop, basemapPic].filter(Boolean);
+    basemapBase = basemapTop = basemapPic = null;
+    for (const k in WATER_PAINT) delete WATER_PAINT[k];
+    for (const k in BORDER_PAINT) delete BORDER_PAINT[k];
+    mapDark = d.dark;
+    if (key === "plain" && mapDark) { // lift the near-black OpenFreeMap dark style to the app's dark grey, water a shade darker
       const tone = { background: "#2a2e35", water: "#1c1f24", landuse_residential: "#30343b", building: "#33373e", landcover_wood: "#2f3339", landuse_park: "#2f3339" };
       for (const l of style.layers) if (tone[l.id]) l.paint[l.type === "background" ? "background-color" : "fill-color"] = tone[l.id];
     }
@@ -899,10 +944,9 @@ async function basemapStyle(name) {
     borders.splice(1, 0, casing("rainy_border_state", ["interpolate", ["linear"], ["zoom"], 4, 1.3, 7, 2, 10, 2.9, 13, 3.6]));
     borders.splice(3, 0, casing("rainy_border_country", ["interpolate", ["linear"], ["zoom"], 3, 2.2, 6, 3.3, 10, 4.6, 13, 5.6]));
     const part = (keep) => ({ ...style, layers: style.layers.filter(keep) });
-    if (MAP_STYLE.design === "earth") {
-      // NASA Blue Marble (public domain, ~500 m pixels, so blurry when zoomed in to a city)
-      L.tileLayer("https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/BlueMarble_ShadedRelief_Bathymetry/default/" +
-        "GoogleMapsCompatible_Level8/{z}/{y}/{x}.jpeg", { maxNativeZoom: 8, className: "basemap" }).addTo(map);
+    if (d.tiles) {
+      // NASA Blue Marble / Black Marble (public domain, ~500 m pixels, so blurry when zoomed in to a city)
+      basemapPic = L.tileLayer(d.tiles, { maxNativeZoom: 8, className: "basemap" }).addTo(map);
     } else {
       // sunny (15.11.2026): the warm tint of clear sky lies in the base map UNDER the water and the clouds - only land
       // turns warm, the water stays nearly black, and clouds are the same grey-white over land and sea. Before, the
@@ -911,12 +955,13 @@ async function basemapStyle(name) {
       const firstWater = baseLayers.findIndex((l) => l["source-layer"] === "water" && l.type === "fill");
       const tint = { id: "rainy_sun_tint", type: "fill", source: "rainy_world", layout: { visibility: "none" },
         paint: { "fill-color": `rgb(${SUN_RGB.join(",")})`, "fill-opacity": 0 } };
-      if (SUN_LOOK) baseLayers.splice(firstWater >= 0 ? firstWater : baseLayers.length, 0, tint);
+      if (key === "plain") baseLayers.splice(firstWater >= 0 ? firstWater : baseLayers.length, 0, tint);
       const world = { type: "geojson", data: { type: "Feature", properties: {}, geometry: { type: "Polygon",
         coordinates: [[[-180, -85], [180, -85], [180, 85], [-180, 85], [-180, -85]]] } } };
       const base = L.maplibreGL({ style: { ...style, sources: { ...style.sources, rainy_world: world }, layers: baseLayers },
         interactive: false }).addTo(map);
       base.getContainer().classList.add("basemap");
+      if (d.filter) base.getContainer().style.filter = d.filter;
       basemapBase = base;
       base.getMaplibreMap().on("load", applyBasemapMode);
     }
@@ -937,8 +982,10 @@ async function basemapStyle(name) {
         "line-opacity": 0.45, "line-width": scale(l.paint["line-width"] ?? 1, 0.6) } }));
     basemapTop = L.maplibreGL({ style: { ...top, layers: [...sunWater, ...roadTop, ...borders, ...top.layers] }, interactive: false, pane: "labels" }).addTo(map);
     basemapTop.getMaplibreMap().on("load", applyBasemapMode);
+    const dropOld = () => { for (const l of old.splice(0)) map.removeLayer(l); };
+    if (old.length) { basemapTop.getMaplibreMap().once("idle", dropOld); setTimeout(dropOld, 2500); }
   } catch (err) { console.warn("basemap failed", err); }
-})();
+}
 let basemapTop = null, basemapBase = null;
 const WATER_PAINT = {};
 // Sun mode on the base map: the land tint (rainy_sun_tint, opacity set per frame by applySunTint) and nearly black
@@ -948,7 +995,7 @@ const WATER_PAINT = {};
 const styleReady = (m) => { try { return !!(m && m.getStyle() && m.getStyle().layers); } catch { return false; } };
 function applyBaseMode() {
   const b = basemapBase && basemapBase.getMaplibreMap();
-  if (!styleReady(b) || !SUN_LOOK) return;
+  if (!styleReady(b) || !SUN_LOOK || curDesign !== "plain") return;
   const sun = state.mode === "sun";
   if (b.getLayer("rainy_sun_tint")) b.setLayoutProperty("rainy_sun_tint", "visibility", sun ? "visible" : "none");
   for (const l of b.getStyle().layers) {
@@ -985,6 +1032,7 @@ function applyBasemapMode() {
     m.setPaintProperty(l.id, "line-color", sun || !mapDark ? "#3a4048" : "#dfe3ea");
 }
 const BORDER_PAINT = {};
+buildBasemap(curDesign);
 const youAreHere = L.circleMarker([FALLBACK.lat, FALLBACK.lon], {
   radius: 7, color: "#fff", weight: 3, fillColor: "#2f7bf5", fillOpacity: 1, pane: "labels",
 }).addTo(map);
@@ -1111,13 +1159,13 @@ const rgba = (c, alphaScale = 1) => `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${
 // Clouds: light on the dark map, slate on the light map. Clear sky by day gets a warm sun tint.
 // Follows the MAP (design), not the app theme: white clouds on the light designs "Klassisch" / "Bunt" were almost
 // invisible (user, 14.11.2026); on a light map they are a dark slate grey.
-const CLOUD_RGB = mapDark ? [236, 240, 247] : [96, 104, 118];
+const CLOUD_RGB = MAP_DESIGNS[MAP_STYLE.designSun].dark ? [236, 240, 247] : [96, 104, 118]; // clouds only show in sunny
 // Clear sky by day: a warm yellow-to-red glow (pick a variant for testing with ?sun=1..4)
 const SUN_VARIANTS = { 1: [[255, 150, 20], 0.34], 2: [[255, 95, 35], 0.34], 3: [[255, 200, 40], 0.3], 4: [[240, 60, 70], 0.3] };
 const [SUN_RGB, SUN_ALPHA_LOOK] = SUN_VARIANTS[new URLSearchParams(location.search).get("sun")] || SUN_VARIANTS[1];
 // The sun look (orange map + warm tint on clear sky) belongs to the default design "Schlicht"; with the other designs
 // sunny shows their map as it is with the clouds on top (user, 14.11.2026).
-const SUN_LOOK = MAP_STYLE.design === "plain";
+const SUN_LOOK = MAP_STYLE.designSun === "plain"; // v1.37: sunny's own design
 const SUN_ALPHA = 0; // the tint is a base-map layer since v1.17 (applySunTint); SUN_ALPHA_LOOK is its strength
 document.body.classList.toggle("sun-look", SUN_LOOK);
 // Satellite look (test with ?sat=photo): "clouds" = clouds from the satellite photo drawn as our cloud layer with
@@ -3269,17 +3317,21 @@ playBtn.addEventListener("click", () => (state.playing ? stop() : play()));
 
 function needsGrid() { return cur().frames.some((f) => f.map.kind === "model" || f.map.kind === "nowcast"); }
 function needsNowcast() { return cur().frames.some((f) => f.map.kind === "nowcast"); }
+function modeChrome() {
+  document.body.classList.toggle("sunny", state.mode === "sun");
+  document.getElementById("brandName").textContent = state.mode === "sun" ? "sunny" : "rainy";
+  document.querySelector("#brandLogo use").setAttribute("href", state.mode === "sun" ? "#sunIcon" : "#logo");
+  document.getElementById("modeRain").classList.toggle("on", state.mode === "rain");
+  document.getElementById("modeSun").classList.toggle("on", state.mode === "sun");
+}
 function applyView() {
   if (typeof applyThunderLayers === "function") applyThunderLayers();
   stop();
   updateNodata();
   cur().idx = cur().nowIdx; // every view opens at "now"
-  document.body.classList.toggle("sunny", state.mode === "sun");
+  modeChrome();
+  if (designFor(state.mode) !== curDesign) buildBasemap(designFor(state.mode)); // rainy and sunny: own designs (v1.37)
   applyBasemapMode();
-  document.getElementById("brandName").textContent = state.mode === "sun" ? "sunny" : "rainy";
-  document.querySelector("#brandLogo use").setAttribute("href", state.mode === "sun" ? "#sunIcon" : "#logo");
-  document.getElementById("modeRain").classList.toggle("on", state.mode === "rain");
-  document.getElementById("modeSun").classList.toggle("on", state.mode === "sun");
   if (needsGrid()) loadGrid();
   if (needsNowcast()) { loadNowcastBase(); loadMotion(); }
   updateHeader();
@@ -3674,16 +3726,54 @@ map.on("click", () => document.getElementById("alertCard").classList.remove("sho
 // Rain alert for the own position (plus its settings and further places) and the map look. Map changes re-initialise
 // the map colours, so the page reloads with the new choice; alert changes apply at once.
 const BETA_MARK = `<span class="beta">${t("common.beta")}</span>`;
+// v1.37 (user, 21.11.2026): the card has pages - the main page (account with the Google picture, language, rain
+// alert, warnings) and two sub-pages: "Design" (colours, a design per mode - rainy and sunny each have their own -
+// each shown with a sample picture) and "Erweitert" (the technical switches still being tested: radar source, area,
+// WebGL, forecast; they will probably go away later).
+let settingsPage = "main", designMode = null; // designMode: which mode the design page edits ("rain" | "sun")
+// Sample pictures (tools/design_thumbs.py): one per design and mode; "plain" follows the colours (light / dark).
+const designThumb = (k, m) => `/img/design/${k}-${m}${k === "plain" ? (dark ? "-dark" : "-light") : ""}.webp`;
+// A change that is set up once at start (colours, clouds, the technical switches, sunny's design): save, sync and
+// reload - back in the same mode.
+function saveStyleAndReload(next) {
+  try { localStorage.setItem("rainy.style", JSON.stringify(next)); } catch {}
+  try { sessionStorage.setItem("rainy.reloadMode", state.mode); sessionStorage.setItem("rainy.reopen", JSON.stringify({ page: settingsPage, mode: designMode })); } catch {}
+  flushSync(true); // keepalive request: survives the reload
+  location.reload();
+}
 function showSettings() {
   const card = document.getElementById("styleCard"), a = loadAlerts();
   const seg = (key, opts) => `<span class="seg">${opts.map(([v, label]) =>
     `<button data-${key}="${v}" class="${MAP_STYLE[key] === v ? "on" : ""}">${label}</button>`).join("")}</span>`;
-  // language: each one listed by its own name
-  const langSeg = `<span class="seg">${SUPPORTED.map((c) =>
-    `<button data-lang="${c}" class="${c === LANG ? "on" : ""}">${esc((DICT[c] && DICT[c]["meta.name"]) || c)}</button>`).join("")}</span>`;
-  card.innerHTML = `<h3>${t("settings.title")}</h3>
+  const row = (label, control) => `<div class="row"><span>${label}</span>${control}</div>`;
+  const head = (title) => `<div class="set-head"><button class="set-back" data-page="main" aria-label="${esc(t("settings.back"))}">‹</button><h3>${title}</h3></div>`;
+  const nav = (page, label, sub) => `<button class="row nav" data-page="${page}"><span>${label}</span><span class="nav-sub">${sub ? esc(sub) + " " : ""}›</span></button>`;
+  const advanced = [
+    DE_ONLY ? "" : row(t("settings.rain"), seg("rain", [["mix", t("settings.rainMix")], ["eu", t("settings.rainEu")]])),
+    DE_ONLY && API_BASE ? row(t("settings.area"), seg("area", [["de", t("settings.areaDe")], ["eu", t("settings.areaEu") + BETA_MARK], ["na", t("settings.areaNa") + BETA_MARK]])) : "",
+    EU_AREA && !NA_AREA && API_BASE ? row(t("settings.euSource"), seg("eusrc", [["opera", t("settings.euSourceOpera")], ["nat", t("settings.euSourceNat") + BETA_MARK]])) : "",
+    API_BASE && GL_OK ? row(t("settings.render"), seg("render", [["img", t("settings.renderImg")], ["gl", t("settings.renderGl") + BETA_MARK]])) : "",
+    DE_ONLY && API_BASE && !EU_AREA ? row(t("settings.forecast"), seg("fc", [["dwd", t("settings.fcDwd")], ["own", t("settings.fcOwn") + BETA_MARK]])) : "",
+  ].join("");
+  if (settingsPage === "advanced" && !advanced) settingsPage = "main";
+  let body;
+  if (settingsPage === "design") {
+    const m = designMode || state.mode, key = m === "sun" ? "designSun" : "design";
+    body = `${head(t("settings.design"))}
+    ${row(t("settings.colors"), seg("theme", [["auto", t("settings.themeAuto")], ["light", t("settings.themeLight")], ["dark", t("settings.themeDark")]]))}
+    ${row(t("settings.designFor"), `<span class="seg"><button data-dmode="rain" class="${m === "rain" ? "on" : ""}">rainy</button><button data-dmode="sun" class="${m === "sun" ? "on" : ""}">sunny</button></span>`)}
+    <div class="designs">${DESIGN_KEYS.map((k) => `<button class="dsg${MAP_STYLE[key] === k ? " on" : ""}" data-pick="${k}" aria-pressed="${MAP_STYLE[key] === k}">
+      <img src="${designThumb(k, m)}" alt="" loading="lazy" onerror="this.style.visibility='hidden'"><span>${esc(MAP_DESIGNS[k].label)}</span></button>`).join("")}</div>
+    ${m === "sun" && !DE_ONLY ? row(t("settings.clouds"), seg("sat", [["clouds", t("settings.cloudsStandard")], ["photo", t("settings.cloudsPhoto")]])) : ""}`;
+  } else if (settingsPage === "advanced") {
+    body = `${head(t("settings.advanced"))}<p class="hint adv-hint">${t("settings.advancedHint")}</p>${advanced}`;
+  } else {
+    // language: each one listed by its own name
+    const langSeg = `<span class="seg">${SUPPORTED.map((c) =>
+      `<button data-lang="${c}" class="${c === LANG ? "on" : ""}">${esc((DICT[c] && DICT[c]["meta.name"]) || c)}</button>`).join("")}</span>`;
+    body = `<h3>${t("settings.title")}</h3>
     ${accountRow()}
-    <div class="row"><span>${t("settings.language")}</span>${langSeg}</div>
+    ${row(t("settings.language"), langSeg)}
     ${ALERTS_POSSIBLE ? `<div class="sec">${t("alert.title")}</div>
     ${!account ? alertLoginRow() : `<label class="row"><span>${t("settings.ownLoc")}</span><input type="checkbox" data-own${a.own ? " checked" : ""}></label>
     <p class="hint">${t("settings.ownHint")}</p>
@@ -3691,16 +3781,28 @@ function showSettings() {
     ${a.places.length ? `<div class="row places"><span>${t("settings.morePlaces")}</span><span>${a.places.map((p, i) =>
       `<button data-rm="${i}" title="${esc(t("settings.removeAlert"))}">${esc(p.name || t("settings.place"))} ×</button>`).join("")}</span></div>` : ""}`}` : ""}
     <div class="sec">${t("settings.map")}</div>
-    <div class="row"><span>${t("settings.design")}</span>${seg("design", Object.entries(MAP_DESIGNS).map(([k, d]) => [k, d.label]))}</div>
-    <div class="row"><span>${t("settings.colors")}</span>${seg("theme", [["auto", t("settings.themeAuto")], ["light", t("settings.themeLight")], ["dark", t("settings.themeDark")]])}</div>
-    ${API_BASE ? `<div class="row"><span>${t("settings.warn")}</span>${seg("warn", [["off", t("settings.warnOff")], ["on", t("settings.warnOn")]])}</div>` : ""}
-    ${DE_ONLY ? "" : `<div class="row"><span>${t("settings.clouds")}</span>${seg("sat", [["clouds", t("settings.cloudsStandard")], ["photo", t("settings.cloudsPhoto")]])}</div>
-    <div class="row"><span>${t("settings.rain")}</span>${seg("rain", [["mix", t("settings.rainMix")], ["eu", t("settings.rainEu")]])}</div>`}
-    ${DE_ONLY && API_BASE ? `<div class="row"><span>${t("settings.area")}</span>${seg("area", [["de", t("settings.areaDe")], ["eu", t("settings.areaEu") + BETA_MARK], ["na", t("settings.areaNa") + BETA_MARK]])}</div>` : ""}
-    ${EU_AREA && !NA_AREA && API_BASE ? `<div class="row"><span>${t("settings.euSource")}</span>${seg("eusrc", [["opera", t("settings.euSourceOpera")], ["nat", t("settings.euSourceNat") + BETA_MARK]])}</div>` : ""}
-    ${API_BASE && GL_OK ? `<div class="row"><span>${t("settings.render")}</span>${seg("render", [["img", t("settings.renderImg")], ["gl", t("settings.renderGl") + BETA_MARK]])}</div>` : ""}
-    ${DE_ONLY && API_BASE && !EU_AREA ? `<div class="row"><span>${t("settings.forecast")}</span>${seg("fc", [["dwd", t("settings.fcDwd")], ["own", t("settings.fcOwn") + BETA_MARK]])}</div>` : ""}
-    <div class="actions"><span></span><button class="done">${t("common.done")}</button></div>`;
+    ${API_BASE ? row(t("settings.warn"), seg("warn", [["off", t("settings.warnOff")], ["on", t("settings.warnOn")]])) : ""}
+    ${nav("design", t("settings.design"), MAP_DESIGNS[designFor(state.mode)].label)}
+    ${advanced ? nav("advanced", t("settings.advanced")) : ""}`;
+  }
+  card.innerHTML = `${body}<div class="actions"><span></span><button class="done">${t("common.done")}</button></div>`;
+  card.querySelectorAll("[data-page]").forEach((b) => b.addEventListener("click", () => {
+    settingsPage = b.dataset.page; designMode = null; confirmDelete = false;
+    showSettings(); card.scrollTop = 0;
+  }));
+  card.querySelectorAll("[data-dmode]").forEach((b) => b.addEventListener("click", () => { designMode = b.dataset.dmode; showSettings(); }));
+  // a design: rainy's applies at once (the map is rebuilt, or on the next switch to rainy); sunny's is set up at start
+  // (cloud colour, the sun look), so it reloads like the colours
+  card.querySelectorAll("[data-pick]").forEach((b) => b.addEventListener("click", () => {
+    const m = designMode || state.mode, key = m === "sun" ? "designSun" : "design", k = b.dataset.pick;
+    if (MAP_STYLE[key] === k) return;
+    if (key === "designSun") { designMode = m; return saveStyleAndReload({ ...MAP_STYLE, designSun: k }); }
+    MAP_STYLE.design = k;
+    try { localStorage.setItem("rainy.style", JSON.stringify(MAP_STYLE)); } catch {}
+    scheduleSync();
+    if (state.mode === "rain") buildBasemap(k);
+    showSettings();
+  }));
   const update = () => alertsUpdated(a);
   bindAlertControls(card, a, update);
   const own = card.querySelector("[data-own]");
@@ -3712,12 +3814,10 @@ function showSettings() {
     a.places.splice(+b.dataset.rm, 1);
     update(); renderPlace(); showSettings();
   }));
-  card.querySelectorAll("[data-sat], [data-theme], [data-rain], [data-fc], [data-design], [data-area], [data-render], [data-eusrc], [data-warn]").forEach((b) => b.addEventListener("click", () => {
-    const key = ["sat", "theme", "rain", "fc", "design", "area", "render", "eusrc", "warn"].find((k) => b.dataset[k] != null), next = { ...MAP_STYLE, [key]: b.dataset[key], ...(key === "fc" ? { fcPick: true } : {}) };
+  card.querySelectorAll("[data-sat], [data-theme], [data-rain], [data-fc], [data-area], [data-render], [data-eusrc], [data-warn]").forEach((b) => b.addEventListener("click", () => {
+    const key = ["sat", "theme", "rain", "fc", "area", "render", "eusrc", "warn"].find((k) => b.dataset[k] != null), next = { ...MAP_STYLE, [key]: b.dataset[key], ...(key === "fc" ? { fcPick: true } : {}) };
     if (next[key] === MAP_STYLE[key]) return;
-    try { localStorage.setItem("rainy.style", JSON.stringify(next)); } catch {}
-    flushSync(true); // keepalive request: survives the reload
-    location.reload();
+    saveStyleAndReload(next);
   }));
   card.querySelectorAll("[data-lang]").forEach((b) => b.addEventListener("click", () => setLang(b.dataset.lang)));
   const loginBtn = card.querySelector("[data-login]"), logoutBtn = card.querySelector("[data-logout]");
@@ -3738,8 +3838,14 @@ document.getElementById("styleBtn").addEventListener("click", () => {
   const card = document.getElementById("styleCard");
   document.getElementById("aboutCard").classList.remove("show");
   confirmDelete = false;
-  if (card.classList.contains("show")) card.classList.remove("show"); else showSettings();
+  if (card.classList.contains("show")) card.classList.remove("show"); else { settingsPage = "main"; designMode = null; showSettings(); }
 });
+// back from a reload the settings asked for: the card opens again on the same page
+try {
+  const r = JSON.parse(sessionStorage.getItem("rainy.reopen"));
+  sessionStorage.removeItem("rainy.reopen");
+  if (r) setTimeout(() => { settingsPage = r.page || "main"; designMode = r.mode || null; showSettings(); }, 400);
+} catch {}
 map.on("click", () => document.getElementById("styleCard").classList.remove("show"));
 
 // Jump the map to a place and show its forecast.
@@ -3916,7 +4022,7 @@ document.getElementById("searchClose").addEventListener("click", closeSearch);
 // server, so that the changes of each side can be told apart (local change -> push, server change -> apply).
 const SYNC_KEYS = { favs: "rainy.favs", favRange: "rainy.favRange", style: "rainy.style", hours: "rainy.hours", alerts: "rainy.alertset" };
 const SYNC_JSON = new Set(["favs", "style", "alerts"]);
-let account = null, authProviders = null, syncTimer = null;
+let account = null, authProviders = null, syncTimer = null, accountName = null, accountPic = false;
 // referrerPolicy "same-origin": with the site-wide no-referrer policy browsers would send "Origin: null" on our own
 // POST/PUT/DELETE, and the server only accepts writes from our own pages.
 const apiFetch = (path, opts = {}) => fetch(`${API_BASE}${path}`, { credentials: "include", cache: "no-store",
@@ -3965,7 +4071,7 @@ function applySynced(d) {
   // The map look is set up once at start (as with a change in the settings card): reload when it really differs.
   // Loop-safe: after the reload the stored style equals d.style.
   if (d.style && stableJSON(before.style) !== stableJSON(d.style)
-      && ["sat", "theme", "rain", "fc", "design"].some((k) => d.style[k] != null && d.style[k] !== MAP_STYLE[k])) location.reload();
+      && ["sat", "theme", "rain", "fc", "design", "designSun"].some((k) => d.style[k] != null && d.style[k] !== MAP_STYLE[k])) location.reload();
 }
 async function pushSynced(data, keepalive = false) {
   const r = await apiFetch("/api/user/data", { method: "PUT", body: JSON.stringify({ data }), keepalive });
@@ -4019,8 +4125,12 @@ function refreshSettings() { if (document.getElementById("styleCard").classList.
 // Account row at the top of the settings card (only when our server offers a sign-in method).
 // Deleting the account takes a second tap (like the other settings, no browser dialog).
 let confirmDelete = false;
+// v1.37: with the Google picture and name (kept by our server, /api/user/picture); else the first letter.
 function accountRow() {
-  if (account) return `<div class="row"><span class="acct" title="${esc(account)}">${esc(account)}</span>` +
+  if (account) return `<div class="acct-row">${accountPic ? `<img class="avatar" src="${API_BASE}/api/user/picture" alt="">`
+      : `<span class="avatar" aria-hidden="true">${esc((accountName || account).trim().charAt(0).toUpperCase())}</span>`}` +
+    `<span class="acct-text"><span class="acct-name" title="${esc(accountName || account)}">${esc(accountName || account)}</span>` +
+    `${accountName ? `<span class="acct-mail" title="${esc(account)}">${esc(account)}</span>` : ""}</span>` +
     `<span class="seg"><button data-logout>${t("account.logout")}</button></span></div>` +
     (confirmDelete ? `<p class="hint">${t("account.deleteAsk")}</p><div class="acct-del"><span class="seg">` +
       `<button data-del-cancel>${t("account.cancel")}</button><button class="danger" data-del-yes>${t("account.deleteConfirm")}</button></span></div>`
@@ -4036,7 +4146,7 @@ async function checkAccount() {
   try { me = await (await apiFetch("/api/me")).json(); } catch { return; } // offline / no server: nothing changes
   authProviders = me.providers || null;
   if (!me.email) { if (account || loadSyncState().email) signedOut(); else refreshSettings(); return; }
-  account = me.email;
+  account = me.email; accountName = me.name || null; accountPic = !!me.picture;
   refreshSettings();
   pullSynced().catch((e) => console.warn("sync", e));
 }
@@ -4127,6 +4237,7 @@ try {
 
 (async function init() {
   const params = new URLSearchParams(location.search);
+  if (state.mode === "sun") modeChrome(); // back from a settings reload in sunny (v1.37)
   // Landing pages (/regenradar/<place>/, tools/make_landing.py) set window.PRESET = {lat, lon, zoom, name}: open that
   // place at that zoom instead of the user's position, unless the URL itself names a place.
   const PRESET = window.PRESET;
@@ -4145,6 +4256,7 @@ try {
     youAreHere.setLatLng([cached.lat, cached.lon]);
     map.setView([cached.lat, cached.lon], cached.zoom, { animate: false });
     await setLocation(cached, false, cached.name);
+    if (state.mode === "sun") applyView();
   }
   // Germany edition: a place outside the radar area (e.g. on holiday in Italy) has no radar frames, so the map would
   // stay empty. Then show the Germany overview with its radar instead; the user can still pick any place.
@@ -4198,6 +4310,7 @@ try {
       renderFrame(); drawChart();
     }
   }
+  if (state.mode === "sun") applyView();
   setInterval(refreshAll, 5 * 60e3);
 })();
 </script>

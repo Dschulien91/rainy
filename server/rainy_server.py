@@ -44,7 +44,8 @@ Endpoints (all CORS-enabled, cache headers suitable for a CDN):
   GET  /api/push/preview?lat=&lon=&lead=&tz=   -> what the alert logic sees at a place (sends nothing)
   Optional login to sync favourites and settings (server/auth.py; Cache-Control no-store, credentialed CORS only for
   our own site, writes need a same-site Origin):
-  GET  /api/me                                 -> {"email", "providers": {"google", "email"}} (401, email null: logged out)
+  GET  /api/me                                 -> {"email", "name", "picture", "providers": {"google", "email"}} (401, email null: logged out)
+  GET  /api/user/picture                       -> the Google profile picture, kept by this server (404 without)
   GET  /api/auth/google?return=/path           -> 302 to Google (OpenID Connect + PKCE); 503 when not configured
   GET  /api/auth/google/callback               -> session cookie rainy_session, 302 to the return path
   POST /api/auth/email {email, lang, return}   -> {"ok": true} and a sign-in link by mail (valid 15 min, single use)
@@ -106,7 +107,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v1.82"
+VERSION = "server-v1.83"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same

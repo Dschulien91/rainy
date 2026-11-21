@@ -222,11 +222,18 @@
   "settings.forecast": "Vorhersage",
   "settings.fcDwd": "DWD",
   "settings.fcOwn": "rainy",
+  "settings.advanced": "Erweitert",
+  "settings.advancedHint": "Technische Optionen, die wir gerade testen.",
+  "settings.designFor": "Design für",
+  "settings.back": "Zurück",
   "design.plain": "Schlicht",
   "design.liberty": "Bunt",
   "design.bright": "Klassisch",
   "design.fiord": "Nachtblau",
   "design.earth": "Satellit (grob)",
+  "design.gray": "Graustufen",
+  "design.vintage": "Vintage",
+  "design.night": "Nachtlichter",
 
   // favourites panel
   "favs.add": "Ort hinzufügen",
