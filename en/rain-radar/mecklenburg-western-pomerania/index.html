@@ -493,11 +493,11 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=1.37"></script>
-<script src="lang/en.js?v=1.37"></script>
+<script src="lang/de.js?v=1.38"></script>
+<script src="lang/en.js?v=1.38"></script>
 <script>
 "use strict";
-const VERSION = "v1.37";
+const VERSION = "v1.38";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -3721,6 +3721,7 @@ const BETA_MARK = `<span class="beta">${t("common.beta")}</span>`;
 // WebGL, forecast; they will probably go away later).
 let settingsPage = "main", designMode = null; // designMode: which mode the design page edits ("rain" | "sun")
 // Sample pictures (tools/design_thumbs.py): one per design and mode; "plain" follows the colours (light / dark).
+// A missing sunny picture falls back to the rainy one (same map).
 const designThumb = (k, m) => `/img/design/${k}-${m}${k === "plain" ? (dark ? "-dark" : "-light") : ""}.webp`;
 // A change that is set up once at start (colours, clouds, the technical switches, sunny's design): save, sync and
 // reload - back in the same mode.
@@ -3752,7 +3753,7 @@ function showSettings() {
     ${row(t("settings.colors"), seg("theme", [["auto", t("settings.themeAuto")], ["light", t("settings.themeLight")], ["dark", t("settings.themeDark")]]))}
     ${row(t("settings.designFor"), `<span class="seg"><button data-dmode="rain" class="${m === "rain" ? "on" : ""}">rainy</button><button data-dmode="sun" class="${m === "sun" ? "on" : ""}">sunny</button></span>`)}
     <div class="designs">${DESIGN_KEYS.map((k) => `<button class="dsg${MAP_STYLE[key] === k ? " on" : ""}" data-pick="${k}" aria-pressed="${MAP_STYLE[key] === k}">
-      <img src="${designThumb(k, m)}" alt="" loading="lazy" onerror="this.style.visibility='hidden'"><span>${esc(MAP_DESIGNS[k].label)}</span></button>`).join("")}</div>
+      <img src="${designThumb(k, m)}" alt="" loading="lazy" onerror="${m === "sun" ? "if (!this.dataset.f) { this.dataset.f = 1; this.src = this.src.replace('-sun', '-rain'); } else " : ""}this.style.visibility='hidden'"><span>${esc(MAP_DESIGNS[k].label)}</span></button>`).join("")}</div>
     ${m === "sun" && !DE_ONLY ? row(t("settings.clouds"), seg("sat", [["clouds", t("settings.cloudsStandard")], ["photo", t("settings.cloudsPhoto")]])) : ""}`;
   } else if (settingsPage === "advanced") {
     body = `${head(t("settings.advanced"))}<p class="hint adv-hint">${t("settings.advancedHint")}</p>${advanced}`;
