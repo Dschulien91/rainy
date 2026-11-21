@@ -227,6 +227,7 @@
   "settings.advancedHint": "Technical options we are testing.",
   "settings.designFor": "Design for",
   "settings.back": "Back",
+  "settings.alertSettings": "Lead time, thunder, quiet hours",
   "design.plain": "Plain",
   "design.liberty": "Colourful",
   "design.bright": "Classic",

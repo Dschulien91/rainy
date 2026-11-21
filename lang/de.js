@@ -226,6 +226,7 @@
   "settings.advancedHint": "Technische Optionen, die wir gerade testen.",
   "settings.designFor": "Design für",
   "settings.back": "Zurück",
+  "settings.alertSettings": "Warnzeit, Gewitter, Ruhezeiten",
   "design.plain": "Schlicht",
   "design.liberty": "Bunt",
   "design.bright": "Klassisch",

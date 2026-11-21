@@ -230,6 +230,11 @@
   .alert-card button.row.nav { width: 100%; background: none; border: 0; border-top: 1px solid var(--line); color: var(--fg); font: inherit; font-size: 14px; text-align: left; cursor: pointer; }
   .alert-card .nav-sub { color: var(--muted); font-size: 13px; white-space: nowrap; }
   .alert-card .adv-hint { margin: 0 0 6px; }
+  .alert-card .design-nav { align-items: center; }
+  .alert-card .mini-designs { display: flex; gap: 8px; margin-left: auto; }
+  .alert-card .mini { display: flex; flex-direction: column; align-items: center; gap: 2px; width: 92px; }
+  .alert-card .mini img { width: 92px; height: 61px; object-fit: cover; border-radius: 7px; background: var(--line); display: block; }
+  .alert-card .mini small { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 92px; }
   .alert-card .designs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; padding: 10px 0 6px; border-top: 1px solid var(--line); }
   .alert-card .dsg { border: 2px solid transparent; border-radius: 12px; padding: 2px; background: none; color: var(--fg); font: inherit; font-size: 13px; cursor: pointer; text-align: left; }
   .alert-card .dsg img { display: block; width: 100%; aspect-ratio: 3 / 2; object-fit: cover; background: var(--line); border-radius: 9px; }
@@ -503,11 +508,11 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=1.38"></script>
-<script src="lang/en.js?v=1.38"></script>
+<script src="lang/de.js?v=1.39"></script>
+<script src="lang/en.js?v=1.39"></script>
 <script>
 "use strict";
-const VERSION = "v1.38";
+const VERSION = "v1.39";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -732,9 +737,12 @@ const MAP_STYLE = (() => {
   try { st = JSON.parse(localStorage.getItem("rainy.style")) || {}; } catch {}
   return { sat: st.sat === "photo" ? "photo" : "clouds", theme: ["light", "dark", "auto"].includes(st.theme) ? st.theme : "dark", // dark by default (07.11.)
     rain: st.rain === "eu" ? "eu" : "mix", area: ["de", "na"].includes(st.area) ? st.area : "eu", eusrc: st.eusrc === "opera" ? "opera" : "nat" /* own Europe picture by default (user, 14.11.2026) */, render: st.render === "img" ? "img" : "gl", // WebGL by default (10.11.); pictures without WebGL
-    fc: (new URLSearchParams(location.search).get("fc") || (st.fcPick ? st.fc : "own")) === "dwd" ? "dwd" : "own", fcPick: st.fcPick === true, design: DESIGN_KEYS.includes(st.design) ? st.design : "plain",
-    // v1.37: sunny has its own map design (before: one for both; that one stays sunny's until changed there)
-    designSun: DESIGN_KEYS.includes(st.designSun) ? st.designSun : DESIGN_KEYS.includes(st.design) ? st.design : "plain",
+    fc: (new URLSearchParams(location.search).get("fc") || (st.fcPick ? st.fc : "own")) === "dwd" ? "dwd" : "own", fcPick: st.fcPick === true,
+    // v1.39: "Klassisch" (calmer, grey water) is rainy's default (user, 21.11.2026); only a design picked in the
+    // settings (designPick) keeps another - before, every saved style held "plain" whether chosen or not.
+    design: st.designPick === true && DESIGN_KEYS.includes(st.design) ? st.design : "bright", designPick: st.designPick === true,
+    // v1.37: sunny has its own map design; "plain" stays its default (the sun look belongs to it)
+    designSun: DESIGN_KEYS.includes(st.designSun) ? st.designSun : "plain",
     warn: st.warn === "on" ? "on" : "off" /* warnings + lightning on the map and the warning line: off by default (user, 18.11.2026) */ };
 })();
 // Edition: "de" = first public version (Germany: rain radar 2 h + 24 h / 3 days; sunny 2 h from the server's DWD satellite
@@ -791,7 +799,9 @@ const NASA = "https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/";
 const MAP_DESIGNS = {
   plain: { label: t("design.plain"), style: dark ? "dark" : "positron", dark },
   liberty: { label: t("design.liberty"), style: "liberty", dark: false },
-  bright: { label: t("design.bright"), style: "bright", dark: false },
+  // v1.39: OpenFreeMap Bright made calmer, the water grey instead of blue so it never looks like rain (user, 21.11.)
+  bright: { label: t("design.bright"), style: "bright", dark: false, filter: "saturate(0.85)",
+    water: { fill: "#d5dadf", line: "#c4cbd1", label: "#7d8893" } },
   fiord: { label: t("design.fiord"), style: "fiord", dark: true },
   gray: { label: t("design.gray"), style: "liberty", dark: false, filter: "grayscale(1) contrast(1.05)" },
   vintage: { label: t("design.vintage"), style: "liberty", dark: false, filter: "sepia(0.65) saturate(0.8) brightness(0.97)" },
@@ -872,6 +882,12 @@ async function buildBasemap(key) {
     for (const k in WATER_PAINT) delete WATER_PAINT[k];
     for (const k in BORDER_PAINT) delete BORDER_PAINT[k];
     mapDark = d.dark;
+    if (d.water) for (const l of style.layers) { // own water colours (Klassisch)
+      const sl = l["source-layer"];
+      if (sl === "water" && l.type === "fill") l.paint = { ...l.paint, "fill-color": d.water.fill };
+      else if (sl === "waterway" && l.type === "line") l.paint = { ...l.paint, "line-color": d.water.line };
+      else if ((sl === "waterway" || sl === "water_name") && l.type === "symbol") l.paint = { ...l.paint, "text-color": d.water.label };
+    }
     if (key === "plain" && mapDark) { // lift the near-black OpenFreeMap dark style to the app's dark grey, water a shade darker
       const tone = { background: "#2a2e35", water: "#1c1f24", landuse_residential: "#30343b", building: "#33373e", landcover_wood: "#2f3339", landuse_park: "#2f3339" };
       for (const l of style.layers) if (tone[l.id]) l.paint[l.type === "background" ? "background-color" : "fill-color"] = tone[l.id];
@@ -3612,7 +3628,7 @@ function showAlertLogin(name) {
 
 async function bellClicked(loc, name) {
   if (!account) return showAlertLogin(state.picked ? name : t("alert.ownPlace"));
-  if (!state.picked) return loadAlerts().own ? showSettings() : enableOwnAlert(loc);
+  if (!state.picked) return loadAlerts().own ? (settingsPage = "alerts", designMode = null, showSettings()) : enableOwnAlert(loc);
   if (hasAlert(loc)) return showAlertCard(loc, name);
   if (!(await enableDevice())) return;
   const a = loadAlerts();
@@ -3731,7 +3747,7 @@ const BETA_MARK = `<span class="beta">${t("common.beta")}</span>`;
 // WebGL, forecast; they will probably go away later).
 let settingsPage = "main", designMode = null; // designMode: which mode the design page edits ("rain" | "sun")
 // Sample pictures (tools/design_thumbs.py): one per design and mode; "plain" follows the colours (light / dark).
-// A missing sunny picture falls back to the rainy one (same map).
+// A missing sunny picture falls back to the bare map (no rain on it: that would be wrong for sunny).
 const designThumb = (k, m) => `/img/design/${k}-${m}${k === "plain" ? (dark ? "-dark" : "-light") : ""}.webp`;
 // A change that is set up once at start (colours, clouds, the technical switches, sunny's design): save, sync and
 // reload - back in the same mode.
@@ -3749,6 +3765,7 @@ function showSettings() {
   const head = (title) => `<div class="set-head"><button class="set-back" data-page="main" aria-label="${esc(t("settings.back"))}">‹</button><h3>${title}</h3></div>`;
   const nav = (page, label, sub) => `<button class="row nav" data-page="${page}"><span>${label}</span><span class="nav-sub">${sub ? esc(sub) + " " : ""}›</span></button>`;
   const advanced = [
+    API_BASE ? row(t("settings.warn"), seg("warn", [["off", t("settings.warnOff")], ["on", t("settings.warnOn")]])) : "",
     DE_ONLY ? "" : row(t("settings.rain"), seg("rain", [["mix", t("settings.rainMix")], ["eu", t("settings.rainEu")]])),
     DE_ONLY && API_BASE ? row(t("settings.area"), seg("area", [["de", t("settings.areaDe")], ["eu", t("settings.areaEu") + BETA_MARK], ["na", t("settings.areaNa") + BETA_MARK]])) : "",
     EU_AREA && !NA_AREA && API_BASE ? row(t("settings.euSource"), seg("eusrc", [["opera", t("settings.euSourceOpera")], ["nat", t("settings.euSourceNat") + BETA_MARK]])) : "",
@@ -3763,8 +3780,14 @@ function showSettings() {
     ${row(t("settings.colors"), seg("theme", [["auto", t("settings.themeAuto")], ["light", t("settings.themeLight")], ["dark", t("settings.themeDark")]]))}
     ${row(t("settings.designFor"), `<span class="seg"><button data-dmode="rain" class="${m === "rain" ? "on" : ""}">rainy</button><button data-dmode="sun" class="${m === "sun" ? "on" : ""}">sunny</button></span>`)}
     <div class="designs">${DESIGN_KEYS.map((k) => `<button class="dsg${MAP_STYLE[key] === k ? " on" : ""}" data-pick="${k}" aria-pressed="${MAP_STYLE[key] === k}">
-      <img src="${designThumb(k, m)}" alt="" loading="lazy" onerror="${m === "sun" ? "if (!this.dataset.f) { this.dataset.f = 1; this.src = this.src.replace('-sun', '-rain'); } else " : ""}this.style.visibility='hidden'"><span>${esc(MAP_DESIGNS[k].label)}</span></button>`).join("")}</div>
+      <img src="${designThumb(k, m)}" alt="" loading="lazy" onerror="${m === "sun" ? "if (!this.dataset.f) { this.dataset.f = 1; this.src = this.src.replace('-sun', '-base'); } else " : ""}this.style.visibility='hidden'"><span>${esc(MAP_DESIGNS[k].label)}</span></button>`).join("")}</div>
     ${m === "sun" && !DE_ONLY ? row(t("settings.clouds"), seg("sat", [["clouds", t("settings.cloudsStandard")], ["photo", t("settings.cloudsPhoto")]])) : ""}`;
+  } else if (settingsPage === "alerts" && account) {
+    body = `${head(t("settings.alertSettings"))}
+    <p class="hint">${t("settings.ownHint")}</p>
+    ${alertControls(a)}
+    ${a.places.length ? `<div class="row places"><span>${t("settings.morePlaces")}</span><span>${a.places.map((p, i) =>
+      `<button data-rm="${i}" title="${esc(t("settings.removeAlert"))}">${esc(p.name || t("settings.place"))} ×</button>`).join("")}</span></div>` : ""}`;
   } else if (settingsPage === "advanced") {
     body = `${head(t("settings.advanced"))}<p class="hint adv-hint">${t("settings.advancedHint")}</p>${advanced}`;
   } else {
@@ -3775,19 +3798,18 @@ function showSettings() {
     ${accountRow()}
     ${row(t("settings.language"), langSeg)}
     ${ALERTS_POSSIBLE ? `<div class="sec">${t("alert.title")}</div>
-    ${!account ? alertLoginRow() : `<label class="row"><span>${t("settings.ownLoc")}</span><input type="checkbox" data-own${a.own ? " checked" : ""}></label>
-    <p class="hint">${t("settings.ownHint")}</p>
-    ${alertControls(a)}
-    ${a.places.length ? `<div class="row places"><span>${t("settings.morePlaces")}</span><span>${a.places.map((p, i) =>
-      `<button data-rm="${i}" title="${esc(t("settings.removeAlert"))}">${esc(p.name || t("settings.place"))} ×</button>`).join("")}</span></div>` : ""}`}` : ""}
+    <label class="row"><span>${t("settings.ownLoc")}</span><input type="checkbox" data-own${account && a.own ? " checked" : ""}></label>
+    ${!account ? alertLoginRow() : nav("alerts", t("settings.alertSettings"))}` : ""}
     <div class="sec">${t("settings.map")}</div>
-    ${API_BASE ? row(t("settings.warn"), seg("warn", [["off", t("settings.warnOff")], ["on", t("settings.warnOn")]])) : ""}
-    ${nav("design", t("settings.design"), MAP_DESIGNS[designFor(state.mode)].label)}
+    <button class="row nav design-nav" data-page="design"><span>${t("settings.design")}</span><span class="mini-designs">${["rain", "sun"].map((m) =>
+      `<span class="mini" data-dm="${m}"><img src="${designThumb(designFor(m), m)}" alt="" onerror="${m === "sun" ? "if (!this.dataset.f) { this.dataset.f = 1; this.src = this.src.replace('-sun', '-base'); } else " : ""}this.style.visibility='hidden'">` +
+      `<small>${m === "sun" ? "sunny" : "rainy"} · ${esc(MAP_DESIGNS[designFor(m)].label)}</small></span>`).join("")}</span><span class="nav-sub">›</span></button>
     ${advanced ? nav("advanced", t("settings.advanced")) : ""}`;
   }
   card.innerHTML = `${body}<div class="actions"><span></span><button class="done">${t("common.done")}</button></div>`;
-  card.querySelectorAll("[data-page]").forEach((b) => b.addEventListener("click", () => {
-    settingsPage = b.dataset.page; designMode = null; confirmDelete = false;
+  card.querySelectorAll("[data-page]").forEach((b) => b.addEventListener("click", (e) => {
+    const mini = e.target.closest && e.target.closest("[data-dm]");
+    settingsPage = b.dataset.page; designMode = mini ? mini.dataset.dm : null; confirmDelete = false;
     showSettings(); card.scrollTop = 0;
   }));
   card.querySelectorAll("[data-dmode]").forEach((b) => b.addEventListener("click", () => { designMode = b.dataset.dmode; showSettings(); }));
@@ -3797,7 +3819,7 @@ function showSettings() {
     const m = designMode || state.mode, key = m === "sun" ? "designSun" : "design", k = b.dataset.pick;
     if (MAP_STYLE[key] === k) return;
     if (key === "designSun") { designMode = m; return saveStyleAndReload({ ...MAP_STYLE, designSun: k }); }
-    MAP_STYLE.design = k;
+    MAP_STYLE.design = k; MAP_STYLE.designPick = true;
     try { localStorage.setItem("rainy.style", JSON.stringify(MAP_STYLE)); } catch {}
     scheduleSync();
     if (state.mode === "rain") buildBasemap(k);
@@ -3807,6 +3829,7 @@ function showSettings() {
   bindAlertControls(card, a, update);
   const own = card.querySelector("[data-own]");
   if (own) own.addEventListener("change", async () => {
+    if (!account) { own.checked = false; return showAlertLogin(t("alert.ownPlace")); }
     if (own.checked) { await enableOwnAlert(state.picked ? null : state.loc); Object.assign(a, loadAlerts()); own.checked = a.own; }
     else { a.own = false; update(); renderPlace(); }
   });
