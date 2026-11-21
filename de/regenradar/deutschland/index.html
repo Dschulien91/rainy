@@ -197,7 +197,11 @@
   .alert-card .hint { margin: -4px 0 4px; font-size: 12px; color: var(--muted); }
   .alert-card .device-hint { margin-top: 8px; color: var(--fg); }
   .alert-card .places button { border: 1px solid var(--line); background: none; color: var(--fg); font: inherit; font-size: 13px; padding: 4px 9px; border-radius: 999px; cursor: pointer; margin: 2px 0 2px 4px; }
-  #styleCard { max-height: calc(100vh - var(--sheet-h) - 40px); max-height: calc(100dvh - var(--sheet-h) - 40px); overflow-y: auto; }
+  /* v1.41: the settings cover the whole screen height (over the timeline too), with a free margin all round */
+  #styleCard { top: max(12px, env(safe-area-inset-top)); bottom: max(12px, env(safe-area-inset-bottom)); overflow-y: auto;
+    display: flex; flex-direction: column; }
+  #styleCard > * { flex-shrink: 0; }
+  #styleCard > .actions { margin-top: auto; padding-top: 12px; }
   .alert-card .lead-val { min-width: 54px; text-align: right; font-variant-numeric: tabular-nums; }
   /* small "beta" mark behind features still being verified (own forecast, Europe radar) */
   .beta { font-size: 9px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; opacity: 0.7; margin-left: 3px; vertical-align: 1px; }
@@ -497,11 +501,11 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=1.40"></script>
-<script src="lang/en.js?v=1.40"></script>
+<script src="lang/de.js?v=1.41"></script>
+<script src="lang/en.js?v=1.41"></script>
 <script>
 "use strict";
-const VERSION = "v1.40";
+const VERSION = "v1.41";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -720,7 +724,7 @@ const imgFrames = new Map();
 // fc = "own" (our own forecast on DWD's radar, the default since v1.28: better than DWD's at the gauges from +30 min
 // every day, user decision 20.11.2026) | "dwd" (DWD's 2 h radar forecast). fcPick: chosen in the settings - before
 // v1.28 every saved style held fc "dwd", so only an explicit pick keeps DWD.
-const DESIGN_KEYS = ["plain", "liberty", "bright", "fiord", "earth", "gray", "vintage", "night"];
+const DESIGN_KEYS = ["bright", "plain", "liberty", "fiord", "gray", "vintage", "earth", "night"]; // the default first (v1.41)
 const MAP_STYLE = (() => {
   let st = {};
   try { st = JSON.parse(localStorage.getItem("rainy.style")) || {}; } catch {}
@@ -730,8 +734,9 @@ const MAP_STYLE = (() => {
     // v1.39: "Klassisch" (calmer, grey water) is rainy's default (user, 21.11.2026); only a design picked in the
     // settings (designPick) keeps another - before, every saved style held "plain" whether chosen or not.
     design: st.designPick === true && DESIGN_KEYS.includes(st.design) ? st.design : "bright", designPick: st.designPick === true,
-    // v1.37: sunny has its own map design; "plain" stays its default (the sun look belongs to it)
-    designSun: DESIGN_KEYS.includes(st.designSun) ? st.designSun : "plain",
+    // v1.37: sunny has its own map design; v1.41: Klassisch is its default too (user, 21.11.2026; the orange sun look
+    // stays with "Schlicht"), only a design picked in the settings (designSunPick) keeps another
+    designSun: st.designSunPick === true && DESIGN_KEYS.includes(st.designSun) ? st.designSun : "bright", designSunPick: st.designSunPick === true,
     warn: st.warn === "on" ? "on" : "off" /* warnings + lightning on the map and the warning line: off by default (user, 18.11.2026) */ };
 })();
 // Edition: "de" = first public version (Germany: rain radar 2 h + 24 h / 3 days; sunny 2 h from the server's DWD satellite
@@ -3807,7 +3812,7 @@ function showSettings() {
   card.querySelectorAll("[data-pick]").forEach((b) => b.addEventListener("click", () => {
     const m = designMode || state.mode, key = m === "sun" ? "designSun" : "design", k = b.dataset.pick;
     if (MAP_STYLE[key] === k) return;
-    if (key === "designSun") { designMode = m; return saveStyleAndReload({ ...MAP_STYLE, designSun: k }); }
+    if (key === "designSun") { designMode = m; return saveStyleAndReload({ ...MAP_STYLE, designSun: k, designSunPick: true }); }
     MAP_STYLE.design = k; MAP_STYLE.designPick = true;
     try { localStorage.setItem("rainy.style", JSON.stringify(MAP_STYLE)); } catch {}
     scheduleSync();
