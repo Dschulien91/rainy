@@ -9,7 +9,10 @@ Every method is compared with simple baselines: "persist" (the value at issue ti
 "model" (weather model cloud cover only). A forecast is only worth showing where it beats both.
 
   python score.py [--hours 48] [--since 2026-10-28T20:35] [--sun-map 0.05,0.8] [--visual out.png] [--same]
+                  [--same-with model]
   --same: rain only on the cases where our own forecast exists too (before 16.11. 7-20 % of the records had none)
+  --same-with NAME[,NAME]: rain only on the cases where these shadows exist as well (a shadow recorded later than
+        "own" is otherwise scored on fewer, different cases than the rows it is compared with)
 """
 import argparse
 import glob
@@ -43,6 +46,7 @@ def load_truth(kind, since):
 SINCE = 0  # --since: ignore forecasts issued before this time (e.g. before a live change)
 UNTIL = float("inf")  # --day: only forecasts issued on that UTC day
 SAME = False  # --same: rain cases count only where our own forecast exists too (DWD and own on the same cases)
+SAME_WITH = ()  # --same-with: shadows that must exist as well for a rain case to count
 
 
 def records(kind, since):
@@ -133,6 +137,8 @@ def score_rain(hours):
                             preds.append((name, v))
                 if SAME and not any(k == "own" for k, _ in preds):
                     continue
+                if SAME_WITH and not all(any(k == w for k, _ in preds) for w in SAME_WITH):
+                    continue
                 for k, p in preds:
                     for th, (to, tf) in (("nass", (0.05, 0.3)), (">=1mm/h", (1 / 6, 1.0))):
                         e = acc.setdefault((k, b, th), [0, 0, 0])
@@ -217,8 +223,10 @@ if __name__ == "__main__":
     ap.add_argument("--day", help="only forecasts issued on this UTC day, e.g. 20261110")
     ap.add_argument("--rain-only", action="store_true")
     ap.add_argument("--same", action="store_true", help="rain: only cases where our own forecast exists as well")
+    ap.add_argument("--same-with", default="", help="rain: only cases where these shadows exist as well, e.g. model")
     a = ap.parse_args()
     SAME = a.same
+    SAME_WITH = tuple(w for w in a.same_with.split(",") if w)
     if a.day:
         from datetime import datetime, timezone
         SINCE = datetime.strptime(a.day, "%Y%m%d").replace(tzinfo=timezone.utc).timestamp() * 1000
