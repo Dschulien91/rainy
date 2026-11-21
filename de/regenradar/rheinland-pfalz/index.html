@@ -44,7 +44,7 @@
 <link rel="stylesheet" href="vendor/maplibre-gl.css">
 <style>
   :root {
-    --bg: #ffffff;
+    --bg: #ffffff; --glass: rgba(255,255,255,.80); --glass-line: rgba(0,0,0,.08);
     --fg: #14181f;
     --muted: #6b7380;
     --line: #e6e9ee;
@@ -59,7 +59,7 @@
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #15181e;
+      --bg: #15181e; --glass: rgba(35,40,49,.82); --glass-line: rgba(255,255,255,.08);
       --fg: #f1f3f6;
       --muted: #9aa2ae;
       --line: #2a2f38;
@@ -72,7 +72,7 @@
   }
   /* map style chosen in the style card overrides the system setting */
   :root.theme-light {
-    --bg: #ffffff;
+    --bg: #ffffff; --glass: rgba(255,255,255,.80); --glass-line: rgba(0,0,0,.08);
     --fg: #14181f;
     --muted: #6b7380;
     --line: #e6e9ee;
@@ -83,7 +83,7 @@
     --shadow: 0 -6px 24px rgba(20, 24, 31, 0.12);
   }
   :root.theme-dark {
-    --bg: #15181e;
+    --bg: #15181e; --glass: rgba(35,40,49,.82); --glass-line: rgba(255,255,255,.08);
     --fg: #f1f3f6;
     --muted: #9aa2ae;
     --line: #2a2f38;
@@ -202,6 +202,12 @@
     display: flex; flex-direction: column; }
   #styleCard > * { flex-shrink: 0; }
   #styleCard > .actions { margin-top: auto; padding-top: 12px; }
+  /* v1.43: frosted glass (variant D of A-D, user 21.11.2026) - the card stands out from the app: a lighter, translucent
+     surface with a blur, and the app behind it dimmed and softly blurred (taps still reach the map, which closes it) */
+  #styleCard { background: var(--glass); -webkit-backdrop-filter: blur(14px) saturate(1.2); backdrop-filter: blur(14px) saturate(1.2);
+    border: 1px solid var(--glass-line); }
+  body:has(#styleCard.show)::after { content: ""; position: fixed; inset: 0; z-index: 1100; pointer-events: none;
+    background: rgba(0,0,0,.35); -webkit-backdrop-filter: blur(3px); backdrop-filter: blur(3px); }
   .alert-card .lead-val { min-width: 54px; text-align: right; font-variant-numeric: tabular-nums; }
   /* small "beta" mark behind features still being verified (own forecast, Europe radar) */
   .beta { font-size: 9px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; opacity: 0.7; margin-left: 3px; vertical-align: 1px; }
@@ -502,11 +508,11 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=1.42"></script>
-<script src="lang/en.js?v=1.42"></script>
+<script src="lang/de.js?v=1.43"></script>
+<script src="lang/en.js?v=1.43"></script>
 <script>
 "use strict";
-const VERSION = "v1.42";
+const VERSION = "v1.43";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
