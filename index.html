@@ -513,7 +513,7 @@
 <script src="lang/en.js"></script>
 <script>
 "use strict";
-const VERSION = "v1.43";
+const VERSION = "v1.44";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -834,6 +834,8 @@ const fitMinZoom = () => {
 };
 fitMinZoom();
 map.on("resize", fitMinZoom);
+// The view the app opens at (v1.44, see init): four steps in from the widest view.
+const startZoom = () => Math.min(map.getMinZoom() + 4, map.getMaxZoom());
 // Map data attribution (OpenStreetMap / OpenMapTiles licences): a tiny link in the corner of the map; the full list of
 // data sources is in the legal notice.
 L.control.attribution({ position: "bottomleft", prefix: false })
@@ -1769,17 +1771,6 @@ async function reverseGeocode(loc, detail = false) {
     const name = part && city && part !== city ? `${part}, ${city}` : city || part || a.name || t("place.unknown");
     return { name, city, country: a.countrycode };
   } catch { return { name: t("place.selected") }; }
-}
-// Zoom so roughly the whole city is visible: bigger cities get a wider view (zoom 10..13 by population).
-async function cityZoom(place) {
-  if (!place || !place.city) return 11;
-  try {
-    const d = await getJSON(`${GEO_SEARCH}?name=${encodeURIComponent(place.city)}` +
-      `&count=1&language=${LANG}&format=json` + (place.country ? `&countryCode=${place.country}` : ""));
-    const pop = (d.results && d.results[0] && d.results[0].population) || 0;
-    if (!pop) return 11; // unknown size: a city-wide default
-    return pop > 1e6 ? 10 : pop > 2e5 ? 11 : pop > 3e4 ? 12 : 13;
-  } catch { return 11; }
 }
 
 // ---------- Data ----------
@@ -3362,7 +3353,7 @@ document.getElementById("locate").addEventListener("click", async () => {
   const loc = (await getPosition()) || state.home;
   state.home = loc;
   youAreHere.setLatLng([loc.lat, loc.lon]);
-  map.setView([loc.lat, loc.lon], map.getZoom() < 10 ? 11 : map.getZoom());
+  map.setView([loc.lat, loc.lon], Math.max(map.getZoom(), startZoom())); // v1.44: at least the start view (was 11)
   await setLocation(loc, false);
 });
 // Long-press (touch) or right-click on the map: show the forecast for that spot.
@@ -4270,6 +4261,11 @@ try {
     params.set("lat", PRESET.lat); params.set("lon", PRESET.lon);
     if (PRESET.zoom && !params.has("zoom")) params.set("zoom", PRESET.zoom);
   }
+  // v1.44 (user, 21.11.2026): the app opens at a fixed regional view - four steps in from the widest one (step 5 of the
+  // zoom range when the widest is step 1; the widest shows about Europe on any screen, see fitMinZoom) - with the
+  // place in the middle. Before, it opened at city level (10-13 by the city's size) or at the zoom of the last visit.
+  // Shared links (?zoom=) and the landing pages (PRESET) keep their own zoom.
+  const START_ZOOM = startZoom();
   let cached = null;
   try { cached = JSON.parse(localStorage.getItem("rainy.last")); } catch {}
   if (params.has("lat")) cached = null;
@@ -4279,7 +4275,7 @@ try {
   if (cached) {
     state.home = cached;
     youAreHere.setLatLng([cached.lat, cached.lon]);
-    map.setView([cached.lat, cached.lon], cached.zoom, { animate: false });
+    map.setView([cached.lat, cached.lon], START_ZOOM, { animate: false });
     await setLocation(cached, false, cached.name);
     if (state.mode === "sun") applyView();
   }
@@ -4302,31 +4298,12 @@ try {
   if (loc && (!cached || map.distance([loc.lat, loc.lon], [cached.lat, cached.lon]) > 1000)) {
     state.home = loc;
     youAreHere.setLatLng([loc.lat, loc.lon]);
-    // v1.25: map and data at once - the place name and the city's size (zoom) are looked up meanwhile; before, the data
-    // only started after both (up to 3 s). The city's size then only fine-tunes the zoom (10-13: the same rain data
-    // tiles), unless the user has touched the map by then.
+    // v1.25: map and data at once - the place name is looked up meanwhile (before, the data only started after it)
     const placeP = Promise.race([reverseGeocode(loc), new Promise((r) => setTimeout(() => r(null), 1500))]);
     const view = (params.get("view") || "").split(",").map(Number);
     const center = view.length === 2 && view.every(isFinite) ? view : [loc.lat, loc.lon];
-    // ?zoom= (shared links) or the city's size; ?view=lat,lon centres the map elsewhere than the place
-    map.setView(center, +params.get("zoom") || 11, { animate: false });
-    if (!params.get("zoom")) {
-      let touched = false;
-      const el = map.getContainer(), touch = () => { touched = true; };
-      for (const ev of ["pointerdown", "wheel", "keydown"]) el.addEventListener(ev, touch, { once: true, passive: true });
-      placeP.then((p) => (p ? Promise.race([cityZoom(p), new Promise((r) => setTimeout(() => r(11), 1500))]) : 11))
-        .then((z) => {
-          if (touched || state.home !== loc || z === map.getZoom()) return;
-          // the next start opens at this zoom (rainy.last may have been written with the first one)
-          map.once("zoomend", () => setTimeout(() => {
-            try {
-              const l = JSON.parse(localStorage.getItem("rainy.last"));
-              if (l && sameLoc(l, loc) && l.zoom !== z) localStorage.setItem("rainy.last", JSON.stringify({ ...l, zoom: z }));
-            } catch {}
-          }, 3000));
-          map.setView(center, z, { animate: true });
-        });
-    }
+    // ?zoom= (shared links) or the start view; ?view=lat,lon centres the map elsewhere than the place
+    map.setView(center, +params.get("zoom") || START_ZOOM, { animate: false });
     await setLocation(loc, false, PRESET && PRESET.name ? PRESET.name : placeP.then((p) => (p ? p.name : undefined)));
     if (outsideRadar()) await showGermany();
     if (params.has("t")) { // ?t=30: open the timeline 30 min ahead (shared links, screenshots)
