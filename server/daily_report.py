@@ -149,9 +149,15 @@ def sources(hs):
     for name in names:
         limit = SOURCE_LIMIT.get(name, SOURCE_DEFAULT)
         late = run = longest = 0
+        seen = False
         for r in hs:  # rows every 5 minutes, in time order
             if "src" not in r:  # written before server-v1.70 (no source ages yet): unknown, not an outage
                 continue
+            # a source added in a later server version is absent from the rows written before it: unknown, not an
+            # outage (20.11.: thunder / lightning / warn:* came with v1.79 at 21:36Z and showed as "1290 min missing")
+            if not seen and name not in (r.get("src") or {}):
+                continue
+            seen = True
             v = (r.get("src") or {}).get(name)
             if v is None or v > limit:
                 late += 1
@@ -159,7 +165,9 @@ def sources(hs):
                 longest = max(longest, run)
             else:
                 run = 0
-        out.append(f"  Quelle {name}: " + (f"!! {5 * late} min ohne neue Daten (längster Ausfall {5 * longest} min)" if late
+        # a single late row (5 min) is normal provider jitter; flag "!!" from 15 minutes in a row
+        flag = "!! " if longest >= 3 else ""
+        out.append(f"  Quelle {name}: " + (f"{flag}{5 * late} min ohne neue Daten (längster Ausfall {5 * longest} min)" if late
                                            else "lückenlos"))
     return out
 
