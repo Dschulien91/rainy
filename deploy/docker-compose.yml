@@ -191,6 +191,23 @@ services:
     # weather_code is derived by Open-Meteo for these models (snow, freezing rain, CAPE, lifted index, visibility,
     # gusts, showers): without those variables the symbol took 2.8 s per new place; the 700 hPa wind comes from GFS 0.25.
 
+  # The point-forecast models the app picks outside the ICON area (app v1.36, 21.11.2026), kept on local disk like the
+  # ones above: read lazily from the remote mirror, the first request at a new place took 1-8 s (Rome 7.6 s).
+  # ICON-2I (2.2 km, central/southern Italy, ~69 h), MET Nordic (1 km, NO/SE/FI + Baltics, ~60 h), UKMO 2 km (UK + IE,
+  # ~54 h); the app fills the hours after their end from ICON. Only regional domains: a global model synced with
+  # --bounding-box answers null everywhere outside the box (seen with gfs_global, 21.11.2026), so ECMWF / UKMO global
+  # stay off this list. Variables: what the app asks for plus what Open-Meteo derives weather_code from.
+  openmeteo-sync-eu2:
+    image: ghcr.io/open-meteo/open-meteo
+    restart: always
+    logging: *logging
+    volumes:
+      - open-meteo-data:/app/data
+    command: >
+      sync italia_meteo_arpae_icon_2i,metno_nordic_pp,ukmo_uk_deterministic_2km
+      temperature_2m,precipitation,cloud_cover,cloud_cover_low,weather_code,rain,showers,snowfall_water_equivalent,hail,cape,visibility,wind_gusts_10m,wind_speed_700hPa,wind_direction_700hPa
+      --past-days 1 --repeat-interval 15 --concurrent 2
+
   caddy:
     cpu_shares: 2048
     image: caddy:2
