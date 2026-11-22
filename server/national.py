@@ -40,6 +40,9 @@ impressum pages) when it beats OPERA at the gauges on several rainy days.
   cz  Czechia - CHMI open data (CC BY 4.0): composite of the two Czech radars, reflectivity at 2 km height (dBZ),
       ~1 km, every 5 min, ODIM HDF5, stamped with the end of the scan and published ~3 min later (much earlier than
       OPERA). Rain rate by Z = 200 R^1.6. OPERA has these radars too: what a national copy gains is open.
+  dk  Denmark - DMI open data (CC BY 4.0): composite of the five Danish radars, DBZH, 500 m, every 5 min, ODIM HDF5,
+      within 120 km of the radars (DenmarkDmi). Added 22.11.2026 for OPERA's clear-air / bird echoes (a ring over the
+      Kattegat on 19.11. that DMI's and SMHI's own composites did not have).
 """
 import io
 import json
@@ -516,7 +519,71 @@ class CzechChmi(Layer):
         return np.where(raw == w["nodata"], -1.0, rate).astype(np.float32)
 
 
-LAYERS = (ItalyDpc, GermanyRv, SwissRzc, CzechChmi)
+class DenmarkDmi(Layer):
+    """Denmark - DMI open data (CC BY 4.0, opendataapi.dmi.dk, no account): DMI's composite of its five radars, DBZH
+    (dBZ = 0.5 raw - 32, Z = 200 R^1.6 as DMI's own how/zr), 500 m, polar stereographic, every 5 min, ODIM HDF5, one
+    STAC item per image (dk.com.<YYYYmmddHHMM>.500_max.h5), published in pairs every 10 min, 8-13 min after
+    its time (22.11.2026).
+    Why (22.11.2026): on 19.11. ~07:55Z the map showed a thin ring of light "rain" over the Kattegat (centre ~56.2 N
+    11.3 E, ~86 km radius, no radar there) - in the OPERA picture only: DMI's own composite and SMHI's (Swedish) one
+    were dry there at 07:45-08:10Z. The national services' quality control removes such clear-air / bird echoes
+    (an hour after sunrise) that OPERA keeps. Shadow first, like every new country (scored at the gauges).
+    The images alternate: "doppler" scans reach ~120 km from the radars, "fullRange" scans (every 10 min) ~240 km.
+    Used only within RANGE_KM = the doppler range, so the coverage is the same in every image (no flicker at the edge)."""
+    name, credit = "dk", "DMI (open data, CC BY 4.0)"
+    SHADOW = True
+    STAC = "https://opendataapi.dmi.dk/v1/radardata/collections/composite/items"
+    ZR_A, ZR_B = 200.0, 1.6
+    RADARS = [(55.1127, 14.8875), (55.1731, 8.552), (55.8119, 10.5853), (57.4893, 10.1365), (55.3262, 12.4493)]
+    RANGE_KM = 120.0
+
+    def __init__(self, *a):
+        self.files, self.listed = {}, 0.0   # ts -> url
+        super().__init__(*a)
+
+    def _list(self):
+        if time.time() - self.listed < 45:
+            return
+        now = datetime.now(timezone.utc)
+        since = now - timedelta(milliseconds=KEEP_MS + 15 * 60_000)
+        d = json.loads(self._get(f"{self.STAC}?datetime={since:%Y-%m-%dT%H:%M:%SZ}/{now:%Y-%m-%dT%H:%M:%SZ}&limit=200",
+                                 timeout=60))
+        for f in d.get("features", []):
+            if not f.get("id", "").endswith(".500_max.h5"):
+                continue
+            t = datetime.strptime(f["properties"]["datetime"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+            self.files[int(t.timestamp() * 1000)] = f["asset"]["data"]["href"]
+        old = time.time() * 1000 - 3 * KEEP_MS
+        self.files = {t: u for t, u in self.files.items() if t > old}
+        self.listed = time.time()
+
+    def geometry(self):
+        """The file's /where has the corners and the cell size but no xsize / ysize: the grid size from the data."""
+        self._list()
+        with h5py.File(io.BytesIO(self._get(self.files[max(self.files)], timeout=60)), "r") as f:
+            w = f["where"].attrs
+            proj = w["projdef"].decode() if isinstance(w["projdef"], bytes) else str(w["projdef"])
+            x, y = Transformer.from_crs("EPSG:4326", proj, always_xy=True).transform(
+                float(np.ravel(w["UL_lon"])[0]), float(np.ravel(w["UL_lat"])[0]))
+            self.PROJ, self.X0, self.Y1, self.CELL = proj, float(x), float(y), float(np.ravel(w["xscale"])[0])
+            self.NY, self.NX = f["dataset1/data1/data"].shape
+
+    def newest(self):
+        self._list()
+        return max(self.files)
+
+    def load(self, ts):
+        with h5py.File(io.BytesIO(self._get(self.files[ts], timeout=60)), "r") as f:
+            w = {k: float(np.ravel(f["what"].attrs[k])[0]) for k in ("gain", "offset", "nodata", "undetect")}
+            raw = f["dataset1/data1/data"][:]
+        if raw.shape != (self.NY, self.NX):
+            raise ValueError(f"unexpected grid {raw.shape}")
+        rate = (10.0 ** ((raw * w["gain"] + w["offset"]) / 10.0) / self.ZR_A) ** (1.0 / self.ZR_B)
+        rate = np.where(raw == w["undetect"], 0.0, np.minimum(rate, 300.0))
+        return np.where(raw == w["nodata"], -1.0, rate).astype(np.float32)
+
+
+LAYERS = (ItalyDpc, GermanyRv, SwissRzc, CzechChmi, DenmarkDmi)
 
 
 def timing(host, layer, shifts=(-10, -5, 0, 5, 10)):
