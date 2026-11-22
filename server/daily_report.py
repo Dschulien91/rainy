@@ -111,7 +111,8 @@ def state(day):
             else:
                 out.append(f"  !! kein {label} den ganzen Tag")
         out += sources(hs)
-        rss = [r["rss"] for r in hs if r.get("rss")]
+        out += weather_model(hs)
+        rss =[r["rss"] for r in hs if r.get("rss")]
         if rss:
             out.append(f"  Speicher: im Mittel {sum(rss) / len(rss):.0f} MB, höchstens {max(rss)} MB")
         errors = Counter()
@@ -169,6 +170,23 @@ def sources(hs):
         flag = "!! " if longest >= 3 else ""
         out.append(f"  Quelle {name}: " + (f"{flag}{5 * late} min ohne neue Daten (längster Ausfall {5 * longest} min)" if late
                                            else "lückenlos"))
+    return out
+
+
+def weather_model(hs):
+    """The weather model probes of the Germany instance (health rows "om" / "om_pub", server-v1.86): a point forecast
+    like the app's every minute, inside the network and through the public URL. Any failure is a user who saw "the
+    weather model does not answer"."""
+    out = []
+    for key, label in (("om", "Wettermodell direkt"), ("om_pub", "Wettermodell über die öffentliche Adresse")):
+        rows = [r[key] for r in hs if isinstance(r.get(key), dict)]
+        if not rows:
+            continue
+        n, fail = sum(r["n"] for r in rows), sum(r["fail"] for r in rows)
+        slow = max(r["max_ms"] for r in rows)
+        bad = [r["err"] for r in rows if r.get("fail") and r.get("err")]
+        out.append(f"  {label}: {n} Abfragen, " + (f"!! {fail} fehlgeschlagen (zuletzt: {bad[-1]})" if fail else "alle beantwortet")
+                   + f", langsamste {slow / 1000:.1f} s" + ("   !! über 5 s" if slow > 5000 and not fail else ""))
     return out
 
 

@@ -107,7 +107,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v1.85"
+VERSION = "server-v1.86"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -128,6 +128,57 @@ EU_KM = int(os.environ.get("EU_KM", "2" if EDITION == "eu" else "1"))
 # Self-hosted Open-Meteo. In production Caddy routes /om to it; locally this server proxies /om when it runs.
 OPENMETEO_URL = os.environ.get("OPENMETEO_URL", "http://127.0.0.1:8080")
 _om_state = {"at": 0.0, "ok": False}
+
+
+# WEATHER MODEL PROBE (server-v1.86, 22.11.2026): the user's phone showed "the weather model does not answer" a few
+# times in the last days, and nothing on the server could say how often: Open-Meteo logs no failed requests, Caddy no
+# access log, and openmeteo_available() is pinned to True in production. Now the Germany instance asks the weather
+# model like the app does (a point forecast at a random place, so neither a cache nor a warm file answers it) every
+# OM_PROBE_S: inside the network (Open-Meteo itself) and through the public URL (CDN + Caddy + Open-Meteo). The health
+# rows carry the count, the failures and the slowest answer of each since the last row (daily_report.py flags them).
+OM_PROBE_S = 60
+OM_PROBE_Q = ("&minutely_15=temperature_2m,precipitation,cloud_cover,is_day&past_minutely_15=8&forecast_minutely_15=64"
+              "&hourly=temperature_2m,precipitation,cloud_cover,is_day,weather_code&forecast_hours=74"
+              "&daily=sunrise,sunset&forecast_days=4&timezone=auto&timeformat=unixtime&models=icon_seamless")
+_om_probe = {}
+_om_probe_lock = threading.Lock()
+
+
+def om_probe_loop():
+    import random
+    public = os.environ.get("PUBLIC_URL", "").rstrip("/")
+    while True:
+        lat, lon = random.uniform(44.0, 55.0), random.uniform(2.0, 16.0)  # Europe, where the app's users are
+        for key, base in (("om", OPENMETEO_URL), ("om_pub", f"{public}/om" if public else None)):
+            if not base:
+                continue
+            t0, err = time.time(), None
+            try:
+                req = urllib.request.Request(f"{base}/v1/forecast?latitude={lat:.2f}&longitude={lon:.2f}{OM_PROBE_Q}",
+                                             headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=20) as r:
+                    json.loads(r.read())
+            except Exception as e:
+                err = str(e)[:80]
+            ms = int((time.time() - t0) * 1000)
+            with _om_probe_lock:
+                s = _om_probe.setdefault(key, {"n": 0, "fail": 0, "max_ms": 0})
+                s["n"] += 1
+                s["max_ms"] = max(s["max_ms"], ms)
+                if err:
+                    s["fail"] += 1
+                    s["err"] = err
+            if err:
+                log(f"weather model probe failed ({key}, {ms} ms): {err}")
+        time.sleep(OM_PROBE_S)
+
+
+def om_probe_take():
+    """The probe counts since the last call (one health row), then reset."""
+    with _om_probe_lock:
+        out = {k: dict(v) for k, v in _om_probe.items()}
+        _om_probe.clear()
+    return out
 
 
 def openmeteo_available():
@@ -2278,8 +2329,11 @@ def monitor_status():
     now = time.time() * 1000
     ref = REGIONS["eu"].ref if EDITION == "eu" else DE.ref
     sun = SUNNY.ref if SUNNY_ON else None
-    return {"rss": rss_mb(), "rain_age": round((now - ref) / 60_000, 1) if ref else None,
-            "sun_age": round((now - sun) / 60_000, 1) if sun else None, "src": source_ages(now)}
+    out = {"rss": rss_mb(), "rain_age": round((now - ref) / 60_000, 1) if ref else None,
+           "sun_age": round((now - sun) / 60_000, 1) if sun else None, "src": source_ages(now)}
+    if EDITION == "de":
+        out.update(om_probe_take())  # "om" / "om_pub": weather model probes since the last row (server-v1.86)
+    return out
 
 
 def source_ages(now):
@@ -2485,6 +2539,7 @@ elif __name__ == "__main__":
     if EDITION == "de" and not DEV:  # push message to the operator when an instance has no fresh images (opswatch.py)
         import opswatch
         threading.Thread(target=opswatch.OpsWatch(ALERTS, DATA_DIR, log).loop, daemon=True).start()
+        threading.Thread(target=om_probe_loop, daemon=True).start()  # is the weather model answering? (server-v1.86)
     threading.Thread(target=mosaic.de_loop, args=(DE, log, PTYPE), daemon=True).start()
     threading.Thread(target=DE.drizzle.loop, daemon=True).start()
     threading.Thread(target=GRID_VERIFY.loop, daemon=True).start()

@@ -528,11 +528,11 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=1.48"></script>
-<script src="lang/en.js?v=1.48"></script>
+<script src="lang/de.js?v=1.49"></script>
+<script src="lang/en.js?v=1.49"></script>
 <script>
 "use strict";
-const VERSION = "v1.48";
+const VERSION = "v1.49";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -1858,7 +1858,17 @@ async function loadPoint(loc, req = locRequest) {
     `&forecast_hours=74&daily=sunrise,sunset&forecast_days=4&timezone=auto&timeformat=unixtime`;
   if (!state.picked) EARLY_URLS[0] = omFirstUrl(url, loc.lat, loc.lon);
   let d;
-  try { d = await omJSON(url, loc.lat, loc.lon); } catch (e) { // ours not reachable: the public one if /api/health says so
+  // v1.49: two quick retries before giving up - one lost request (a phone between cells, a server restart) showed
+  // "the weather model does not answer" and the next try came only 2 min later (user, 22.11.2026)
+  const retry = async (f, waits = [1500, 4000]) => {
+    for (let i = 0; ; i++) {
+      try { return await f(); } catch (e) {
+        if (i >= waits.length || req !== locRequest) throw e;
+        await new Promise((r) => setTimeout(r, waits[i]));
+      }
+    }
+  };
+  try { d = await retry(() => omJSON(url, loc.lat, loc.lon)); } catch (e) { // ours not reachable: the public one if /api/health says so
     await serverReady;
     if (url.startsWith(OM_BASE)) throw e;
     d = await getJSON(url.replace(/^.*?\/v1\//, `${OM_BASE}/v1/`));
