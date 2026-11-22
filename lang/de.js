@@ -154,7 +154,7 @@
   "motion.wind": "Höhenwind",
 
   // toasts
-  "toast.modelDown": "Das Wettermodell (Open-Meteo) antwortet gerade nicht – vermutlich ist das kostenlose Abfragelimit erreicht. Radar und Satellit laufen weiter, Temperatur und Vorhersage kommen gleich wieder.",
+  "toast.modelDown": "Die Wettervorhersage ist gerade nicht erreichbar. Radar und Satellit laufen weiter – wir versuchen es gleich noch einmal.",
 
   // rain alerts
   "alert.title": "Regenwarnung",

@@ -155,7 +155,7 @@
   "motion.wind": "upper-level wind",
 
   // toasts
-  "toast.modelDown": "The weather model (Open-Meteo) is not responding right now – probably the free request limit has been reached. Radar and satellite keep running; temperature and forecast will be back shortly.",
+  "toast.modelDown": "The weather forecast can't be reached right now. Radar and satellite keep running – we'll try again in a moment.",
 
   // rain alerts
   "alert.title": "Rain alert",
