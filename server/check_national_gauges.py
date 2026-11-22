@@ -671,6 +671,28 @@ def record(ts, opera, nat, who=None, layers=(), each=None, shadow=()):
             os.remove(fp)
 
 
+def backfill(ts, k, values):
+    """Layer k's values at the gauges, added afterwards to the step ts's file where it had none (a shadow whose source
+    publishes later than the step is noted - DMI: 8-13 min; server-v1.87). Nothing if the file or the layer is not
+    there; values already noted are kept."""
+    fp = os.path.join(OBS_DIR, f"{int(ts)}.npz")
+    if not os.path.exists(fp):
+        return False
+    with np.load(fp) as z:
+        arrays = {name: z[name] for name in z.files}
+    each = arrays.get("each")
+    if each is None or each.shape[0] <= k or each.shape[1] != len(values):
+        return False
+    e = each.astype(np.float32)
+    e[k] = np.where(np.isfinite(e[k]), e[k], values)
+    arrays["each"] = e.astype(np.float16)
+    tmp = fp + ".tmp"
+    with open(tmp, "wb") as f:
+        np.savez_compressed(f, **arrays)
+    os.replace(tmp, fp)
+    return True
+
+
 FCA_DIR = os.path.join(LOG_DIR, "fcalert")  # the alerts' input at the gauges, per run (verify_alerts_eu.py)
 
 

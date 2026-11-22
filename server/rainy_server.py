@@ -107,7 +107,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v1.87"
+VERSION = "server-v1.88"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -1559,6 +1559,7 @@ class EuropeNational(EuropeOpera):
         self.gauge_px = None  # gauges at which OPERA alone and the composed picture are noted (check_national_gauges.py)
         self.partial = set()  # steps composed without OPERA (replaced when OPERA's image comes)
         self.partial_warned = 0.0
+        self.backfilled = set()  # (shadow layer, step) whose late image was added to the natobs file
 
     def list_times(self):
         try:
@@ -1596,6 +1597,22 @@ class EuropeNational(EuropeOpera):
     def replace_obs(self, t, src):
         return t in self.partial and src[1] is not None
 
+    def backfill_shadows(self, ts, cng):
+        """A shadow layer whose source publishes later than the step is noted at the gauges (DMI: 8-13 min after its
+        time, OPERA 5-10) had no image then: its values are added to the steps of the last 30 min once the image is
+        there, so it is scored like the others (server-v1.88). The picture never waits for a shadow."""
+        col, row, ok = self.gauge_px
+        for k, l in enumerate(self.layers):
+            if not l.SHADOW:
+                continue
+            for t in range(ts - 30 * 60_000, ts, STEP_MS):
+                if (l.name, t) in self.backfilled or l.get(t) is None:
+                    continue
+                self.backfilled.add((l.name, t))
+                v = national.values_at([l], t, np.where(ok, col, -1), np.where(ok, row, -1))[0]
+                cng.backfill(t, k, v)
+        self.backfilled = {x for x in self.backfilled if x[1] > ts - 2 * 3600_000}
+
     def load(self, src):
         ts, url = src
         if url is None:  # OPERA late: the national layers alone, no data elsewhere
@@ -1623,6 +1640,7 @@ class EuropeNational(EuropeOpera):
                 each = national.values_at(self.layers, ts, np.where(ok, col, -1), np.where(ok, row, -1))
                 cng.record(ts, opera, cng.at_gauges(rate, self.gauge_px), who, [l.name for l in self.layers], each,
                            [l.name for l in self.layers if l.SHADOW])
+                self.backfill_shadows(ts, cng)
             except Exception as e:
                 log(f"natobs failed: {e}")
         for t in [t for t in self.used if t < ts - 3 * HISTORY_MS]:
