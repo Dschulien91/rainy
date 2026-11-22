@@ -34,6 +34,9 @@ import numpy as np
 import check_national_gauges as cng
 
 HOURS = float(sys.argv[sys.argv.index("--hours") + 1]) if "--hours" in sys.argv else 24.0
+# --with adv240,adv240s (22.11.2026): scored shadows of the fcgauge files (rows = the four leads, no picture row) as
+# extra columns; only the runs that carry ALL of them count, so every column is on the same cases
+WITH = [k for k in sys.argv[sys.argv.index("--with") + 1].split(",") if k] if "--with" in sys.argv else []
 LOG = cng.LOG_DIR
 THS = (0.25, 1.0, 3.0)
 with open(os.path.join(LOG, "metar", "stations.json")) as f:
@@ -81,6 +84,12 @@ def load(path, key):
     return cache[path][key]
 
 
+def has_with(r):
+    """Whether run r's forecast file carries every --with shadow."""
+    load(fc_files[r], "fc")
+    return all(w in cache[fc_files[r]] for w in WITH)
+
+
 print(f"{len(truth)} station hours from {len(st)} stations, {len(obs_ts)} images, {len(fc_ts)} forecast runs, last {HOURS:.0f} h")
 rows = {}
 for k, t1, mm in (truth if "--ten-only" not in sys.argv else []):
@@ -93,13 +102,21 @@ for k, t1, mm in (truth if "--ten-only" not in sys.argv else []):
     for li, lead in enumerate(cng.FC_LEADS):
         refs = fc_ts[(fc_ts + lead * 60_000 > t0) & (fc_ts + lead * 60_000 <= t1)]
         f, p = [], []
+        x = {w: [] for w in WITH}
         for r in refs:
+            if WITH and not has_with(r):
+                continue
             a = load(fc_files[r], "fc")
-            if k < a.shape[1] and np.isfinite(a[li + 1, k]) and np.isfinite(a[0, k]):
+            ok = k < a.shape[1] and np.isfinite(a[li + 1, k]) and np.isfinite(a[0, k])
+            if ok and all(np.isfinite(load(fc_files[r], w)[li, k]) for w in WITH):
                 f.append(a[li + 1, k]); p.append(a[0, k])
+                for w in WITH:
+                    x[w].append(load(fc_files[r], w)[li, k])
         if len(f) >= 4:
             rows.setdefault((c, f"forecast +{lead}"), []).append((mm, float(np.mean(f))))
             rows.setdefault((c, f"persist  +{lead}"), []).append((mm, float(np.mean(p))))
+            for w in WITH:
+                rows.setdefault((c, f"{w[:8]:8s} +{lead}"), []).append((mm, float(np.mean(x[w]))))
     # the weather model (HRRR & co. as Open-Meteo's best match; the baseline many apps show for the next hours):
     # its hour ending t1 from the issue 1 h / 2 h before (modelgauge, hourly since 16.11.2026)
     for lead_h in (1, 2):
@@ -107,7 +124,8 @@ for k, t1, mm in (truth if "--ten-only" not in sys.argv else []):
         if v is not None:
             rows.setdefault((c, f"model    +{lead_h * 60}"), []).append((mm, v))
 NAMES = {"us": "USA (METAR gauges)", "ca": "Canada (ECCC SWOB gauges)", "all": "All"}
-LINES = ["picture"] + [n for lead in cng.FC_LEADS for n in (f"forecast +{lead}", f"persist  +{lead}", f"model    +{lead}")]
+LINES = ["picture"] + [n for lead in cng.FC_LEADS for n in (f"forecast +{lead}", f"persist  +{lead}", f"model    +{lead}")
+                       + tuple(f"{w[:8]:8s} +{lead}" for w in WITH)]
 for c, name in ((c, name) for c in ("us", "ca", "all") for name in [None] + LINES):
     if name is None:
         print(f"\n{NAMES[c]}:")
@@ -173,10 +191,13 @@ def truth_at(T):
     return m.sum(axis=1) * 3, np.where(wet, 1.0, np.where(dry, 0.0, np.nan)).astype(np.float32)
 
 
-LABELS = ("forecast", "persist", "later pic")
+LABELS = ("forecast", "persist", "later pic") + tuple(WITH)
 ten_rows = {}   # lead -> [rows: gauge rate, rain yes/no, forecast, persist, later pic, gauge, hour of T]
+if WITH:
+    print(f"(--with {','.join(WITH)}: only the {sum(1 for r in fc_ts if r >= since and has_with(r))} of "
+          f"{int((fc_ts >= since).sum())} runs that carry them)")
 for r in fc_ts:
-    if r < since:
+    if r < since or (WITH and not has_with(r)):
         continue
     a = load(fc_files[r], "fc")
     n = min(a.shape[1], len(st))
@@ -185,7 +206,8 @@ for r in fc_ts:
         T = int(r + lead * 60_000)
         g, yn = truth_at(T)
         later = load(obs_files[T], "nat")[:n][sel] if T in obs_files else np.full(len(sel), np.nan, np.float32)
-        vals = np.stack([g[sel], yn[sel], a[li + 1, sel], a[0, sel], later]).astype(np.float64)
+        vals = np.stack([g[sel], yn[sel], a[li + 1, sel], a[0, sel], later]
+                        + [load(fc_files[r], w)[li, :n][sel] for w in WITH]).astype(np.float64)
         ok = np.isfinite(vals[2:]).all(axis=0) & (np.isfinite(vals[0]) | np.isfinite(vals[1]))
         if ok.any():
             ten_rows.setdefault(lead, []).append(np.concatenate(
@@ -242,7 +264,7 @@ for c in ("us", "ca", "all"):
         if lead not in ten_rows:
             continue
         a = np.concatenate(ten_rows[lead], axis=1)
-        a = a[:, want(a[5])]
+        a = a[:, want(a[-2])]
         if not a.shape[1]:
             continue
         r = np.isfinite(a[0])

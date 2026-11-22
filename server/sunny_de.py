@@ -216,6 +216,10 @@ SUNNY_NWP = os.environ.get("SUNNY_NWP", "0") == "1"
 # the ungated blend was worse on 08.11. (+120 .128 -> .197), gated it helped overall (+120 station .177 -> .161, hit
 # .832 -> .867, grid .168 -> .160). ICON-D2-RUC (hourly, not on the local Open-Meteo) was a little better than ICON-D2.
 NWP_SKILL_A, NWP_SKILL_B = 0.10, 0.10
+# shadow "satkp" (22.11.2026, see SunnyDE.forecast): share of the stationary k in the satellite part, 0 until
+# KP_START min, linear to KP_W120 at +120
+KP_START = float(os.environ.get("SUNNY_KP_START", "30"))
+KP_W120 = float(os.environ.get("SUNNY_KP_W120", "0.5"))
 
 
 def nwp_weight(lead):
@@ -1123,7 +1127,7 @@ class SunnyDE:
         base_o = fill_nan(ko[1]) if ko is not None and ko[0] == ref else None  # low-sun shadow (low_f_shadow)
         lowf = f"lowf{int(round(10 * self.low_f_shadow)):02d}"
         out = {"sat": {}, "satold": {}, "sharp": {}, "kpers": {}, "pers": {}, "model": {}, "nwp": {}, "shblur": {},
-               "model90": {}, "satnwp": {}, "satadv": {}, "metfog": {}, lowf: {}}
+               "model90": {}, "satnwp": {}, "satadv": {}, "metfog": {}, lowf: {}, "satkp": {}}
         disp = {}
         qm, skill = self._nwp_qm(ref, k1)  # the model's k -> the satellite's distribution at ref; weight factor
         for lead in FC_LEADS:
@@ -1151,6 +1155,7 @@ class SunnyDE:
             if SUNNY_NWP and lead in LEADS:
                 out["satadv"][ts] = s  # the plain advection, scored while the blend is served
             w = nwp_weight(lead) * skill
+            mq = None
             if qm is not None and (lead in LEADS or (SUNNY_NWP and w > 0)):
                 mk = self._model_k(ts) if w > 0 else None
                 mq = qm(mk) if mk is not None else None
@@ -1165,6 +1170,21 @@ class SunnyDE:
                         out["sat"][ts] = sn
                         disp[ts] = self._display(np.where(ok, (1 - w) * kk + w * mq, kk).astype(np.float32), e)
             if lead in LEADS:  # shadows only where they are scored
+                # shadow "satkp" (22.11.2026): as served, but the satellite part mixes the moved k with the k that stays
+                # where it is (share KP_W120 at +120, from KP_START) - in daytime showers the clouds grow and decay in
+                # place instead of moving, and the stationary k beat the moved one at the German stations at +90/+120
+                # on 21.11. (MAE .249 vs .257) and 22.11. (.146 vs .154); over the week before the motion won slightly
+                a = KP_W120 * min(1.0, max(0.0, (lead - KP_START) / (120.0 - KP_START)))
+                if a > 0:
+                    ks = cv2.GaussianBlur(base, (0, 0), sig)
+                    km = np.where(kn > 0.5, (1 - a) * kk + a * ks, np.nan).astype(np.float32)
+                    skp = share_from_k(km, e, self.low_f)
+                else:
+                    skp = s
+                if SUNNY_NWP and w > 0 and mq is not None:  # the served model blend on top, as for "sat"
+                    okp = np.isfinite(mq) & np.isfinite(skp)
+                    skp = np.where(okp, (1 - w) * skp + w * share_from_k(mq, e, self.low_f), skp).astype(np.float32)
+                out["satkp"][ts] = skp
                 if base_f is None and (self.area or {}).get("clm"):  # Europe, no fog reported: the plain advection
                     out["metfog"][ts] = s
                 elif base_f is not None:

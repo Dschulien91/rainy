@@ -157,7 +157,12 @@ def main():
     g, mask = grid()
     mp = maps(g)
     rows = fcgrid_rows()
-    tot = {k: defaultdict(lambda: [0, 0, 0, 0]) for k in ("wo", "wo-self", "dwd", "own")}
+    # --with model[,cells]: shadow variants of the fcgrid log, scored only on the cases where they exist, next to
+    # "wo" and "own" on exactly those cases (rows "wo|<v>", "own|<v>")
+    w_at = sys.argv.index("--with") + 1 if "--with" in sys.argv else len(sys.argv)
+    extra = [v for a in sys.argv[w_at:w_at + 1] for v in a.split(",") if v]
+    names = ["wo", "wo-self", "dwd", "own"] + [n for v in extra for n in (f"wo|{v}", f"own|{v}", v)]
+    tot = {k: defaultdict(lambda: [0, 0, 0, 0]) for k in names}
     l0_imgs = {v: p for v, lead, p in shots() if lead == 0}  # their own radar images: truth for the fair view
     l0 = [0, 0, 0, 0, 0, 0]  # counts vs >= 0.1, wo wet cells, dwd wet cells
     for valid, lead, p in shots():
@@ -186,6 +191,13 @@ def main():
         for name, t in (("wo", c), ("dwd", d["fc0.1"]), ("own", o_["fc0.1"])):
             s = tot[name][std]
             s[0] += t[0]; s[1] += t[1]; s[2] += t[2]; s[3] += 1
+        for v in extra:
+            x = rows.get((v, ref, std))
+            if x is None:
+                continue
+            for name, t in ((f"wo|{v}", c), (f"own|{v}", o_["fc0.1"]), (v, x["fc0.1"])):
+                s = tot[name][std]
+                s[0] += t[0]; s[1] += t[1]; s[2] += t[2]; s[3] += 1
         cs = None
         if valid in l0_imgs:  # fair view: their forecast against their own later radar image
             own_truth, inside2 = to_grid(l0_imgs[valid], g, mp)
@@ -199,7 +211,9 @@ def main():
         print(f"WetterOnline's radar image vs DWD radar ({l0[3]} images): CSI {fmt(l0)}, wet area wo/dwd "
               f"{l0[4] / max(l0[5], 1):.2f}")
     print(">= 0.1 mm/h, CSI (POD/FAR) [cases]; truth = DWD radar, for wo-self = WetterOnline's own later radar image")
-    for name in ("wo", "wo-self", "dwd", "own"):
+    for name in names:
+        if extra and name == f"wo|{extra[0]}":
+            print("only the cases where the shadow exists:")
         print(f"  {name:4s}" + " | ".join(f"+{L}: {fmt(tot[name][L])} [{tot[name][L][3]}]" for L in LEADS if tot[name][L][3]))
 
 
