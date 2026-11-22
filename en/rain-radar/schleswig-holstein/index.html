@@ -518,11 +518,11 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=1.45"></script>
-<script src="lang/en.js?v=1.45"></script>
+<script src="lang/de.js?v=1.46"></script>
+<script src="lang/en.js?v=1.46"></script>
 <script>
 "use strict";
-const VERSION = "v1.45";
+const VERSION = "v1.46";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -1008,7 +1008,15 @@ async function buildBasemap(key) {
       .filter((l) => isRoad(l) && l.type === "line" && bigRoad(l) && !/casing/.test(l.id))
       .map((l) => ({ ...l, id: l.id + "_top", paint: { ...l.paint, "line-color": mapDark ? "#dfe3ea" : "#3a4048",
         "line-opacity": 0.45, "line-width": scale(l.paint["line-width"] ?? 1, 0.6) } }));
-    basemapTop = L.maplibreGL({ style: { ...top, layers: [...sunWater, ...roadTop, ...borders, ...top.layers] }, interactive: false, pane: "labels" }).addTo(map);
+    // v1.46, light designs in rain mode: every road (from city zoom, as the map's own) as a light line above the rain -
+    // under the rain the thin dark big-road lines were hardly visible on Klassisch (user, 22.11.2026, variant C).
+    // On dry land they lie over the map's own light roads. Sun mode and the dark designs keep the lines above. (Klassisch
+    // had no roads above the rain at all: its layers are named "highway-motorway", not "highway_motorway".)
+    const roadLight = mapDark || new URLSearchParams(location.search).get("roads") === "a" ? [] : style.layers
+      .filter((l) => isRoad(l) && l.type === "line" && !/casing|rail|path|ferry|pier|aerialway|cablecar|transit/.test(l.id))
+      .map((l) => ({ ...l, id: l.id + "_rtop", layout: { ...l.layout, visibility: state.mode === "sun" ? "none" : "visible" },
+        paint: { "line-color": "#ffffff", "line-opacity": 0.6, "line-width": l.paint["line-width"] ?? 1 } }));
+    basemapTop = L.maplibreGL({ style: { ...top, layers: [...sunWater, ...roadTop, ...roadLight, ...borders, ...top.layers] }, interactive: false, pane: "labels" }).addTo(map);
     basemapTop.getMaplibreMap().on("load", applyBasemapMode);
     const dropOld = () => { for (const l of old.splice(0)) map.removeLayer(l); };
     if (old.length) { basemapTop.getMaplibreMap().once("idle", dropOld); setTimeout(dropOld, 2500); }
@@ -1057,8 +1065,14 @@ function applyBasemapMode() {
     m.setPaintProperty(id, "line-opacity", sun ? 1 : keep(id, "line-opacity"));
   }
   // the roads above the weather: light lines vanish on white clouds, so dark ones in sun mode (like the borders)
-  for (const l of m.getStyle().layers) if (/^highway_.*_top$/.test(l.id))
-    m.setPaintProperty(l.id, "line-color", sun || !mapDark ? "#3a4048" : "#dfe3ea");
+  // v1.46: light designs in rain mode show all roads light instead (the _rtop layers, see buildBasemap)
+  const light = m.getStyle().layers.some((l) => l.id.endsWith("_rtop"));
+  for (const l of m.getStyle().layers) {
+    if (/^highway_.*_top$/.test(l.id)) {
+      m.setPaintProperty(l.id, "line-color", sun || !mapDark ? "#3a4048" : "#dfe3ea");
+      m.setLayoutProperty(l.id, "visibility", light && !sun ? "none" : "visible");
+    } else if (l.id.endsWith("_rtop")) m.setLayoutProperty(l.id, "visibility", sun ? "none" : "visible");
+  }
 }
 const BORDER_PAINT = {};
 buildBasemap(curDesign);
@@ -2558,6 +2572,8 @@ const GL_DATA = { size: 128, margin: 2, cols: 7, rows: 6, q: 8, zooms: [3, 8], s
 // v1.25: at most this many data tiles on the screen (else one data zoom coarser), downloads at a time, and the GPU
 // memory budget for the tiles (counted twice per texture; phones and tablets get less)
 const GL_MAX_VIEW = 40, GL_PARALLEL = 6;
+// v1.46: outline smoothing radius in zoom-8 data texels (~0.8 km each in central Europe; 1.5 = variant C of 22.11.2026)
+const GL_BLUR = 1.5;
 const GL_BUDGET = (window.matchMedia && matchMedia("(pointer: coarse)").matches ? 128 : 256) * 2 ** 20;
 // server/palette.py STEPS: RGBA (alpha 0-255) per kind (rain, sleet, snow, freezing rain, graupel, hail) and class 1-8
 const GL_PALETTE = [
@@ -2577,6 +2593,7 @@ uniform sampler2D u_data, u_pal;
 uniform vec2 u_cell;     // texel origin of this time step's cell (inside its margin)
 uniform vec2 u_tex;      // texture size in texels
 uniform float u_px;      // texels per device pixel (contour width)
+uniform float u_blur;    // smoothing radius in texels (v1.46, GL_BLUR)
 vec4 cubic(float v) {
   vec4 n = vec4(1.0, 2.0, 3.0, 4.0) - v; vec4 s = n * n * n;
   float x = s.x, y = s.y - 4.0 * s.x, z = s.z - 4.0 * s.y + 6.0 * s.x;
@@ -2593,22 +2610,35 @@ vec4 bicubic(vec2 t) {
   float sx = s.x / (s.x + s.y), sy = s.z / (s.z + s.w);
   return mix(mix(s3, s2, sx), mix(s1, s0, sx), sy);
 }
-float classAt(vec2 t) { return bicubic(t).r * 255.0 / ${GL_DATA.q}.0; }
+// v1.46: the class smoothed over u_blur texels (mean of four B-spline samples around t, kept inside the time step's
+// cell and its margin): coarse sources (2 km Europe grid, quantised national products) drew stair-step outlines when
+// zoomed in (user, 22.11.2026: "Ränder komisch verpixelt", picked variant C). Only the picture - the values are not.
+float smoothClass(vec2 t) {
+  vec2 lo = u_cell - 0.5, hi = u_cell + ${GL_DATA.size}.0 + 0.5;
+  vec2 a = vec2(u_blur, u_blur * 0.4), b = vec2(-u_blur * 0.4, u_blur);
+  return 0.25 * (bicubic(clamp(t + a, lo, hi)).r + bicubic(clamp(t - a, lo, hi)).r +
+                 bicubic(clamp(t + b, lo, hi)).r + bicubic(clamp(t - b, lo, hi)).r) * 255.0 / ${GL_DATA.q}.0;
+}
+float classAt(vec2 t) { return u_blur > 0.0 ? smoothClass(t) : bicubic(t).r * 255.0 / ${GL_DATA.q}.0; }
 void main() {
   vec2 t = u_cell + v_uv * ${GL_DATA.size}.0;
-  vec4 d = bicubic(t);
-  float q = d.r * 255.0 / ${GL_DATA.q}.0;
+  vec4 d = bicubic(t);  // kind and faint flag unsmoothed
+  float q = classAt(t);
   if (q < 0.6) discard;
   float cls = clamp(floor(q), 1.0, 8.0);
   // smooth outer edge (dry -> class 1) over about one device pixel
-  float edge = clamp((q - 1.0) / max(fwidth(q), 1e-4) + 0.5, 0.0, 1.0);
+  float fw = max(fwidth(q), 1e-4);
+  float edge = clamp((q - 1.0) / fw + 0.5, 0.0, 1.0);
   if (edge <= 0.0) discard;
   float kind = clamp(floor(d.g * 255.0 / 40.0 + 0.5), 0.0, 5.0);
   vec4 c = texture2D(u_pal, vec2((cls - 0.5) / 8.0, (kind + 0.5) / 6.0));
-  // inner side of a boundary to a lower class (incl. dry): darker contour, as the server's pictures
-  float lo = min(min(classAt(t + vec2(u_px, 0.0)), classAt(t - vec2(u_px, 0.0))),
-                 min(classAt(t + vec2(0.0, u_px)), classAt(t - vec2(0.0, u_px))));
-  if (floor(lo) < cls) c.rgb *= 0.7;
+  // inner side of a boundary to a lower class (incl. dry): darker contour, as the server's pictures (the four
+  // neighbours only near a boundary - far from one the class cannot drop within a pixel)
+  if (floor(q - 2.0 * fw) < cls) {
+    float lo = min(min(classAt(t + vec2(u_px, 0.0)), classAt(t - vec2(u_px, 0.0))),
+                   min(classAt(t + vec2(0.0, u_px)), classAt(t - vec2(0.0, u_px))));
+    if (floor(lo) < cls) c.rgb *= 0.7;
+  }
   float a = c.a * edge * (d.b > 0.5 ? 0.65 : 1.0);
   gl_FragColor = vec4(c.rgb * a, a);
 }`;
@@ -2786,6 +2816,7 @@ const GLRain = L.Renderer.extend({
       gl.uniform2f(loc("u_cell"), col * S + GL_DATA.margin, row * S + GL_DATA.margin);
       gl.uniform2f(loc("u_tex"), e.w, e.h);
       gl.uniform1f(loc("u_px"), GL_DATA.size / (span * r));
+      gl.uniform1f(loc("u_blur"), GL_BLUR * Math.pow(2, e.z - 8)); // the same ground size at every data zoom
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     }
   },
