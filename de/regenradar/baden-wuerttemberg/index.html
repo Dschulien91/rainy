@@ -274,6 +274,16 @@
   .fav .hours { margin: 0; padding: 0 4px; border-top: 0; }
   .fav .loading { color: var(--muted); font-size: 13px; padding: 14px 10px; }
   .pin { background: none; border: 0; filter: drop-shadow(0 2px 3px rgba(0,0,0,.4)); }
+  /* the name of the user's own place next to the blue dot, at every zoom (v1.45) - looks like the map's city names */
+  .leaflet-tooltip.here-label { background: none; border: 0; box-shadow: none; padding: 0 0 0 2px; margin-left: 4px;
+    font: 700 14px/1.2 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: #eef1f5; white-space: nowrap;
+    text-shadow: 0 0 2px rgba(18,20,24,.95), 0 0 2px rgba(18,20,24,.95), 0 0 3px rgba(18,20,24,.9), 0 0 4px rgba(18,20,24,.8); }
+  .leaflet-tooltip.here-label.light { color: #1b1f26;
+    text-shadow: 0 0 2px #fff, 0 0 2px #fff, 0 0 3px rgba(255,255,255,.95), 0 0 4px rgba(255,255,255,.9); }
+  .leaflet-tooltip.here-label::before { display: none; }
+  .leaflet-tooltip.here-label.pill { padding: 3px 8px; border-radius: 10px; text-shadow: none; font-size: 13px;
+    background: rgba(28,31,37,.82); box-shadow: 0 1px 4px rgba(0,0,0,.35); }
+  .leaflet-tooltip.here-label.pill.light { background: rgba(255,255,255,.9); }
   .place .tzhint { margin-left: 6px; font-size: 11px; color: var(--muted); }
   .place .pin-ico { width: 13px; height: 13px; vertical-align: -1px; margin-right: 3px; color: var(--muted); }
   .fab.spin { animation: spin 0.8s linear infinite; }
@@ -508,11 +518,11 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=1.44"></script>
-<script src="lang/en.js?v=1.44"></script>
+<script src="lang/de.js?v=1.45"></script>
+<script src="lang/en.js?v=1.45"></script>
 <script>
 "use strict";
-const VERSION = "v1.44";
+const VERSION = "v1.45";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -1033,6 +1043,7 @@ function applySunTint() {
 // Show the sunny-only layers in sun mode.
 function applyBasemapMode() {
   applyBaseMode();
+  updateHereLabel();
   const m = basemapTop && basemapTop.getMaplibreMap();
   if (!m || !m.isStyleLoaded()) return;
   const sun = state.mode === "sun";
@@ -1054,6 +1065,34 @@ buildBasemap(curDesign);
 const youAreHere = L.circleMarker([FALLBACK.lat, FALLBACK.lon], {
   radius: 7, color: "#fff", weight: 3, fillColor: "#2f7bf5", fillOpacity: 1, pane: "labels",
 }).addTo(map);
+// v1.45: the name of the user's own place stays next to the blue dot at every zoom (user, 22.11.2026) - the map's own
+// label of that place only appears from some zoom on and sits at the town centre, often off screen when zoomed in.
+// The map's label with the same name is hidden meanwhile, so the name is not shown twice. ?here=b|c|d: the variants.
+const HERE_STYLE = (new URLSearchParams(location.search).get("here") || "a").toLowerCase();
+let hereName = "";
+function updateHereLabel(name) {
+  if (name !== undefined) hereName = name || "";
+  if (HERE_STYLE === "off" || !hereName) { youAreHere.unbindTooltip(); hideMapLabel(""); return; }
+  const below = HERE_STYLE === "c";
+  const cls = "here-label" + (HERE_STYLE === "b" || HERE_STYLE === "d" ? " pill" : "") + (mapDark ? "" : " light");
+  const tip = youAreHere.getTooltip();
+  if (!tip || tip.options.className !== cls) {
+    youAreHere.unbindTooltip();
+    youAreHere.bindTooltip(esc(hereName), { permanent: true, interactive: false, className: cls,
+      direction: below ? "bottom" : HERE_STYLE === "d" ? "top" : "right", offset: below ? [0, 6] : HERE_STYLE === "d" ? [0, -8] : [6, 0] });
+  } else tip.setContent(esc(hereName));
+  hideMapLabel(hereName);
+}
+function hideMapLabel(name) {
+  const m = basemapTop && basemapTop.getMaplibreMap();
+  if (!m || !m.isStyleLoaded()) return;
+  const lang = (navigator.language || "de").slice(0, 2);
+  const label = ["coalesce", ["get", `name:${lang}`], ["get", "name"]];
+  for (const l of m.getStyle().layers) {
+    if (l.type !== "symbol" || l["source-layer"] !== "place") continue;
+    m.setLayoutProperty(l.id, "text-field", name ? ["case", ["==", label, name], "", label] : label);
+  }
+}
 const pickedMarker = L.marker([0, 0], {
   interactive: false, keyboard: false,
   icon: L.divIcon({
@@ -3444,6 +3483,7 @@ async function setLocation(loc, picked, knownName) {
   const name = await nameP;
   if (req !== locRequest) return;
   state.placeName = name;
+  if (!picked && state.home && sameLoc(state.home, loc)) updateHereLabel(name);
   renderPlace();
   updateHeader();
   // a landing page's place (window.PRESET) is not the user's home: do not remember it for the next visit
