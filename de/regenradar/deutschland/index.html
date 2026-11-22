@@ -517,11 +517,11 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=1.47"></script>
-<script src="lang/en.js?v=1.47"></script>
+<script src="lang/de.js?v=1.48"></script>
+<script src="lang/en.js?v=1.48"></script>
 <script>
 "use strict";
-const VERSION = "v1.47";
+const VERSION = "v1.48";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -2989,7 +2989,10 @@ function summary() {
   // no radar and no model values (offline, both sources failed): say so instead of "dry" / "no sun" (v1.32)
   if (!fr.length || !fr.some((f) => Number.isFinite(f.value))) return t("summary.noData");
   if (state.mode === "rain") {
-    const wet = (f) => f.value >= 0.1, word = (f) => t(KIND_WORD[f.ptype] || "kind.rain");
+    // v1.48: wet from the map's lightest class on (RAIN_BANDS[0], like the bars). With 0.1 the headline said "2 h dry"
+    // while the map and the bars showed light rain at the place (user, Piacenza; 22.11.2026: 79 of 102 places in the
+    // map's lightest class got "dry")
+    const wet = (f) => f.value >= RAIN_BANDS[0], word = (f) => t(KIND_WORD[f.ptype] || "kind.rain");
     if (wet(fr[0])) {
       const dry = fr.find((f) => !wet(f));
       return dry ? t("summary.until", { kind: word(fr[0]), time: fmtTime(dry.ts) }) : t("summary.lasts", { kind: word(fr[0]), count: h });
