@@ -112,6 +112,7 @@ def state(day):
                 out.append(f"  !! kein {label} den ganzen Tag")
         out += sources(hs)
         out += weather_model(hs)
+        out += radars(hs)
         rss =[r["rss"] for r in hs if r.get("rss")]
         if rss:
             out.append(f"  Speicher: im Mittel {sum(rss) / len(rss):.0f} MB, höchstens {max(rss)} MB")
@@ -171,6 +172,20 @@ def sources(hs):
         out.append(f"  Quelle {name}: " + (f"{flag}{5 * late} min ohne neue Daten (längster Ausfall {5 * longest} min)" if late
                                            else "lückenlos"))
     return out
+
+
+def radars(hs):
+    """National radars missing from the OPERA composite (health rows "radars_out" of the Europe instances,
+    server-v1.91). Not ours to fix, so no "!!": but their area was hatched instead of showing rain (23.11.2026: the
+    Romanian radar robar near Iasi left at 11:20Z and a large rain area over Moldova vanished from the map)."""
+    rows = [r["radars_out"] for r in hs if isinstance(r.get("radars_out"), list)]
+    if not rows:
+        return []
+    mins = Counter(c for r in rows for c in r)
+    if not mins:
+        return ["  Radare im europäischen Verbund: keins ausgefallen"]
+    return ["  Radare im europäischen Verbund ausgefallen (Gebiet schraffiert): "
+            + ", ".join(f"{c} {5 * n} min" for c, n in mins.most_common())]
 
 
 def weather_model(hs):

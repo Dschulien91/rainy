@@ -107,7 +107,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v1.90"
+VERSION = "server-v1.91"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -1498,11 +1498,46 @@ class EuropeOpera(Region):
     opera_newest = None  # the newest OPERA image listed (ms), for the source watch (monitor_status)
     BUCKET = BUCKETS[0]  # for check_opera_gauges.py
 
+    # Radar watch (server-v1.91): which national radars made each image (the file's how/nodes). User 23.11.2026: "over
+    # Moldova a huge cloud suddenly vanishes at about 12:20" - the Romanian radar robar (Barnova near Iasi, it covers
+    # NE Romania and Moldova) left the composite at 11:20Z; OPERA marks its area "no data", the map hatches it and the
+    # place forecast switches to the weather model, but nobody knew. Now a radar that leaves (or comes back) is logged
+    # and the health rows carry the missing ones for the daily report ("Radare ... ausgefallen").
+    NODE_KEEP_MS = 6 * 3600_000   # a radar unseen for longer is no longer expected (decommissioned, seasonal)
+    node_seen = None              # {radar code: newest image time (ms) it was in}
+    node_ts = 0                   # the newest image the watch has seen (images can load out of order)
+    nodes_missing = ()            # radars of the last 6 h that are not in the newest image
+
+    def watch_nodes(self, url, nodes):
+        try:
+            stamp = url.split("OPERA@")[1].split("@")[0]
+            ts = int(datetime.strptime(stamp, "%Y%m%dT%H%M").replace(tzinfo=timezone.utc).timestamp() * 1000)
+            codes = set(re.findall(r"[a-z]{5}", nodes.decode() if isinstance(nodes, bytes) else str(nodes)))
+            if not codes or ts <= self.node_ts:
+                return
+            seen = self.node_seen if self.node_seen is not None else {}
+            for c in codes:
+                seen[c] = ts
+            missing = sorted(c for c, t in seen.items() if c not in codes and ts - t <= self.NODE_KEEP_MS)
+            if self.node_seen is not None:  # not on the first image after a start (everything would be "new")
+                hhmm = f"{datetime.fromtimestamp(ts / 1000, timezone.utc):%H:%MZ}"
+                for c in sorted(set(missing) - set(self.nodes_missing)):
+                    log(f"radar {c} left the OPERA composite at {hhmm} (its area shows no data)")
+                for c in sorted(set(self.nodes_missing) - set(missing)):
+                    log(f"radar {c} is back in the OPERA composite at {hhmm}")
+            self.node_seen, self.node_ts, self.nodes_missing = seen, ts, tuple(missing)
+            for c in [c for c, t in seen.items() if ts - t > self.NODE_KEEP_MS]:
+                del seen[c]
+        except Exception as e:  # never lose an image over the watch
+            log(f"radar watch failed: {e}")
+
     def load(self, url):
         with h5py.File(io.BytesIO(fetch(url)), "r") as f:
             d = f["dataset1/data1/data"][:]
             w = f["dataset1/data1/what"].attrs
             gain, offset, nodata, undetect = (float(w[k]) for k in ("gain", "offset", "nodata", "undetect"))
+            if "how" in f and "nodes" in f["how"].attrs:
+                self.watch_nodes(url, f["how"].attrs["nodes"])
         nod = d == nodata
         dbz = d * gain + offset
         dbz[(d == undetect) | nod] = -32.0
@@ -2360,6 +2395,8 @@ def monitor_status():
            "sun_age": round((now - sun) / 60_000, 1) if sun else None, "src": source_ages(now)}
     if EDITION == "de":
         out.update(om_probe_take())  # "om" / "om_pub": weather model probes since the last row (server-v1.86)
+    elif not NA and REGIONS["eu"].node_seen is not None:  # radars missing from the newest OPERA image (server-v1.91)
+        out["radars_out"] = list(REGIONS["eu"].nodes_missing)
     return out
 
 
