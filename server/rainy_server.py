@@ -107,7 +107,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v1.88"
+VERSION = "server-v1.89"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -148,10 +148,13 @@ def om_probe_loop():
     import random
     public = os.environ.get("PUBLIC_URL", "").rstrip("/")
     while True:
-        lat, lon = random.uniform(44.0, 55.0), random.uniform(2.0, 16.0)  # Europe, where the app's users are
         for key, base in (("om", OPENMETEO_URL), ("om_pub", f"{public}/om" if public else None)):
             if not base:
                 continue
+            # each probe its own random place (Europe, where the app's users are): with one place for both, the
+            # public probe always found the files the direct one had just read in the page cache (22.11.: direct up
+            # to 13-19 s once an hour, public never above 0.5 s)
+            lat, lon = random.uniform(44.0, 55.0), random.uniform(2.0, 16.0)
             t0, err = time.time(), None
             try:
                 req = urllib.request.Request(f"{base}/v1/forecast?latitude={lat:.2f}&longitude={lon:.2f}{OM_PROBE_Q}",

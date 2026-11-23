@@ -83,7 +83,18 @@ for (kind, product), rs in sorted(runs.items()):
               + ("   <-- STUFE in der Vorhersage" if med[top] > 1.6 * allm and med[top] > 0.5 * FLOOR[kind]
                  and med[top] > 1.2 * m else ""))  # a step no larger than measured -> measured is no visible step
     limit = max(3 * m, FLOOR[kind])
-    odd = sorted(((c, t) for t, c in measured.items() if c > limit), reverse=True)
+    # A jump is ONE step far above its neighbours (a bad image). A whole stretch of high steps is weather: on 22.11.
+    # 03-05Z small fast showers (wet area ~1000 cells) changed 0.6-0.75 per step for two hours and were flagged as 23
+    # "jumps". Neighbours = the measured steps up to 10 min before and after.
+    def isolated(t, c):
+        nb = [measured[t + d] for d in (-600_000, -300_000, 300_000, 600_000) if t + d in measured]
+        return kind != "rain" or not nb or c > 1.5 * median(nb)  # sun: the sunset switch is a stretch, keep it
+    high = [(c, t) for t, c in measured.items() if c > limit]
+    odd = sorted(((c, t) for c, t in high if isolated(t, c)), reverse=True)
     if odd:
-        print(f"  SPRÜNGE zwischen gemessenen Bildern (> {limit:.2f}): {len(odd)}, die größten: "
-              + ", ".join(f"{hm(t)} {c:.2f}" for c, t in odd[:6]))
+        print(f"  SPRÜNGE zwischen gemessenen Bildern (> {limit:.2f}, deutlich über den Nachbarschritten): {len(odd)}, "
+              "die größten: " + ", ".join(f"{hm(t)} {c:.2f}" for c, t in odd[:6]))
+    if len(high) > len(odd):
+        span = sorted(t for c, t in high if not isolated(t, c))
+        print(f"  (Wetter, kein Sprung: {len(high) - len(odd)} Schritte > {limit:.2f} in Folge, {hm(span[0])}-{hm(span[-1])}"
+              " - schnelle kleine Schauer)")
