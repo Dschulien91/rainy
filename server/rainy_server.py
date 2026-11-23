@@ -107,7 +107,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v1.89"
+VERSION = "server-v1.90"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -901,6 +901,9 @@ class DeModelArea:
         return self.to_ll.transform(x0 + (np.asarray(col) + 0.5) * self.de.CELL, y1 - (np.asarray(row) + 0.5) * self.de.CELL)
 
 
+OWN_MODEL = os.environ.get("OWN_MODEL") == "1"  # Germany: serve the "model" shadow as own (see OwnNowcast.step)
+
+
 class OwnNowcast:
     """Our own 2 h forecast on the DWD radar analyses, next to DWD's (RV) - selectable in the app, scored by
     fcverify.py against the later radar image just like DWD's. pySTEPS S-PROG: motion per region (Lucas-Kanade
@@ -960,9 +963,12 @@ class OwnNowcast:
         dwd_new = self._dwd_new_cells(ref)  # takes de.lock itself: not inside the block below
         with de.lock:
             if de.ref == ref:
-                de.set_own(ref, grids)
-                # scored by fcverify only: pure S-PROG; DWD's own forecast plus the model's new showers in the 2nd hour
-                de.fc_shadow = {"model": model, "dwdnew": dwd_new, "cells": cells, "sprog0": sprog0}
+                # OWN_MODEL=1 (server-v1.90): the "model" shadow is served as our own forecast - it led at the DWD
+                # gauges from +60 on 3 rain days (20.-23.11.2026, never worse) and cell by cell from +90 over 7 days;
+                # plain S-PROG stays measured as the shadow "pure" (also recorded while OWN_MODEL is off, then = own)
+                de.set_own(ref, model if OWN_MODEL else grids)
+                # scored by fcverify only; dwdnew = DWD's own forecast plus the model's new showers in the 2nd hour
+                de.fc_shadow = {"model": model, "pure": grids, "dwdnew": dwd_new, "cells": cells, "sprog0": sprog0}
         self.done = ref
         log(f"[{datetime.now():%H:%M:%S}] own nowcast: run {datetime.fromtimestamp(ref / 1000, timezone.utc):%H:%M}Z in {time.time() - started:.0f}s")
 

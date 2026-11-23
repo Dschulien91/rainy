@@ -177,8 +177,9 @@ class Recorder:
         # the grid it leads from +90 (168 h to 20.11.: CSI +120 .54 vs own .50) - the independent truth must agree
         # before it may be served. NaN where it does not exist (measured frames: = own).
         shadow = getattr(de, "fc_shadow", None) or {}
-        have_model = have_own and bool(shadow.get("model"))
-        model = []
+        # since server-v1.90 also "pure" (plain S-PROG): the old method once "model" is served as own (OWN_MODEL=1)
+        gshadows = [k for k in ("model", "pure") if have_own and shadow.get(k)]
+        gvals = {k: [] for k in gshadows}
         eu = self.mosaic.regions["eu"]
         raw = getattr(eu, "fc_raw", None) or {}
         ec, er = (((np.asarray(v, np.float64) + 0.5) / 3 - 0.5).astype(np.float32) for v in eu.to_pixels(PX, PY))
@@ -190,10 +191,11 @@ class Recorder:
             # radar image, never against what reached the ground
             own.append(self.mosaic.rain(f["ts"], PX, PY, variant="own")[0].mean(axis=1) if have_own
                        else np.full(len(X), np.nan, np.float32))
-            if have_model and f["fc"] and f["ts"] in shadow["model"]:
-                model.append(self.mosaic.rain(f["ts"], PX, PY, variant="model")[0].mean(axis=1))
-            else:
-                model.append(own[-1] if have_model and not f["fc"] else np.full(len(X), np.nan, np.float32))
+            for k in gshadows:
+                if f["fc"] and f["ts"] in shadow[k]:
+                    gvals[k].append(self.mosaic.rain(f["ts"], PX, PY, variant=k)[0].mean(axis=1))
+                else:
+                    gvals[k].append(own[-1] if not f["fc"] else np.full(len(X), np.nan, np.float32))
             share.append((self.mosaic.rain(f["ts"], CX, CY)[0] >= ALERT_WET).mean(axis=1))
             share_own.append((self.mosaic.rain(f["ts"], CX, CY, variant="own")[0] >= ALERT_WET).mean(axis=1)
                              if have_own else np.full(len(X), np.nan, np.float32))
@@ -208,7 +210,7 @@ class Recorder:
         np.savez_compressed(os.path.join(LOG_DIR, f"fc_rain_{ref}_{now}.npz"), issued=now, ref=ref, ts=np.array(ts),
                             ids=np.array(s["id"]), lat=s["lat"], lon=s["lon"],
                             fc=np.array(fc), rate=np.array(rate, np.float32), own=np.array(own, np.float32),
-                            **({"model": np.array(model, np.float32)} if have_model else {}),
+                            **{k: np.array(v, np.float32) for k, v in gvals.items()},
                             share=np.array(share, np.float32), share_own=np.array(share_own, np.float32),
                             **({"opera": np.array(opera, np.float32), "noblend": np.array(noblend, np.float32)}
                                if eu.ref else {}),  # Germany edition: no Europe composite to compare with
