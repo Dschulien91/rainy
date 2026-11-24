@@ -305,6 +305,7 @@ class RegionVerify:
         r = self.region
         with r.lock:
             ref, obs = r.ref, dict(r.obs)
+            bridged = dict(getattr(r, "bridged", None) or {})  # dropped-out radar areas filled with a forecast
             fc, raw = dict(r.fc), dict(getattr(r, "fc_cells", None) or {})
             pure = dict(getattr(r, "fc_pure", None) or {})
             nwp = dict(getattr(r, "fc_nwp", None) or {})  # rapid-update model blend (nwp_blend.py), at ~4 km
@@ -350,7 +351,11 @@ class RegionVerify:
             z = self.pending.get(key)
             self.pending.drop(key)
             if valid not in truth:
-                truth[valid] = self._grid(obs[valid])
+                a, cov = self._grid(obs[valid])
+                if valid in bridged:  # a forecast is no truth (server-v1.92)
+                    b = (bridged[valid] > 0).astype(np.float32)
+                    cov = cov & ~(_down(b, (cov.shape[1], cov.shape[0])) > 0)
+                truth[valid] = a, cov
             a, cov = truth[valid]
             if z is None or z["g"].shape != a.shape:
                 continue

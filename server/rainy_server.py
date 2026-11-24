@@ -107,7 +107,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v1.91"
+VERSION = "server-v1.92"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -1018,17 +1018,80 @@ class Region:
     # rain area, a jump at "now"). The own picture has such holes more often: a step waits up to 20 min for a
     # national layer while the next one is already there. The real image replaces the fill when it arrives.
     FILL_GAPS = False
+    # BRIDGE (server-v1.92): one radar of a composite drops out for a few images while the others keep coming
+    # (23./24.11.2026 radar watch: Iceland, Norway, Ukraine for 5-10 min each, several times a night; Romania for
+    # hours). Its area turned "no data" at once and a rain field vanished from the map (user 23.11.: Moldova). Pixels
+    # with no data now that were covered one step before get the previous run's forecast for this step, for at most
+    # BRIDGE_STEPS steps in a row; a longer outage is hatched as before. Bridged pixels stay out of the verification's
+    # truth (fcverify: self.bridged).
+    BRIDGE_GAPS = False
+    BRIDGE_STEPS = 3
+    # OUTAGE MAP (server-v1.92): when every area was last covered (coarse, OUT_DOWN x the grid), for the app's
+    # marking of areas whose radar is out right now (/api/radar/mask?kind=outage) - unlike areas no radar ever reaches
+    OUT_DOWN = 4
+    OUT_KEEP_MIN = 6 * 60
     SPROG_THR = 0.1   # S-PROG's rain / no rain threshold (mm/h)
 
     def __init__(self):
         self.lock = threading.Lock()
         self.obs, self.fc, self.ref = {}, {}, None
         self.filled = set()  # steps in obs that are a forecast standing in for a missing image
+        self.bridged = {}    # step -> uint8 grid: >0 where a dropped-out radar's area was bridged (BRIDGE_GAPS)
+        self.cov_seen = None  # int32 minutes, coarse: when each area was last covered (outage map)
         self.model = None
 
     def latest(self):
         with self.lock:
             return self.obs[max(self.obs)] if self.obs else None
+
+    def bridge(self, t):
+        """BRIDGE_GAPS (under the lock): fill the area of a radar that just dropped out from the previous run's
+        forecast for step t, for at most BRIDGE_STEPS steps in a row."""
+        g, prev, f = self.obs[t], self.obs.get(t - STEP_MS), self.fc.get(t)
+        if prev is None or f is None or prev.shape != g.shape or f.shape != g.shape:
+            return
+        lost = (g < 0) & (prev >= 0)
+        if not lost.any():
+            return
+        before = self.bridged.get(t - STEP_MS)
+        count = np.where(lost, (before.astype(np.int32) if before is not None else 0) + 1, 0)
+        sel = lost & (count <= self.BRIDGE_STEPS) & (f >= 0)
+        n = int(sel.sum())
+        if not n:
+            return
+        g = g.copy()
+        g[sel] = f[sel]
+        self.obs[t] = g
+        self.bridged[t] = np.where(sel, count, 0).astype(np.uint8)
+        if n > 2000 and int(count[sel].max()) == 1:  # a radar's area, not a few edge pixels: once per outage
+            log(f"{self.name}: {n} pixels without data at {datetime.fromtimestamp(t / 1000, timezone.utc):%H:%MZ} "
+                f"bridged with the forecast (a radar or the whole source dropped out)")
+
+    def note_coverage(self, t):
+        """Outage map (under the lock): the coarse cells covered in step t get its time."""
+        g = self.obs[t]
+        d = self.OUT_DOWN
+        h, w = g.shape[0] // d, g.shape[1] // d
+        cov = np.asarray(g[:h * d, :w * d] >= 0).reshape(h, d, w, d).mean(axis=(1, 3)) >= 0.5
+        if self.cov_seen is None or self.cov_seen.shape != cov.shape:
+            self.cov_seen = np.full(cov.shape, -10 ** 9, np.int32)
+        self.cov_seen[cov] = np.maximum(self.cov_seen[cov], t // 60_000)
+
+    def outage(self, X, Y):
+        """True where the newest image has no data but the area was covered within OUT_KEEP_MIN: a radar is out."""
+        with self.lock:
+            seen = self.cov_seen
+            newest = max((t for t in self.obs if t not in self.filled), default=None)
+        if seen is None or newest is None:
+            return np.zeros(np.shape(X), bool)
+        recent = seen >= newest // 60_000 - self.OUT_KEEP_MIN
+        col, row = (np.asarray(v, np.float64) for v in self.to_pixels(X, Y))
+        d, (h, w) = self.OUT_DOWN, seen.shape
+        r, c = np.floor(row / d).astype(np.int64), np.floor(col / d).astype(np.int64)
+        inside = (r >= 0) & (r < h) & (c >= 0) & (c < w)
+        out = np.zeros(np.shape(X), bool)
+        out[inside] = recent[r[inside], c[inside]]
+        return out & ~sample(self, self.grid(newest), X, Y)[1]
 
     # subclasses: list_times() -> {ts: source}, load(source) -> grid, to_pixels(x3857, y3857) -> (col, row)
     def frames(self):
@@ -1054,6 +1117,10 @@ class Region:
             with self.lock:
                 self.obs[t] = g
                 self.filled.discard(t)
+                self.bridged.pop(t, None)
+                if self.BRIDGE_GAPS:
+                    self.bridge(t)
+                self.note_coverage(t)
         if not new:
             return 0
         with self.lock:
@@ -1061,6 +1128,8 @@ class Region:
                 if t not in avail and not (t in self.filled and t > cutoff):
                     del self.obs[t]
                     self.filled.discard(t)
+            for t in [t for t in self.bridged if t not in self.obs]:
+                del self.bridged[t]
             times = sorted(self.obs)
             if self.FILL_GAPS:
                 for a, b in zip(times, times[1:]):
@@ -1237,6 +1306,7 @@ class EuropeOpera(Region):
     # see the raw images.
     DESPOKE = True
     FILL_GAPS = True
+    BRIDGE_GAPS = os.environ.get("BRIDGE_GAPS", "1") != "0"
     # WARM START: the images and the forecast of the last run are kept on disk, and a restarted instance continues
     # with them at once instead of serving nothing, then measured images without a forecast, for 2-4 minutes
     # (user, 13.11.2026: "mal war was da und manchmal nicht ... nur bis 'jetzt' was da" - three restarts while he
@@ -1961,6 +2031,12 @@ def coverage_mask(bbox, w, h, kind="rain"):
     in the Germany edition exactly Germany. kind "sun" in the Europe instance: the Europe sunny area."""
     X, Y = view_coords(bbox, w, h)
     cov = np.zeros((h, w), bool)
+    if kind == "outage" and EDITION != "eu":  # only the radar composites know outages (server-v1.92): none here
+        kind, X = "none", X[:0]
+    if kind == "none":
+        buf = io.BytesIO()
+        Image.fromarray(np.zeros((h, w, 4), np.uint8), "RGBA").save(buf, "PNG", compress_level=3)
+        return buf.getvalue()
     if kind == "sun" and EDITION == "eu":
         col, row = (v.astype(np.float32) for v in SUNNY.grid.to_pixels(X, Y))
         cov = cv2.remap(SUNNY.inside(), col, row, cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT, borderValue=0) > 0.5
@@ -1978,6 +2054,13 @@ def coverage_mask(bbox, w, h, kind="rain"):
         Image.fromarray(img, "RGBA").save(buf, "PNG", compress_level=3)
         return buf.getvalue()
     eu = REGIONS["eu"]
+    if kind == "outage":  # areas whose radar is out right now (server-v1.92): opaque there
+        cov = eu.outage(X, Y)
+        img = np.zeros((h, w, 4), np.uint8)
+        img[cov] = (0, 0, 0, 255)
+        buf = io.BytesIO()
+        Image.fromarray(img, "RGBA").save(buf, "PNG", compress_level=3)
+        return buf.getvalue()
     frames, _ = eu.frames()
     obs = [f["ts"] for f in frames if not f["fc"]]
     if obs:  # the newest image's coverage (v1.70: before the first one's - an OPERA outage looked dry, not hatched)

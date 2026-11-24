@@ -523,7 +523,7 @@
 <script src="lang/en.js"></script>
 <script>
 "use strict";
-const VERSION = "v1.50";
+const VERSION = "v1.51";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -2316,6 +2316,46 @@ setInterval(loadThunderLayers, 5 * 60e3);
 // ---------- Where data is missing ----------
 // Rain mode: diagonal hatching where there is neither radar nor a satellite rain estimate.
 // Sunny mode: hatching where no weather satellite we use covers the map.
+// v1.51: areas whose radar is out RIGHT NOW (server-v1.92 /api/radar/mask?kind=outage: covered in the last 6 h, no
+// data in the newest image) - user 23.11.2026: a radar near Iasi dropped out, the light hatching over Moldova read as
+// "the cloud vanished". Marking variants for the user to pick with ?outage=A..D; without it nothing changes.
+// A: denser, stronger hatching; B: orange hatching; C: grey veil; D: A plus a note on the map.
+const OUTAGE_STYLE = ["A", "B", "C", "D"].find((v) => v === (new URLSearchParams(location.search).get("outage") || "").toUpperCase());
+async function drawOutage(ctx, bbox, w, h) {
+  const om = await loadImage(`${RADAR_BASE}/api/radar/mask?bbox=${bbox}&width=${w}&height=${h}&kind=outage`).catch(() => null);
+  if (!om) return;
+  const [c2, x2] = canvasFor({ w, h }, null);
+  const hatch = (step, line, fill) => {
+    x2.fillStyle = fill; x2.fillRect(0, 0, w, h);
+    x2.strokeStyle = line; x2.lineWidth = 1;
+    for (let i = -h; i < w; i += step) { x2.beginPath(); x2.moveTo(i, h); x2.lineTo(i + h, 0); x2.stroke(); }
+  };
+  if (OUTAGE_STYLE === "B") hatch(5, dark ? "rgba(255,160,60,0.55)" : "rgba(220,110,0,0.50)", dark ? "rgba(255,140,0,0.12)" : "rgba(230,120,0,0.10)");
+  else if (OUTAGE_STYLE === "C") { x2.fillStyle = dark ? "rgba(0,0,0,0.45)" : "rgba(110,110,110,0.38)"; x2.fillRect(0, 0, w, h); }
+  else hatch(4, dark ? "rgba(255,255,255,0.32)" : "rgba(0,0,0,0.30)", dark ? "rgba(0,0,0,0.28)" : "rgba(90,90,90,0.16)");
+  x2.globalCompositeOperation = "destination-in"; // keep the pattern only inside the outage area
+  x2.drawImage(om, 0, 0, w, h);
+  let n = 0, sx = 0, sy = 0;
+  if (OUTAGE_STYLE === "D") {
+    const a = x2.getImageData(0, 0, w, h).data;
+    for (let y = 0; y < h; y += 2) for (let x = 0; x < w; x += 2) if (a[(y * w + x) * 4 + 3] > 0) { n++; sx += x; sy += y; }
+  }
+  ctx.globalCompositeOperation = "source-over";
+  ctx.drawImage(c2, 0, 0);
+  // D: the note sits in the middle of the area (at least ~2 % of the overlay), as a map label in screen pixels
+  return n > 150 ? { x: sx / n / w, y: sy / n / h } : null;
+}
+let outageLabel = null;
+function placeOutageLabel(at, nw, se) {
+  if (!at) { if (outageLabel) { outageLabel.remove(); outageLabel = null; } return; }
+  const ll = L.CRS.EPSG3857.unproject(L.point(nw.x + at.x * (se.x - nw.x), nw.y - at.y * (nw.y - se.y)));
+  const icon = L.divIcon({ className: "", iconSize: null,
+    html: `<div style="transform:translate(-50%,-50%);white-space:nowrap;padding:3px 10px;border-radius:12px;font:600 12px system-ui,sans-serif;` +
+      `background:${dark ? "rgba(20,24,32,0.85)" : "rgba(255,255,255,0.92)"};color:${dark ? "#e8eaf0" : "#202430"};` +
+      `box-shadow:0 1px 4px rgba(0,0,0,0.25)">${t("map.radarOut")}</div>` });
+  if (!outageLabel) outageLabel = L.marker(ll, { icon, interactive: false, pane: "nodata" }).addTo(map);
+  else { outageLabel.setLatLng(ll); outageLabel.setIcon(icon); }
+}
 map.createPane("nodata").style.zIndex = 345;
 let nodataOverlay = null, nodataToken = 0;
 const CA_BOX = [[41.5, -141], [62, -52]];
@@ -2356,6 +2396,12 @@ async function updateNodata() {
       box([[-40, -60], [72, 60]]); // satellite rain estimate (rough, drawn fainter) covers Europe/Africa/Atlantic
     } else box(US_BOX);
   }
+  let outageAt = null;
+  if (OUTAGE_STYLE && state.mode !== "sun" && /\/(eu|eun|na)$/.test(RADAR_BASE || "")) {
+    outageAt = await drawOutage(ctx, `${nw.x},${se.y},${se.x},${nw.y}`, w, h);
+    if (token !== nodataToken) return;
+  }
+  if (OUTAGE_STYLE) placeOutageLabel(OUTAGE_STYLE === "D" ? outageAt : null, nw, se);
   const url = c.toDataURL();
   if (!nodataOverlay) nodataOverlay = L.imageOverlay(url, b, { pane: "nodata", className: "nodata-overlay" }).addTo(map);
   else { nodataOverlay.setUrl(url); nodataOverlay.setBounds(b); }
