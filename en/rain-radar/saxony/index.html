@@ -518,13 +518,13 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=1.54"></script>
-<script src="lang/en.js?v=1.54"></script>
+<script src="lang/de.js?v=1.55"></script>
+<script src="lang/en.js?v=1.55"></script>
 <script>
 "use strict";
 // v1.52: a radar that is out is hatched like every other area without radar (user 24.11.2026; the variants of
 // v1.51 are gone - the server keeps /api/radar/mask?kind=outage)
-const VERSION = "v1.54";
+const VERSION = "v1.55";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -2844,16 +2844,17 @@ if (USE_GL) {
 // his screenshot of 22.11.). Like the rain they are now drawn into one WebGL canvas, where tiles meet exactly. Same
 // data (the sunny atlas tiles: every 10-minute step of the timeline in 256 px cells, 8 per row; the step's own tile
 // while the atlas loads), same colours (skyLut). CloudTiles stays the fallback without WebGL.
-// Close in, an overcast map was a flat grey that did not read as "cloudy" (same message). v1.54: from zoom 9 on the
-// clouds get a texture of brighter puffs and thinner gaps that drifts slowly (variant C of 24.11.2026, the user's
-// pick of four). Still - no drifting - with "reduce motion" set on the device or while the page is hidden.
+// Close in, an overcast map was a flat grey that did not read as "cloudy" (same message): the clouds get a texture
+// of brighter puffs and thinner gaps. v1.55: still, at every zoom (user, 24.11.2026: the drifting variant C of v1.54
+// "doch nicht gut", the still one A at all zooms instead, energy-saving). The texture is fixed to the map and only
+// moves along the steering wind when another time step is shown, so it travels with the clouds on the timeline; no
+// redraw loop - the GPU works only when the map or the step changes.
 const GL_CLOUD = { size: 256, cols: 8, zooms: [3, 8], step: 600e3 };
-const CLOUD_DRIFT = !(window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches);
 const GL_CLOUD_FS = `precision highp float;
 varying vec2 v_uv;
 uniform sampler2D u_data, u_lut;
-uniform vec2 u_cell, u_tex, u_off;
-uniform float u_r, u_h, u_detail, u_time, u_dark;
+uniform vec2 u_cell, u_tex, u_off, u_shift;
+uniform float u_r, u_h, u_detail, u_dark;
 float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
 float vnoise(vec2 p) {
   vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
@@ -2861,7 +2862,7 @@ float vnoise(vec2 p) {
 }
 float fbm(vec2 p) {
   float s = 0.0, a = 0.5;
-  for (int k = 0; k < 5; k++) { s += a * vnoise(p); p = p * 2.03 + vec2(17.1, 9.2); a *= 0.5; }
+  for (int k = 0; k < 4; k++) { s += a * vnoise(p); p = p * 2.03 + vec2(17.1, 9.2); a *= 0.5; }
   return s;
 }
 void main() {
@@ -2872,8 +2873,8 @@ void main() {
   vec4 c = texture2D(u_lut, vec2((floor(d.r * 255.0 + 0.5) + 0.5) / 256.0, 0.5));
   float a = c.a; vec3 rgb = c.rgb;
   if (u_detail > 0.0 && a > 0.02) { // texture: brighter tops, thinner gaps, ~230 px puffs, moving with the map
-    vec2 w = u_off + vec2(gl_FragCoord.x, u_h - gl_FragCoord.y) / u_r; // CSS pixels of the map
-    float n = smoothstep(0.25, 0.75, fbm(w / 230.0 + vec2(u_time * 0.035, u_time * 0.012)));
+    vec2 w = u_off + vec2(gl_FragCoord.x, u_h - gl_FragCoord.y) / u_r - u_shift; // CSS pixels of the map
+    float n = smoothstep(0.25, 0.75, fbm(w / 230.0));
     float k = u_detail * smoothstep(0.08, 0.5, a);
     a *= mix(1.0, 0.45 + 0.95 * n, k);
     rgb = mix(rgb, mix(rgb * 0.8, u_dark > 0.5 ? rgb : vec3(0.93, 0.94, 0.96), 0.55 * n), k);
@@ -2975,9 +2976,17 @@ const GLCloud = GLRain.extend({
     gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this._lut(daylightAt(this.ts))); gl.uniform1i(loc("u_lut"), 1);
     gl.uniform2f(loc("u_off"), b.min.x + o.x, b.min.y + o.y);
     gl.uniform1f(loc("u_r"), r); gl.uniform1f(loc("u_h"), c.height);
-    const detail = clamp((zoom - 8) / 2, 0, 1); // the texture from zoom 9 on, full from 10
-    gl.uniform1f(loc("u_detail"), detail);
-    gl.uniform1f(loc("u_time"), CLOUD_DRIFT ? (performance.now() / 1000) % 20000 : this.ts / 600e3 % 1000);
+    // the texture at every zoom, a little weaker far out where the cloud field itself shows its shapes
+    gl.uniform1f(loc("u_detail"), clamp(0.6 + (zoom - 5) * 0.1, 0.6, 1));
+    // moved along the steering wind (~3 km height, the weather model at the place) by the time from now, in CSS px
+    const W = state.wind, mpp = 156543.03 * Math.cos((this._map.getCenter().lat * Math.PI) / 180) / Math.pow(2, zoom);
+    let sx = 0, sy = 0;
+    if (W && W.kmh != null && W.from != null) {
+      // from the run's first step (fixed while the map pans; Date.now() would creep the texture along)
+      const d = (W.kmh / 3.6) * ((this.ts - (this.run && this.run.t0 ? this.run.t0 : this.ts)) / 1000) / mpp, to = ((W.from + 180) * Math.PI) / 180;
+      sx = d * Math.sin(to); sy = -d * Math.cos(to);
+    }
+    gl.uniform2f(loc("u_shift"), sx, sy);
     gl.uniform1f(loc("u_dark"), MAP_DESIGNS[MAP_STYLE.designSun].dark ? 1 : 0);
     const aPos = gl.getAttribLocation(this.prog, "a_pos"), aUv = gl.getAttribLocation(this.prog, "a_uv");
     gl.bindBuffer(gl.ARRAY_BUFFER, this.buf);
@@ -3000,16 +3009,12 @@ const GLCloud = GLRain.extend({
       gl.uniform2f(loc("u_tex"), e.w, e.h);
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     }
-    // the texture drifts: about 12 frames a second while the sunny map is on screen, zoomed in and the page visible
-    if (CLOUD_DRIFT && detail > 0 && !document.hidden && !this.anim) this.anim = setTimeout(() => { this.anim = null; this.redraw(); }, 80);
   },
 });
 let glCloud = null;
 if (USE_GL) {
   try { glCloud = new GLCloud(); map.addLayer(glCloud); glCloud.hide(); } catch (e) { console.warn("webgl clouds", e); glCloud = null; }
 }
-// the drifting stops while the page is hidden (redraw); it picks up again when the page comes back
-document.addEventListener("visibilitychange", () => { if (!document.hidden && glCloud && glCloud.visible) glCloud.redraw(); });
 // the run the WebGL layer draws: the rain timeline's key and steps
 const GL_BASE =`${RADAR_BASE}/tiles/${RAIN_EU ? "raindataeu" : FC_OWN ? "raindataown" : "raindata"}`;
 function glSetRun() {
