@@ -121,7 +121,6 @@
   "hours.mapRange": "The map shows the next 2 hours. The forecast for {wd} {hour}:00 is here in the strip.",
 
   // source line under the chart
-  "map.radarOut": "Radar down here right now",
   "source.noRadar": "No radar for this map area",
   "source.dwdForecast": "Radar forecast (DWD)",
   "source.dwdMeasured": "Radar measured (DWD)",

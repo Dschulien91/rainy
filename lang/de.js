@@ -120,7 +120,6 @@
   "hours.mapRange": "Die Karte zeigt die nächsten 2 Stunden. Für {wd} {hour} Uhr gibt es die Vorhersage hier in der Leiste.",
 
   // source line under the chart
-  "map.radarOut": "Radar hier gerade ausgefallen",
   "source.noRadar": "Kein Radar für diesen Kartenausschnitt",
   "source.dwdForecast": "Radar-Vorhersage (DWD)",
   "source.dwdMeasured": "Radar gemessen (DWD)",
