@@ -529,13 +529,13 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=1.52"></script>
-<script src="lang/en.js?v=1.52"></script>
+<script src="lang/de.js?v=1.53"></script>
+<script src="lang/en.js?v=1.53"></script>
 <script>
 "use strict";
 // v1.52: a radar that is out is hatched like every other area without radar (user 24.11.2026; the variants of
 // v1.51 are gone - the server keeps /api/radar/mask?kind=outage)
-const VERSION = "v1.52";
+const VERSION = "v1.53";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -2849,8 +2849,194 @@ let glRain = null;
 if (USE_GL) {
   try { glRain = new GLRain(); map.addLayer(glRain); glRain.hide(); } catch (e) { console.warn("webgl", e); glRain = null; }
 }
+// ---------- WebGL sunny map (v1.53) ----------
+// The clouds were canvases, one per map tile, enlarged by the browser beyond zoom 8: on phones the browser left
+// hairline gaps along the tile edges (user, 24.11.2026: "feine Linien von den Quadraten über den Wolken"; also on
+// his screenshot of 22.11.). Like the rain they are now drawn into one WebGL canvas, where tiles meet exactly. Same
+// data (the sunny atlas tiles: every 10-minute step of the timeline in 256 px cells, 8 per row; the step's own tile
+// while the atlas loads), same colours (skyLut). CloudTiles stays the fallback without WebGL.
+// Close in, an overcast map was a flat grey that did not read as "cloudy" (same message): the looks ?clouds=A..D add
+// structure from zoom 9 on, for the user to pick - A: cloud texture, B: cloud symbols, C: texture drifting slowly,
+// D: texture + symbols. Without the parameter the clouds look as before.
+const GL_CLOUD = { size: 256, cols: 8, zooms: [3, 8], step: 600e3 };
+const CLOUD_LOOK = { A: 1, B: 2, C: 3, D: 4 }[(new URLSearchParams(location.search).get("clouds") || "").toUpperCase()] || 0;
+const GL_CLOUD_FS = `precision highp float;
+varying vec2 v_uv;
+uniform sampler2D u_data, u_lut;
+uniform vec2 u_cell, u_tex, u_off;
+uniform float u_r, u_h, u_look, u_detail, u_time, u_dark;
+float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+float vnoise(vec2 p) {
+  vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
+  return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x), mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x), f.y);
+}
+float fbm(vec2 p) {
+  float s = 0.0, a = 0.5;
+  for (int k = 0; k < 5; k++) { s += a * vnoise(p); p = p * 2.03 + vec2(17.1, 9.2); a *= 0.5; }
+  return s;
+}
+// a cloud symbol around the cell centre (q in about -1..1): < 0 inside
+float icon(vec2 q) {
+  float d = min(min(length(q - vec2(-0.34, 0.08)) - 0.28, length(q - vec2(0.04, -0.12)) - 0.38), length(q - vec2(0.40, 0.10)) - 0.24);
+  return min(d, max(abs(q.y - 0.2) - 0.18, abs(q.x) - 0.62));
+}
+void main() {
+  // inside this step's cell only (the cells beside it are other time steps)
+  vec2 t = clamp(u_cell + v_uv * ${GL_CLOUD.size}.0, u_cell + 0.5, u_cell + ${GL_CLOUD.size}.0 - 0.5);
+  vec4 d = texture2D(u_data, t / u_tex);
+  if (d.a < 0.5) discard; // outside the sunny area
+  vec4 c = texture2D(u_lut, vec2((floor(d.r * 255.0 + 0.5) + 0.5) / 256.0, 0.5));
+  float a = c.a; vec3 rgb = c.rgb;
+  if (u_look > 0.5 && u_detail > 0.0 && a > 0.02) {
+    vec2 w = u_off + vec2(gl_FragCoord.x, u_h - gl_FragCoord.y) / u_r; // CSS pixels of the map: moves with it
+    float cover = smoothstep(0.08, 0.5, a);
+    if (u_look != 2.0) { // A, C, D: texture - brighter tops, thinner gaps, ~200 px puffs
+      float n = fbm(w / 230.0 + vec2(u_time * 0.035, u_time * 0.012));
+      n = smoothstep(0.25, 0.75, n); // more contrast: puffs and gaps
+      float k = u_detail * cover;
+      a *= mix(1.0, 0.45 + 0.95 * n, k);
+      rgb = mix(rgb, mix(rgb * 0.8, u_dark > 0.5 ? rgb : vec3(0.93, 0.94, 0.96), 0.55 * n) , k);
+    }
+    if (u_look == 2.0 || u_look == 4.0) { // B, D: a staggered field of cloud symbols, stronger where it is overcast
+      vec2 g = w / 120.0; float row = floor(g.y);
+      vec2 f = vec2(fract(g.x + (mod(row, 2.0) > 0.5 ? 0.5 : 0.0)), fract(g.y)) - 0.5;
+      float m = (1.0 - smoothstep(-0.04, 0.04, icon(f * 4.2))) * u_detail * smoothstep(0.25, 0.6, a);
+      vec3 ic = u_dark > 0.5 ? vec3(0.97) : vec3(1.0);
+      rgb = mix(rgb, ic, m * 0.5); a = mix(a, max(a, 0.6), m * 0.6);
+    }
+  }
+  a = clamp(a, 0.0, 1.0);
+  gl_FragColor = vec4(rgb * a, a);
+}`;
+const GLCloud = GLRain.extend({
+  _setupGL() {
+    const gl = this.gl = this._container.getContext("webgl", { premultipliedAlpha: true, alpha: true, antialias: false });
+    const sh = (type, src) => { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+      if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); return s; };
+    const p = this.prog = gl.createProgram();
+    gl.attachShader(p, sh(gl.VERTEX_SHADER, GL_VS)); gl.attachShader(p, sh(gl.FRAGMENT_SHADER, GL_CLOUD_FS));
+    gl.linkProgram(p);
+    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+    this.buf = gl.createBuffer();
+    this.lutDay = null;
+  },
+  // the colour table of skyLut for the step's daylight (one 256 x 1 texture, made again when the daylight changes)
+  _lut(day) {
+    const key = Math.round(day * 50);
+    if (this.lutDay === key && this.lutTex) return this.lutTex;
+    if (this.lutTex) this.gl.deleteTexture(this.lutTex);
+    this.lutTex = this._texture(new Uint8Array(skyLut(day).buffer.slice(0)), 256, 1, this.gl.NEAREST);
+    this.lutDay = key;
+    return this.lutTex;
+  },
+  _dz() {
+    const m = this._map, size = m.getSize(), zoom = m.getZoom();
+    let z = Math.max(GL_CLOUD.zooms[0], Math.min(GL_CLOUD.zooms[1], Math.round(zoom)));
+    const count = (q) => { const span = 256 * Math.pow(2, zoom - q); return (Math.ceil(size.x / span) + 1) * (Math.ceil(size.y / span) + 1); };
+    while (z > GL_CLOUD.zooms[0] && count(z) > GL_MAX_VIEW) z--;
+    return z;
+  },
+  // run: the sunny key, the atlas range (t0, n; n = 0: no atlas) and the server
+  setRun(key, t0, n, base) { this.run = { key, t0, n, base }; this._load(); },
+  _load() {
+    if (!this.run || !this._map || !this._bounds || !this.visible || this.lost) return;
+    const { key, t0, n, base } = this.run, step = GL_CLOUD.step, dz = this._dz(), pass = ++this.pass;
+    const i = this.ts == null ? -1 : (this.ts - t0) / step;
+    const inAtlas = n > 0 && !atlasFailed.has(base) && Number.isInteger(i) && i >= 0 && i < n;
+    const single = (t, ts) => ({ u: `${base}/tiles/cloud/${key}/${ts}/${t.z}/${t.x}/${t.y}.${TILE_EXT}`, z: t.z, x: t.x, y: t.y, t0: ts, n: 1, key });
+    const atlas = (t) => ({ u: `${base}/tiles/clouddata/${key}/${t0}-${n}/${t.z}/${t.x}/${t.y}.${TILE_EXT}`, z: t.z, x: t.x, y: t.y, t0, n, key, atlas: true });
+    const ready = (u) => { const e = this.tex.get(u); return !!(e && e.tex); };
+    const view = this._tiles(dz), inView = new Set(view.map((t) => `${t.x}/${t.y}`));
+    const want = [];
+    if (this.ts != null) for (const t of view) if (!(inAtlas && ready(atlas(t).u))) want.push(single(t, this.ts));
+    const cz = Math.max(GL_CLOUD.zooms[0], dz - 2);
+    if (inAtlas) {
+      if (cz < dz) for (const t of this._tiles(cz, 0.3)) want.push(atlas(t));
+      for (const t of view) want.push(atlas(t));
+      const full = 2 * 4 * 256 * 256 * GL_CLOUD.cols * Math.ceil(n / GL_CLOUD.cols);
+      let room = Math.floor(GL_BUDGET / full) - want.filter((w) => w.n > 1).length;
+      for (const t of this._tiles(dz, 0.3)) { if (room-- <= 0) break; if (!inView.has(`${t.x}/${t.y}`)) want.push(atlas(t)); }
+    } else if (cz < dz && this.ts != null) for (const t of this._tiles(cz, 0.3)) want.push(single(t, this.ts));
+    for (const w of want) { const e = this.tex.get(w.u); if (e) e.used = pass; }
+    this.queue = want.filter((w) => !this.tex.has(w.u));
+    this._pump();
+    let bytes = 0;
+    for (const e of this.tex.values()) bytes += e.bytes || 0;
+    if (bytes > GL_BUDGET) {
+      const old = [...this.tex.entries()].filter(([, e]) => e.tex && e.used !== pass).sort((a, b) => a[1].used - b[1].used);
+      for (const [u, e] of old) { if (bytes <= GL_BUDGET) break; bytes -= e.bytes; this.gl.deleteTexture(e.tex); this.tex.delete(u); }
+    }
+  },
+  // the cloud tiles need their alpha (< 128: outside the sunny area); the rain's data tiles are RGB
+  _texture(src, w, h, filter) {
+    const gl = this.gl;
+    if (w) return GLRain.prototype._texture.call(this, src, w, h, filter);
+    const t = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+    gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.NONE);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, src);
+    for (const [k, v] of [[gl.TEXTURE_MIN_FILTER, filter], [gl.TEXTURE_MAG_FILTER, filter], [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]])
+      gl.texParameteri(gl.TEXTURE_2D, k, v);
+    return t;
+  },
+  _dropSteps(a) {
+    for (const [u, e] of this.tex) {
+      if (e.n !== 1 || !e.tex || e.key !== a.key || e.z !== a.z || e.x !== a.x || e.y !== a.y || e.t0 < a.t0 || e.t0 >= a.t0 + a.n * GL_CLOUD.step) continue;
+      this.gl.deleteTexture(e.tex); this.tex.delete(u);
+    }
+  },
+  redraw() {
+    if (!this._map || !this._bounds || this.lost || !this.visible || this.ts == null) return;
+    const gl = this.gl, c = this._container, b = this._bounds, zoom = this._map.getZoom(), o = this._map.getPixelOrigin();
+    const r = c.width / Math.max(1, b.getSize().x);
+    gl.viewport(0, 0, c.width, c.height);
+    gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.disable(gl.BLEND);
+    gl.useProgram(this.prog);
+    const dz = this._dz(), key = this.run && this.run.key, step = GL_CLOUD.step;
+    const items = [...this.tex.values()].filter((e) => e.tex && Number.isInteger((this.ts - e.t0) / step) &&
+      (this.ts - e.t0) / step >= 0 && (this.ts - e.t0) / step < e.n)
+      .sort((a, b2) => ((a.key === key) - (b2.key === key)) * 100 + (Math.abs(b2.z - dz) - Math.abs(a.z - dz)) * 2 + (a.n > 1) - (b2.n > 1));
+    const loc = (n) => gl.getUniformLocation(this.prog, n);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this._lut(daylightAt(this.ts))); gl.uniform1i(loc("u_lut"), 1);
+    gl.uniform2f(loc("u_off"), b.min.x + o.x, b.min.y + o.y);
+    gl.uniform1f(loc("u_r"), r); gl.uniform1f(loc("u_h"), c.height);
+    gl.uniform1f(loc("u_look"), CLOUD_LOOK);
+    gl.uniform1f(loc("u_detail"), clamp((zoom - 8) / 2, 0, 1)); // the looks from zoom 9 on, full from 10
+    gl.uniform1f(loc("u_time"), CLOUD_LOOK === 3 ? performance.now() / 1000 : this.ts / 600e3 % 1000);
+    gl.uniform1f(loc("u_dark"), MAP_DESIGNS[MAP_STYLE.designSun].dark ? 1 : 0);
+    const aPos = gl.getAttribLocation(this.prog, "a_pos"), aUv = gl.getAttribLocation(this.prog, "a_uv");
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.buf);
+    gl.enableVertexAttribArray(aPos); gl.enableVertexAttribArray(aUv);
+    gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 16, 0); gl.vertexAttribPointer(aUv, 2, gl.FLOAT, false, 16, 8);
+    for (const e of items) {
+      const span = 256 * Math.pow(2, zoom - e.z), W = 1 << e.z;
+      let px0 = e.x * span - (b.min.x + o.x);
+      const world = W * span;
+      while (px0 + span < 0) px0 += world;
+      while (px0 > b.getSize().x) px0 -= world;
+      const py0 = e.y * span - (b.min.y + o.y);
+      if (px0 > b.getSize().x || py0 > b.getSize().y || px0 + span < 0 || py0 + span < 0) continue;
+      const X = (v) => (v / b.getSize().x) * 2 - 1, Y = (v) => 1 - (v / b.getSize().y) * 2;
+      const x0 = X(px0), x1 = X(px0 + span), y0 = Y(py0), y1 = Y(py0 + span);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([x0, y0, 0, 0, x1, y0, 1, 0, x0, y1, 0, 1, x1, y1, 1, 1]), gl.STREAM_DRAW);
+      const k = (this.ts - e.t0) / step;
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, e.tex); gl.uniform1i(loc("u_data"), 0);
+      gl.uniform2f(loc("u_cell"), (k % GL_CLOUD.cols) * 256, Math.floor(k / GL_CLOUD.cols) * 256);
+      gl.uniform2f(loc("u_tex"), e.w, e.h);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    }
+    // C: the texture drifts - about 12 frames a second while the sunny map is on screen and zoomed in
+    if (CLOUD_LOOK === 3 && zoom >= 9 && !this.anim) this.anim = setTimeout(() => { this.anim = null; this.redraw(); }, 80);
+  },
+});
+let glCloud = null;
+if (USE_GL) {
+  try { glCloud = new GLCloud(); map.addLayer(glCloud); glCloud.hide(); } catch (e) { console.warn("webgl clouds", e); glCloud = null; }
+}
 // the run the WebGL layer draws: the rain timeline's key and steps
-const GL_BASE = `${RADAR_BASE}/tiles/${RAIN_EU ? "raindataeu" : FC_OWN ? "raindataown" : "raindata"}`;
+const GL_BASE =`${RADAR_BASE}/tiles/${RAIN_EU ? "raindataeu" : FC_OWN ? "raindataown" : "raindata"}`;
 function glSetRun() {
   if (!glRain || !state.radarPoint.length || state.radarSource !== "rtile") return;
   glRain.setRun(state.tileKey.rain, state.radarPoint[0].ts, state.radarPoint.length, GL_BASE);
@@ -2894,10 +3080,19 @@ function showTiles(kind, ts) {
   if (kind === "rain" && glRain) {
     showTiles.want = null;
     if (shownTiles) { shownTiles.setOpacity(0); if (shownTiles.stale) shownTiles.remove(); shownTiles = null; }
+    if (glCloud) glCloud.hide();
     glSetRun(); glRain.show(ts);
     return;
   }
   if (glRain) glRain.hide();
+  if (kind === "cloud" && glCloud) { // v1.53: the clouds in one WebGL canvas (no gaps between tiles)
+    showTiles.want = null;
+    if (shownTiles) { shownTiles.setOpacity(0); if (shownTiles.stale) shownTiles.remove(); shownTiles = null; }
+    const A = state.cloudAtlas;
+    glCloud.setRun(state.tileKey.cloud, A ? A.t0 : 0, A ? A.n : 0, SUN_BASE); glCloud.show(ts);
+    return;
+  }
+  if (glCloud) glCloud.hide();
   if (kind === "cloud") cloudShownTs = ts;
   const layer = tileLayer(kind, ts);
   const show = (l) => {
@@ -2920,6 +3115,7 @@ function showTiles(kind, ts) {
 function hideTiles() {
   showTiles.want = null;
   if (glRain) glRain.hide();
+  if (glCloud) glCloud.hide();
   if (shownTiles) { shownTiles.setOpacity(0); if (shownTiles.stale) shownTiles.remove(); }
   shownTiles = null;
 }
@@ -2928,7 +3124,7 @@ function preloadTiles(s) {
   if (placeLoading) return; // setLocation preloads once the place's data is in
   if (state.mode === "rain") prefetchSun();
   const ids = [...s.frames.slice(s.idx), ...s.frames.slice(0, s.idx).reverse()]
-    .filter((f) => (f.map.kind === "rtile" && !glRain) || f.map.kind === "ctile")
+    .filter((f) => (f.map.kind === "rtile" && !glRain) || (f.map.kind === "ctile" && !glCloud))
     .map((f) => `${f.map.kind === "rtile" ? "rain" : "cloud"}/${state.tileKey[f.map.kind === "rtile" ? "rain" : "cloud"]}/${f.map.ts}`);
   // all coarse copies first (fast), then the sharp tiles
   const want = [...ids.filter((id) => coarseUseful(id.split("/")[0])).map((id) => id + "/c"), ...ids];
