@@ -517,13 +517,13 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=1.53"></script>
-<script src="lang/en.js?v=1.53"></script>
+<script src="lang/de.js?v=1.54"></script>
+<script src="lang/en.js?v=1.54"></script>
 <script>
 "use strict";
 // v1.52: a radar that is out is hatched like every other area without radar (user 24.11.2026; the variants of
 // v1.51 are gone - the server keeps /api/radar/mask?kind=outage)
-const VERSION = "v1.53";
+const VERSION = "v1.54";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -2843,16 +2843,16 @@ if (USE_GL) {
 // his screenshot of 22.11.). Like the rain they are now drawn into one WebGL canvas, where tiles meet exactly. Same
 // data (the sunny atlas tiles: every 10-minute step of the timeline in 256 px cells, 8 per row; the step's own tile
 // while the atlas loads), same colours (skyLut). CloudTiles stays the fallback without WebGL.
-// Close in, an overcast map was a flat grey that did not read as "cloudy" (same message): the looks ?clouds=A..D add
-// structure from zoom 9 on, for the user to pick - A: cloud texture, B: cloud symbols, C: texture drifting slowly,
-// D: texture + symbols. Without the parameter the clouds look as before.
+// Close in, an overcast map was a flat grey that did not read as "cloudy" (same message). v1.54: from zoom 9 on the
+// clouds get a texture of brighter puffs and thinner gaps that drifts slowly (variant C of 24.11.2026, the user's
+// pick of four). Still - no drifting - with "reduce motion" set on the device or while the page is hidden.
 const GL_CLOUD = { size: 256, cols: 8, zooms: [3, 8], step: 600e3 };
-const CLOUD_LOOK = { A: 1, B: 2, C: 3, D: 4 }[(new URLSearchParams(location.search).get("clouds") || "").toUpperCase()] || 0;
+const CLOUD_DRIFT = !(window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches);
 const GL_CLOUD_FS = `precision highp float;
 varying vec2 v_uv;
 uniform sampler2D u_data, u_lut;
 uniform vec2 u_cell, u_tex, u_off;
-uniform float u_r, u_h, u_look, u_detail, u_time, u_dark;
+uniform float u_r, u_h, u_detail, u_time, u_dark;
 float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
 float vnoise(vec2 p) {
   vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
@@ -2863,11 +2863,6 @@ float fbm(vec2 p) {
   for (int k = 0; k < 5; k++) { s += a * vnoise(p); p = p * 2.03 + vec2(17.1, 9.2); a *= 0.5; }
   return s;
 }
-// a cloud symbol around the cell centre (q in about -1..1): < 0 inside
-float icon(vec2 q) {
-  float d = min(min(length(q - vec2(-0.34, 0.08)) - 0.28, length(q - vec2(0.04, -0.12)) - 0.38), length(q - vec2(0.40, 0.10)) - 0.24);
-  return min(d, max(abs(q.y - 0.2) - 0.18, abs(q.x) - 0.62));
-}
 void main() {
   // inside this step's cell only (the cells beside it are other time steps)
   vec2 t = clamp(u_cell + v_uv * ${GL_CLOUD.size}.0, u_cell + 0.5, u_cell + ${GL_CLOUD.size}.0 - 0.5);
@@ -2875,23 +2870,12 @@ void main() {
   if (d.a < 0.5) discard; // outside the sunny area
   vec4 c = texture2D(u_lut, vec2((floor(d.r * 255.0 + 0.5) + 0.5) / 256.0, 0.5));
   float a = c.a; vec3 rgb = c.rgb;
-  if (u_look > 0.5 && u_detail > 0.0 && a > 0.02) {
-    vec2 w = u_off + vec2(gl_FragCoord.x, u_h - gl_FragCoord.y) / u_r; // CSS pixels of the map: moves with it
-    float cover = smoothstep(0.08, 0.5, a);
-    if (u_look != 2.0) { // A, C, D: texture - brighter tops, thinner gaps, ~200 px puffs
-      float n = fbm(w / 230.0 + vec2(u_time * 0.035, u_time * 0.012));
-      n = smoothstep(0.25, 0.75, n); // more contrast: puffs and gaps
-      float k = u_detail * cover;
-      a *= mix(1.0, 0.45 + 0.95 * n, k);
-      rgb = mix(rgb, mix(rgb * 0.8, u_dark > 0.5 ? rgb : vec3(0.93, 0.94, 0.96), 0.55 * n) , k);
-    }
-    if (u_look == 2.0 || u_look == 4.0) { // B, D: a staggered field of cloud symbols, stronger where it is overcast
-      vec2 g = w / 120.0; float row = floor(g.y);
-      vec2 f = vec2(fract(g.x + (mod(row, 2.0) > 0.5 ? 0.5 : 0.0)), fract(g.y)) - 0.5;
-      float m = (1.0 - smoothstep(-0.04, 0.04, icon(f * 4.2))) * u_detail * smoothstep(0.25, 0.6, a);
-      vec3 ic = u_dark > 0.5 ? vec3(0.97) : vec3(1.0);
-      rgb = mix(rgb, ic, m * 0.5); a = mix(a, max(a, 0.6), m * 0.6);
-    }
+  if (u_detail > 0.0 && a > 0.02) { // texture: brighter tops, thinner gaps, ~230 px puffs, moving with the map
+    vec2 w = u_off + vec2(gl_FragCoord.x, u_h - gl_FragCoord.y) / u_r; // CSS pixels of the map
+    float n = smoothstep(0.25, 0.75, fbm(w / 230.0 + vec2(u_time * 0.035, u_time * 0.012)));
+    float k = u_detail * smoothstep(0.08, 0.5, a);
+    a *= mix(1.0, 0.45 + 0.95 * n, k);
+    rgb = mix(rgb, mix(rgb * 0.8, u_dark > 0.5 ? rgb : vec3(0.93, 0.94, 0.96), 0.55 * n), k);
   }
   a = clamp(a, 0.0, 1.0);
   gl_FragColor = vec4(rgb * a, a);
@@ -2990,9 +2974,9 @@ const GLCloud = GLRain.extend({
     gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this._lut(daylightAt(this.ts))); gl.uniform1i(loc("u_lut"), 1);
     gl.uniform2f(loc("u_off"), b.min.x + o.x, b.min.y + o.y);
     gl.uniform1f(loc("u_r"), r); gl.uniform1f(loc("u_h"), c.height);
-    gl.uniform1f(loc("u_look"), CLOUD_LOOK);
-    gl.uniform1f(loc("u_detail"), clamp((zoom - 8) / 2, 0, 1)); // the looks from zoom 9 on, full from 10
-    gl.uniform1f(loc("u_time"), CLOUD_LOOK === 3 ? performance.now() / 1000 : this.ts / 600e3 % 1000);
+    const detail = clamp((zoom - 8) / 2, 0, 1); // the texture from zoom 9 on, full from 10
+    gl.uniform1f(loc("u_detail"), detail);
+    gl.uniform1f(loc("u_time"), CLOUD_DRIFT ? (performance.now() / 1000) % 20000 : this.ts / 600e3 % 1000);
     gl.uniform1f(loc("u_dark"), MAP_DESIGNS[MAP_STYLE.designSun].dark ? 1 : 0);
     const aPos = gl.getAttribLocation(this.prog, "a_pos"), aUv = gl.getAttribLocation(this.prog, "a_uv");
     gl.bindBuffer(gl.ARRAY_BUFFER, this.buf);
@@ -3015,14 +2999,16 @@ const GLCloud = GLRain.extend({
       gl.uniform2f(loc("u_tex"), e.w, e.h);
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     }
-    // C: the texture drifts - about 12 frames a second while the sunny map is on screen and zoomed in
-    if (CLOUD_LOOK === 3 && zoom >= 9 && !this.anim) this.anim = setTimeout(() => { this.anim = null; this.redraw(); }, 80);
+    // the texture drifts: about 12 frames a second while the sunny map is on screen, zoomed in and the page visible
+    if (CLOUD_DRIFT && detail > 0 && !document.hidden && !this.anim) this.anim = setTimeout(() => { this.anim = null; this.redraw(); }, 80);
   },
 });
 let glCloud = null;
 if (USE_GL) {
   try { glCloud = new GLCloud(); map.addLayer(glCloud); glCloud.hide(); } catch (e) { console.warn("webgl clouds", e); glCloud = null; }
 }
+// the drifting stops while the page is hidden (redraw); it picks up again when the page comes back
+document.addEventListener("visibilitychange", () => { if (!document.hidden && glCloud && glCloud.visible) glCloud.redraw(); });
 // the run the WebGL layer draws: the rain timeline's key and steps
 const GL_BASE =`${RADAR_BASE}/tiles/${RAIN_EU ? "raindataeu" : FC_OWN ? "raindataown" : "raindata"}`;
 function glSetRun() {
