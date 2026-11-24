@@ -92,6 +92,13 @@ FC_LEADS = range(10, 151, 10)  # minutes after the newest image (it is ~20 min o
 POLL_S = 120                   # new files every 10 min
 CTH_WAIT_AREA = 0.5            # night / twilight: a slot waits for its own CTH file (SunnyDE._wait_cth) ...
 CTH_WAIT_S = 15 * 60           # ... at most this long after its SIDhr file appeared
+# DWD's SIDhr (DNI) files stopped at 07:00Z on 24.11.2026 while the CTH (IR cloud top) files kept coming: sunny Germany
+# AND Europe froze on the 07:00Z picture for hours (the app showed a "forecast" that ended in the past). When the
+# newest CTH slot is IR_FALLBACK_MS newer than the newest SIDhr slot, the newer slots are made from the cloud tops alone
+# (as at night, with the weather model's low-cloud cap at any hour); such slots are never a grid truth (obs_share) and
+# a SIDhr file that arrives later replaces them. SUNNY_IR_FALLBACK=0 switches it off.
+IR_FALLBACK = os.environ.get("SUNNY_IR_FALLBACK", "1") != "0"
+IR_FALLBACK_MS = 30 * 60_000
 # sun geometry
 SUN_ELEV = 3.0                 # below: no sunshine (the beam is too weak and the retrieval unreliable)
 DAY_ELEV = 8.0                 # above: k from DNI alone; between SUN_ELEV and DAY_ELEV it fades into the IR cloud top height
@@ -940,6 +947,7 @@ class SunnyDE:
         self._clm_cache = {}                        # 15-min slot -> EUMETSAT cloud mask on the grid (clm_cloud)
         self.extra_verify = []                      # SunVerify(stations_only=True): other station truths (SYNOP)
         self._sid_seen = {}                         # slot -> time.time() its SIDhr file was first listed (_wait_cth)
+        self.ir_only = set()                        # slots made from the CTH file alone (DWD's SIDhr late, IR_FALLBACK)
         self._metar = {}                            # METAR station -> (lat, lon, time ms, fog), Europe only
         self._k_fog = None                          # (slot, k with the METAR fog cap) of the last ingest, or None
         self._k_low = None                          # (slot, k with low_f_shadow) of the last ingest, or None
@@ -989,20 +997,26 @@ class SunnyDE:
 
     def obs_share(self, ts):
         with self.lock:
-            g = self.obs.get(ts)
+            # a slot from the IR cloud tops alone (IR_FALLBACK) is shown, but never the truth the forecasts are scored on
+            g = None if ts in self.ir_only else self.obs.get(ts)
         return None if g is None else g.astype(np.float32)
 
     # ---------- observation ----------
     def ingest(self, ts, sid_data, cth_data=None):
-        """One satellite slot: SIDhr file bytes (+ CTH file bytes) -> k, share and map value at ts."""
-        lat, lon, v = read_nc(sid_data, ["DNI"])
-        dni = self.grid.regrid(lat, lon, v["DNI"], sigma=(0.8, 0.5))
-        del v
+        """One satellite slot: SIDhr file bytes (+ CTH file bytes) -> k, share and map value at ts.
+        sid_data None (IR_FALLBACK, DWD's SIDhr late): k from the CTH file alone."""
         e = self.elev(ts)
-        k_dni = np.where(e >= SUN_ELEV, np.clip(dni / clear_dni(e, self.low_f), 0, K_MAX), np.nan).astype(np.float32)
-        # the same with the other low-sun factor, for the shadow "lowf03" / "lowf10" (see LOW_F)
-        k_dni_o = (np.where(e >= SUN_ELEV, np.clip(dni / clear_dni(e, self.low_f_shadow), 0, K_MAX), np.nan)
-                   .astype(np.float32) if self.low_f_shadow != self.low_f else None)
+        if sid_data is None:
+            k_dni = np.full(e.shape, np.nan, np.float32)
+            k_dni_o = None
+        else:
+            lat, lon, v = read_nc(sid_data, ["DNI"])
+            dni = self.grid.regrid(lat, lon, v["DNI"], sigma=(0.8, 0.5))
+            del v
+            k_dni = np.where(e >= SUN_ELEV, np.clip(dni / clear_dni(e, self.low_f), 0, K_MAX), np.nan).astype(np.float32)
+            # the same with the other low-sun factor, for the shadow "lowf03" / "lowf10" (see LOW_F)
+            k_dni_o = (np.where(e >= SUN_ELEV, np.clip(dni / clear_dni(e, self.low_f_shadow), 0, K_MAX), np.nan)
+                       .astype(np.float32) if self.low_f_shadow != self.low_f else None)
         k_ir = None
         if cth_data is not None:
             lat, lon, c = read_nc(cth_data, ["CTH"])
@@ -1017,7 +1031,7 @@ class SunnyDE:
             if low is not None:  # fog / low stratus the IR cannot tell from the ground
                 # night and rising sun only: replay 08./09.11. vs the DWD stations, morning MAE +60/+90/+120
                 # .102/.110/.124 -> .078/.084/.086, midday unchanged, but evening +10 .099 -> .127 (sunset: no fog cap)
-                fog_time = (e < 0) | (self.elev(ts + 1_800_000) > e)
+                fog_time = (e < 0) | (self.elev(ts + 1_800_000) > e) | (sid_data is None)  # IR alone: no DNI sees the fog
                 cap = np.clip(1.0 - LOWCC_W * low, 0.0, 1.0)
                 k_ir = np.where(fog_time, np.minimum(k_ir, cap), k_ir).astype(np.float32)
         k_ir_o = k_ir  # the low-sun shadow keeps the IR k as it was
@@ -1395,10 +1409,11 @@ class SunnyDE:
         newest = max(sids)
         self.skipped = {t for t in self.skipped if t > newest - OBS_KEEP_MS}
         # new slots, plus late ones up to K_KEEP_MS before the newest image (not the whole history after a start)
-        want = [t for t in sorted(sids) if t > newest - OBS_KEEP_MS and t not in self.obs and t not in self.skipped
-                and t > (self.ref or 0) - K_KEEP_MS]
+        # (a slot made from the cloud tops alone, IR_FALLBACK, is taken again once its SIDhr file is there)
+        want = [t for t in sorted(sids) if t > newest - OBS_KEEP_MS and (t not in self.obs or t in self.ir_only)
+                and t not in self.skipped and t > (self.ref or 0) - K_KEEP_MS]
         if not want:
-            return 0
+            return self._ir_fallback(newest) if IR_FALLBACK else 0
         if self.ref is None:  # first start: the last hour (the app's history and the motion), not all 3 h
             want = want[-7:]
         cths = None
@@ -1427,7 +1442,36 @@ class SunnyDE:
                         self.k[t] = k.astype(np.float16)
             else:
                 self.add_slot(t, data, cth)
+            self.ir_only.discard(t)  # the DNI slot replaces one made from the cloud tops alone
             n += 1
+        if IR_FALLBACK:
+            n += self._ir_fallback(newest)
+        return n
+
+    def _ir_fallback(self, newest_sid):
+        """DWD's SIDhr files late (24.11.2026: none after 07:00Z for hours) while the CTH files keep coming: the slots
+        after the newest SIDhr one are made from the IR cloud tops alone (see IR_FALLBACK), so the map and the forecast
+        go on instead of freezing. Returns the number of slots added."""
+        now = time.time() * 1000
+        if now - newest_sid < IR_FALLBACK_MS + 20 * 60_000:  # a SIDhr file normally comes ~16 min after its slot
+            return 0
+        cths = self._listing(CTH_URL, r"CTHin(\d{12})nEU\.nc\.bz2")
+        want = [t for t in sorted(cths) if t > newest_sid and t not in self.obs and t not in self.skipped
+                and t > (self.ref or 0) and t > max(cths) - OBS_KEEP_MS]
+        if not cths or max(cths) - newest_sid < IR_FALLBACK_MS or not want:
+            return 0
+        n = 0
+        for t in want[-7:]:
+            cth = self.fetch(CTH_URL + cths[t], timeout=120)
+            self.ir_only.add(t)
+            if self.add_slot(t, None, cth):
+                n += 1
+            else:
+                self.ir_only.discard(t)
+        self.ir_only = {t for t in self.ir_only if t > now - OBS_KEEP_MS}
+        if n:
+            self.log(f"sunny: DWD's SIDhr files late (newest {ts_stamp(newest_sid)}), {n} slot(s) up to "
+                     f"{ts_stamp(want[-1])} from the IR cloud tops alone")
         return n
 
     def verify_step(self):
@@ -1505,7 +1549,7 @@ class SunnyDE:
         return {"frames": len(frames), "obs": sum(not f["fc"] for f in frames), "ref": ref, "age_min": age,
                 "cycle_s": self.cycle_s, "stations": len(self.stations.values) if self.stations else 0,
                 "model": bool(self.model and self.model.share is not None), "replay": bool(self.shift_ms),
-                "skipped": len(self.skipped)}
+                "skipped": len(self.skipped), "ir_only": len(self.ir_only)}
 
     def has_run(self, run):
         with self.lock:

@@ -107,7 +107,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v1.93"
+VERSION = "server-v1.94"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -2476,6 +2476,8 @@ def monitor_status():
     sun = SUNNY.ref if SUNNY_ON else None
     out = {"rss": rss_mb(), "rain_age": round((now - ref) / 60_000, 1) if ref else None,
            "sun_age": round((now - sun) / 60_000, 1) if sun else None, "src": source_ages(now)}
+    if sun and sun in getattr(SUNNY, "ir_only", ()):  # newest sunny slot from the IR cloud tops alone (server-v1.94)
+        out["sun_ir_only"] = True
     if EDITION == "de":
         out.update(om_probe_take())  # "om" / "om_pub": weather model probes since the last row (server-v1.86)
     elif not NA and REGIONS["eu"].node_seen is not None:  # radars missing from the newest OPERA image (server-v1.91)
