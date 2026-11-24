@@ -35,8 +35,12 @@ JOBS = [
     ("Regen Deutschland gegen das spätere Radarbild: DWD, eigene, 'bleibt wie es ist' (pers) - CSI mit ~9 km Toleranz (Menge Vorhersage/real)",
      ["score_same.py", "dwd", "own", "pers"]),
     ("Regen Deutschland, dasselbe zellgenau (ohne Toleranz: wer trifft die Ränder)", ["score_same.py", "dwd", "own", "pers", "--strict"]),
-    ("Regen Deutschland: Varianten im Test (nur gemeinsame Läufe)", ["score_same.py", "dwd", "own", "sprog0", "model", "cells"]),
+    ("Regen Deutschland: Varianten im Test (nur gemeinsame Läufe; own = ausgeliefert, seit v1.93 mit Wettermodell = model, pure = reines S-PROG wie bis v1.92)",
+     ["score_same.py", "dwd", "own", "pure", "model", "cells", "sprog0"]),
     ("Regen Deutschland an den Regenmessern (rainy = DWD-Vorhersage wie in der App, own = eigene; CSI POD FAR)", ["score.py", "--rain-only"]),
+    # each shadow row of score.py counts its own cases; only --same-with puts them on the same ones (24.11.2026: "pure"
+    # looked far worse than own while being identical - it existed for one dry day only)
+    ("Regen Deutschland an den Regenmessern, gleiche Fälle: own (ausgeliefert) gegen pure (alte Methode) und model", ["score.py", "--rain-only", "--same", "--same-with", "pure"]),
     ("Regen-Alarme: Anteil richtiger Alarme (Regen am Regenmesser innerhalb +-15 min um den vorhergesagten Beginn); point = Regel am Punkt, circle = echte Alarmregel (5-km-Kreis); reliability = wie oft es je nach vorhergesagtem nassen Anteil des Kreises wirklich regnete", ["verify_alerts.py"]),
     ("Regen Europa, ganzes OPERA-Gebiet", ["score_same.py", "own", "pers", "--log", "eugrid"]),
     ("Regen Europa, zellgenau", ["score_same.py", "own", "pers", "--log", "eugrid", "--strict"]),
@@ -49,7 +53,7 @@ JOBS = [
     ("Regen Europa an den österreichischen Regenmessern: eigene (own) gegen den Nowcast des österreichischen Wetterdienstes (inca) und 'bleibt so' (pers)",
      ["score_inca.py"]),
     ("sunny Deutschland", ["score_sun.py", "sat", "pers", "kpers", "nwp"]),
-    ("sunny Deutschland: Varianten im Test (sat = ausgeliefert mit Modell-Blend seit v1.84, satadv = reine Verschiebung)", ["score_sun.py", "sat", "satadv", "lowf03", "kpers"]),
+    ("sunny Deutschland: Varianten im Test (sat = ausgeliefert mit Modell-Blend seit v1.84, satadv = reine Verschiebung)", ["score_sun.py", "sat", "satkp", "satadv", "lowf03", "kpers"]),
     ("sunny Europa", ["score_sun.py", "sat", "pers", "kpers", "nwp", "--prefix", "eu"]),
     ("sunny Europa: Varianten im Test", ["score_sun.py", "sat", "sharp", "shblur", "satnwp", "lowf10", "metfog", "--prefix", "eu"]),
     ("Sprünge auf der Zeitachse (was man beim Verschieben sieht)", ["score_jumps.py"]),
