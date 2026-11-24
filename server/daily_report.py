@@ -119,7 +119,7 @@ def state(day):
         out += radars(hs)
         ir = sum(1 for r in hs if r.get("sun_ir_only"))
         if ir:  # server-v1.94: DWD's SIDhr (sunshine) files were late, the map came from the IR cloud tops alone
-            out.append(f"  sunny nur aus den Wolkenhöhen (DWD-Sonnendaten fehlten, nicht unser Fehler): {5 * ir} min")
+            out.append(f"  sunny ohne DWD-Sonnendaten (tags Wettermodell, nachts Wolkenhöhen; nicht unser Fehler): {5 * ir} min")
         rss =[r["rss"] for r in hs if r.get("rss")]
         if rss:
             out.append(f"  Speicher: im Mittel {sum(rss) / len(rss):.0f} MB, höchstens {max(rss)} MB")

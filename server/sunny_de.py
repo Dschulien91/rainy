@@ -94,9 +94,11 @@ CTH_WAIT_AREA = 0.5            # night / twilight: a slot waits for its own CTH 
 CTH_WAIT_S = 15 * 60           # ... at most this long after its SIDhr file appeared
 # DWD's SIDhr (DNI) files stopped at 07:00Z on 24.11.2026 while the CTH (IR cloud top) files kept coming: sunny Germany
 # AND Europe froze on the 07:00Z picture for hours (the app showed a "forecast" that ended in the past). When the
-# newest CTH slot is IR_FALLBACK_MS newer than the newest SIDhr slot, the newer slots are made from the cloud tops alone
-# (as at night, with the weather model's low-cloud cap at any hour); such slots are never a grid truth (obs_share) and
-# a SIDhr file that arrives later replaces them. SUNNY_IR_FALLBACK=0 switches it off.
+# newest CTH slot is IR_FALLBACK_MS newer than the newest SIDhr slot, the newer slots are made without the DNI: the
+# weather model's clear-sky index stands in for it by day and the CTH cloud tops at low sun and night (blended between
+# SUN_ELEV and DAY_ELEV as usual). The cloud tops alone were useless by day: 24.11.2026 09:50-10:10Z at 261 DE/AT/CH
+# sunshine stations (87 % sunny under thin high cloud) IR-only MAE 0.55-0.62 (bias -0.6), the model 0.13. Such slots
+# are never a grid truth (obs_share) and a SIDhr file that arrives later replaces them. SUNNY_IR_FALLBACK=0: off.
 IR_FALLBACK = os.environ.get("SUNNY_IR_FALLBACK", "1") != "0"
 IR_FALLBACK_MS = 30 * 60_000
 # sun geometry
@@ -1004,10 +1006,11 @@ class SunnyDE:
     # ---------- observation ----------
     def ingest(self, ts, sid_data, cth_data=None):
         """One satellite slot: SIDhr file bytes (+ CTH file bytes) -> k, share and map value at ts.
-        sid_data None (IR_FALLBACK, DWD's SIDhr late): k from the CTH file alone."""
+        sid_data None (IR_FALLBACK, DWD's SIDhr late): the weather model's k in place of the DNI's."""
         e = self.elev(ts)
         if sid_data is None:
-            k_dni = np.full(e.shape, np.nan, np.float32)
+            mk = self._model_k(ts)
+            k_dni = mk if mk is not None else np.full(e.shape, np.nan, np.float32)
             k_dni_o = None
         else:
             lat, lon, v = read_nc(sid_data, ["DNI"])
@@ -1450,8 +1453,8 @@ class SunnyDE:
 
     def _ir_fallback(self, newest_sid):
         """DWD's SIDhr files late (24.11.2026: none after 07:00Z for hours) while the CTH files keep coming: the slots
-        after the newest SIDhr one are made from the IR cloud tops alone (see IR_FALLBACK), so the map and the forecast
-        go on instead of freezing. Returns the number of slots added."""
+        after the newest SIDhr one are made without the DNI (model by day, IR cloud tops at low sun / night, see
+        IR_FALLBACK), so the map and the forecast go on instead of freezing. Returns the number of slots added."""
         now = time.time() * 1000
         if now - newest_sid < IR_FALLBACK_MS + 20 * 60_000:  # a SIDhr file normally comes ~16 min after its slot
             return 0
@@ -1471,7 +1474,7 @@ class SunnyDE:
         self.ir_only = {t for t in self.ir_only if t > now - OBS_KEEP_MS}
         if n:
             self.log(f"sunny: DWD's SIDhr files late (newest {ts_stamp(newest_sid)}), {n} slot(s) up to "
-                     f"{ts_stamp(want[-1])} from the IR cloud tops alone")
+                     f"{ts_stamp(want[-1])} without the DNI (model by day, IR cloud tops at low sun)")
         return n
 
     def verify_step(self):
