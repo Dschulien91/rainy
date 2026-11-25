@@ -30,6 +30,20 @@
   catch { document.documentElement.classList.add("theme-dark"); }
 </script>
 <script>
+  // v1.56 (user, 25.11.2026: "not German -> show English right away"): a German page opened by a browser whose first
+  // language is not German goes to the same page in English before anything loads - also shared links, city pages and
+  // the installed app (start_url /de/), which the bare domain's redirect (Caddyfile) never sees. A language chosen in
+  // the switcher (cookie rainy_lang) always wins; ?lang= (testing) and search engine crawlers stay.
+  try { const pref = (navigator.languages && navigator.languages[0]) || navigator.language || "";
+    if (window.LANG === "de" && /^\/de(\/|$)/.test(location.pathname) && pref && !/^de\b/i.test(pref)
+        && !/(^|;\s*)rainy_lang=/.test(document.cookie) && !/[?&]lang=/.test(location.search)
+        && !/bot|crawl|spider|slurp|lighthouse/i.test(navigator.userAgent)) {
+      const en = (window.ALT_URLS && window.ALT_URLS.en) || location.pathname.replace(/^\/de(\/|$)/, "/en/");
+      location.replace(en + location.search + location.hash);
+    } }
+  catch {}
+</script>
+<script>
   // v1.25: a returning visitor's place is known before the map libraries load (~0.3-1 s on phones): ask for its radar
   // and weather data right away - the same URLs as last time (rainy.last.early); getJSON() picks the answers up
   try { const l = JSON.parse(localStorage.getItem("rainy.last"));
@@ -518,13 +532,13 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=1.55"></script>
-<script src="lang/en.js?v=1.55"></script>
+<script src="lang/de.js?v=1.56"></script>
+<script src="lang/en.js?v=1.56"></script>
 <script>
 "use strict";
 // v1.52: a radar that is out is hatched like every other area without radar (user 24.11.2026; the variants of
 // v1.51 are gone - the server keeps /api/radar/mask?kind=outage)
-const VERSION = "v1.55";
+const VERSION = "v1.56";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -1265,7 +1279,15 @@ const smoothstep = (a, b, v) => { const t = clamp((v - a) / (b - a), 0, 1); retu
 // solid clouds where less than ~30 % sun gets through.
 const SUN_MAP = [0.05, 0.8];
 const sunShare = (c) => 1 - clamp((c - SUN_MAP[0]) / SUN_MAP[1], 0, 1);
-const CLOUD_EDGE = [0.6, 0.68], VEIL = [0.1, 0.6], VEIL_ALPHA = 0.3;
+// CLOUD EDGES (v1.56, user 25.11.2026: the sunny clouds "look odd because of the hard edges"): variants to pick from,
+// ?clouds=A..D - A the crisp outline so far (edge band 0.60-0.68), B a soft edge (0.50-0.80), C soft and frayed by
+// the cloud texture (puffy outlines), D no outline at all (opacity follows the cloudiness 0.35-0.90). The cloud field
+// is a satellite grid of ~4 km, linearly interpolated: a sharp threshold on it gives straight-sided, boxy outlines
+// close in. B-D smooth it first (WebGL: 9 taps "blur" data pixels apart at the data's zoom 8, fewer below).
+const CLOUD_LOOKS = { A: { edge: [0.6, 0.68], fray: 0, blur: 0 }, B: { edge: [0.5, 0.8], fray: 0, blur: 5 },
+  C: { edge: [0.52, 0.78], fray: 0.18, blur: 5 }, D: { edge: [0.35, 0.9], fray: 0, blur: 6 } };
+const CLOUD_LOOK = CLOUD_LOOKS[(new URLSearchParams(location.search).get("clouds") || "").toUpperCase()] || CLOUD_LOOKS.A;
+const CLOUD_EDGE = CLOUD_LOOK.edge, VEIL = [0.1, 0.6], VEIL_ALPHA = 0.3;
 const cloudCover = (v) => smoothstep(CLOUD_EDGE[0], CLOUD_EDGE[1], v);
 // Solid clouds cover 0.82-0.97 (was 0.62-0.92): over the dark water of the sunny map the old ones turned dark grey,
 // over land light grey (user, 15.11.2026: clouds should look grey-white over water too). The veil stays see-through.
@@ -2854,7 +2876,7 @@ const GL_CLOUD_FS = `precision highp float;
 varying vec2 v_uv;
 uniform sampler2D u_data, u_lut;
 uniform vec2 u_cell, u_tex, u_off, u_shift;
-uniform float u_r, u_h, u_detail, u_dark;
+uniform float u_r, u_h, u_detail, u_dark, u_fray, u_blur;
 float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
 float vnoise(vec2 p) {
   vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
@@ -2865,15 +2887,28 @@ float fbm(vec2 p) {
   for (int k = 0; k < 4; k++) { s += a * vnoise(p); p = p * 2.03 + vec2(17.1, 9.2); a *= 0.5; }
   return s;
 }
+float field(vec2 t) { // the cloudiness at t (atlas pixels), inside this step's cell
+  return texture2D(u_data, clamp(t, u_cell + 0.5, u_cell + ${GL_CLOUD.size}.0 - 0.5) / u_tex).r;
+}
 void main() {
   // inside this step's cell only (the cells beside it are other time steps)
   vec2 t = clamp(u_cell + v_uv * ${GL_CLOUD.size}.0, u_cell + 0.5, u_cell + ${GL_CLOUD.size}.0 - 0.5);
   vec4 d = texture2D(u_data, t / u_tex);
   if (d.a < 0.5) discard; // outside the sunny area
-  vec4 c = texture2D(u_lut, vec2((floor(d.r * 255.0 + 0.5) + 0.5) / 256.0, 0.5));
+  vec2 w = u_off + vec2(gl_FragCoord.x, u_h - gl_FragCoord.y) / u_r - u_shift; // CSS pixels of the map
+  float v = d.r;
+  // rounder outlines: a 3 x 3 binomial blur (CLOUD_LOOKS); narrower towards the tile's edge, where it reaches 0 - the
+  // neighbour tile's pixels are not in this cell, and a blur cut off there left a straight seam along the tile edge
+  vec2 e = min(t - u_cell, u_cell + ${GL_CLOUD.size}.0 - t);
+  float r = min(u_blur, max(min(e.x, e.y) - 0.5, 0.0));
+  if (r > 0.25) {
+    v = (4.0 * v + 2.0 * (field(t + vec2(r, 0.0)) + field(t - vec2(r, 0.0)) + field(t + vec2(0.0, r)) + field(t - vec2(0.0, r)))
+      + field(t + vec2(r, r)) + field(t - vec2(r, r)) + field(t + vec2(r, -r)) + field(t + vec2(-r, r))) / 16.0;
+  }
+  if (u_fray > 0.0) v = clamp(v + (fbm(w / 110.0) - 0.5) * u_fray, 0.0, 1.0); // frayed cloud edges (CLOUD_LOOKS C)
+  vec4 c = texture2D(u_lut, vec2((floor(v * 255.0 + 0.5) + 0.5) / 256.0, 0.5));
   float a = c.a; vec3 rgb = c.rgb;
   if (u_detail > 0.0 && a > 0.02) { // texture: brighter tops, thinner gaps, ~230 px puffs, moving with the map
-    vec2 w = u_off + vec2(gl_FragCoord.x, u_h - gl_FragCoord.y) / u_r - u_shift; // CSS pixels of the map
     float n = smoothstep(0.25, 0.75, fbm(w / 230.0));
     float k = u_detail * smoothstep(0.08, 0.5, a);
     a *= mix(1.0, 0.45 + 0.95 * n, k);
@@ -2988,6 +3023,7 @@ const GLCloud = GLRain.extend({
     }
     gl.uniform2f(loc("u_shift"), sx, sy);
     gl.uniform1f(loc("u_dark"), MAP_DESIGNS[MAP_STYLE.designSun].dark ? 1 : 0);
+    gl.uniform1f(loc("u_fray"), CLOUD_LOOK.fray);
     const aPos = gl.getAttribLocation(this.prog, "a_pos"), aUv = gl.getAttribLocation(this.prog, "a_uv");
     gl.bindBuffer(gl.ARRAY_BUFFER, this.buf);
     gl.enableVertexAttribArray(aPos); gl.enableVertexAttribArray(aUv);
@@ -3007,6 +3043,7 @@ const GLCloud = GLRain.extend({
       gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, e.tex); gl.uniform1i(loc("u_data"), 0);
       gl.uniform2f(loc("u_cell"), (k % GL_CLOUD.cols) * 256, Math.floor(k / GL_CLOUD.cols) * 256);
       gl.uniform2f(loc("u_tex"), e.w, e.h);
+      gl.uniform1f(loc("u_blur"), CLOUD_LOOK.blur * Math.pow(2, e.z - 8));
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     }
   },
