@@ -246,11 +246,20 @@ class Layer:
             self.dead = {k: v for k, v in self.dead.items() if k[0] < wet.shape[0] and k[1] < wet.shape[1]}
             # back: rain in a good part of the area again (v1.97: not box by box - a neighbouring radar's bit of rain
             # in one box at the edge of its range cleared that box, and Bozen showed "dry" in the middle of the hole)
-            if self.dead and t > min(self.dead.values()) and (np.mean([wet[k] >= 0.1 for k in self.dead]) >= 0.3
-                                                               or t - min(self.dead.values()) > DEAD_KEEP_MS):
-                self.dead = {}
-                self.log(f"layer {self.name}: rain shows again where a radar had dropped out "
-                         f"({datetime.fromtimestamp(t / 1000, timezone.utc):%H:%MZ})")
+            # server-v2.03: judged per drop-out (its boxes share one "since") and only from images after it. Before,
+            # all dead boxes were judged together: at the restart of 25.11.2026 10:22Z the replay of the 09:05Z image
+            # found the rain of a Sardinian band that dropped out only at 09:55Z inside "the dead area" and cleared
+            # Macaion's area too, so Bozen showed "dry" again while that radar was still out.
+            groups = {}
+            for k, since in self.dead.items():
+                groups.setdefault(since, []).append(k)
+            for since, ks in groups.items():
+                if t > since and (np.mean([wet[k] >= 0.1 for k in ks]) >= 0.3 or t - since > DEAD_KEEP_MS):
+                    for k in ks:
+                        del self.dead[k]
+                    self.log(f"layer {self.name}: rain shows again where a radar had dropped out at "
+                             f"{datetime.fromtimestamp(since / 1000, timezone.utc):%d.%m. %H:%MZ} ({len(ks)} boxes, "
+                             f"{datetime.fromtimestamp(t / 1000, timezone.utc):%H:%MZ})")
             if prev is not None:
                 wet0, cov0, _ = self._boxes(prev[0])
                 gone = (wet0 > 0.3) & (wet < 0.02) & (cov >= 0.5) & (cov0 >= 0.5)
