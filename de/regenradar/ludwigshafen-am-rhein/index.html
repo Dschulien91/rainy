@@ -325,8 +325,14 @@
     .sheet .hours { grid-column: 1 / -1; grid-row: 3; }
   }
   /* first row: place (left), rainy/sunny (right); second row: summary, temperature */
-  .head { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; column-gap: 12px; row-gap: 2px; }
+  .head { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; column-gap: 12px; row-gap: 2px; }
   .head .toggle, .head .now-temp { justify-self: end; }
+  /* v1.57: the summary runs on under the rainy/sunny switch up to the temperature (it had only the width left of the
+     switch: ~180 px on a 360 px phone, so the new summary lines ended in "…") */
+  .head .place { grid-column: 1; grid-row: 1; }
+  .head .toggle { grid-column: 2 / 4; grid-row: 1; }
+  .head .summary { grid-column: 1 / 3; grid-row: 2; }
+  .head .now-temp { grid-column: 3; grid-row: 2; }
   .place { font-size: 13px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   /* official weather warnings at the place (variant B, 16.11.2026): a pill on the map just above the sheet, so the
      timeline keeps its height; the chip shows the highest level (yellow/orange/red), a tap opens the details card */
@@ -538,13 +544,13 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=1.56"></script>
-<script src="lang/en.js?v=1.56"></script>
+<script src="lang/de.js?v=1.57"></script>
+<script src="lang/en.js?v=1.57"></script>
 <script>
 "use strict";
 // v1.52: a radar that is out is hatched like every other area without radar (user 24.11.2026; the variants of
 // v1.51 are gone - the server keeps /api/radar/mask?kind=outage)
-const VERSION = "v1.56";
+const VERSION = "v1.57";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -3227,8 +3233,21 @@ function updateSource() {
   if (ready < keys.length) updateSource.timer = setTimeout(updateSource, 500);
 }
 
+// v1.57: the summary as a friend would say it (user, 25.11.2026: "an honest verdict, like you'd tell a friend - it
+// could be good marketing"). The same cases and times as before (still honest: a time where there was one), worded
+// with a wink; quip.* holds a few lines per case split by "|". One is picked per place and half hour, so the line
+// does not flicker with every update but is not the same all day either.
+function quip(key, params) {
+  const all = t(key, params).split("|");
+  const p = state.point && state.point.loc;
+  let h = Math.floor(Date.now() / 1800_000) + (p ? Math.round(p.lat * 100) * 31 + Math.round(p.lon * 100) : 0);
+  for (const c of key) h = (h * 33 + c.charCodeAt(0)) | 0;
+  return all[Math.abs(h) % all.length];
+}
+const HEAVY = RAIN_BANDS[4]; // 5 mm/h and more somewhere in the wet stretch: "pouring"
+
 function summary() {
-  const s = cur(), fr = s.frames.slice(s.nowIdx), h = 2;
+  const s = cur(), fr = s.frames.slice(s.nowIdx);
   // no radar and no model values (offline, both sources failed): say so instead of "dry" / "no sun" (v1.32)
   if (!fr.length || !fr.some((f) => Number.isFinite(f.value))) return t("summary.noData");
   if (state.mode === "rain") {
@@ -3236,23 +3255,29 @@ function summary() {
     // while the map and the bars showed light rain at the place (user, Piacenza; 22.11.2026: 79 of 102 places in the
     // map's lightest class got "dry")
     const wet = (f) => f.value >= RAIN_BANDS[0], word = (f) => t(KIND_WORD[f.ptype] || "kind.rain");
+    const group = (f) => (!f.ptype || f.ptype === "rain" ? "rain" : f.ptype === "snow" || f.ptype === "freezing" ? f.ptype : "other");
+    // the wet stretch from i to end (-1: to the end of the 2 h): its kind's lines, "Heavy" when rain pours in it
+    const say = (i, end, form, time) => {
+      const g = group(fr[i]), heavy = g === "rain" && fr.slice(i, end < 0 ? undefined : end).some((x) => x.value >= HEAVY);
+      return quip(`quip.${g}.${form}${heavy ? "Heavy" : ""}`, { kind: word(fr[i]), time });
+    };
     if (wet(fr[0])) {
-      const dry = fr.find((f) => !wet(f));
-      return dry ? t("summary.until", { kind: word(fr[0]), time: fmtTime(dry.ts) }) : t("summary.lasts", { kind: word(fr[0]), count: h });
+      const end = fr.findIndex((f) => !wet(f));
+      return end >= 0 ? say(0, end, "until", fmtTime(fr[end].ts)) : say(0, -1, "lasts");
     }
-    const next = fr.find(wet);
-    return next ? t("summary.from", { kind: word(next), time: fmtTime(next.ts) }) : t("summary.dry", { count: h });
+    const next = fr.findIndex(wet);
+    return next < 0 ? quip("quip.dry") : say(next, fr.findIndex((f, i) => i > next && !wet(f)), "from", fmtTime(fr[next].ts));
   }
   const sunny = (f) => f.value >= 0.5;
   if (sunny(fr[0])) {
     const end = fr.find((f) => !sunny(f));
-    return end ? t("summary.sunUntil", { time: fmtTime(end.ts) }) : t("summary.sunStays");
+    return end ? quip("quip.sunUntil", { time: fmtTime(end.ts) }) : quip("quip.sunStays");
   }
   const next = fr.find(sunny);
-  if (next) return t("summary.sunFrom", { time: fmtTime(next.ts) });
+  if (next) return quip("quip.sunFrom", { time: fmtTime(next.ts) });
   const some = fr.find((f) => f.value >= 0.2);
-  if (some) return t("summary.someSunFrom", { time: fmtTime(some.ts) });
-  return fr[0].isDay ? t("summary.noSun", { count: h }) : t("summary.nightNoSun", { count: h });
+  if (some) return quip("quip.someSunFrom", { time: fmtTime(some.ts) });
+  return quip(fr[0].isDay ? "quip.noSun" : "quip.nightNoSun");
 }
 
 const chart = document.getElementById("chart");

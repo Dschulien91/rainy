@@ -64,6 +64,31 @@
   "summary.nightNoSun.one": "Nacht – {count} Std. keine Sonne",
   "summary.nightNoSun.other": "Nacht – {count} Std. keine Sonne",
 
+  // v1.57: the summary as a friend would put it (user, 25.11.2026). Each key holds a few lines split by "|"; one is
+  // picked per place and half hour. Keep each line short: on phones the summary is one line (about 26 characters).
+  "quip.rain.until": "Nass bis {time}, dann Ruhe|Bis {time} Schirm, dann frei|Hört um {time} auf. Echt.|Durchhalten bis {time}|Bis {time} lieber drinnen",
+  "quip.rain.untilHeavy": "Es schüttet. Bis ca. {time}.|Sauwetter bis ca. {time}|Bloß nicht raus. Bis {time}.",
+  "quip.rain.lasts": "Regen. Und noch mehr Regen.|Regnet durch. Sorry.|Sofa-Wetter, 2 Std. mindestens|Mistwetter. Bleibt so.",
+  "quip.rain.lastsHeavy": "Schüttet und hört nicht auf|Sauwetter. Und zwar lange.|Land unter. Bleibt so.",
+  "quip.rain.from": "Ab {time} wird's nass|Trocken bis {time}. Beeil dich!|Jetzt raus! Ab {time} Regen|Schirm einpacken: ab {time}",
+  "quip.rain.fromHeavy": "Ab {time} schüttet's. Rein da!|Ab {time} Weltuntergang|Ab {time} wird's richtig fies",
+  "quip.dry": "2 Std. trocken. Raus mit dir!|Kein Tropfen. Geh raus!|Schirm bleibt zu Hause|Trocken. Läuft.",
+  "quip.snow.until": "Schnee bis {time}. Mütze auf!|Schneit bis ca. {time}|Bis {time} wird's weiß",
+  "quip.snow.lasts": "Schnee, Schnee, Schnee|Winter pur. Bleibt so.|Schneit und schneit",
+  "quip.snow.from": "Ab {time} schneit's|Ab {time} wird's weiß|Mütze raus: Schnee ab {time}",
+  "quip.freezing.until": "Glatteis bis {time}. Vorsicht!",
+  "quip.freezing.lasts": "Glatteisregen. Vorsicht!",
+  "quip.freezing.from": "Ab {time} Glatteis. Vorsicht!",
+  "quip.other.until": "{kind} bis ca. {time}. Bäh.|{kind} bis {time}. Rein!",
+  "quip.other.lasts": "{kind}. Bäh. Bleibt so.|{kind}. Bleib drinnen.",
+  "quip.other.from": "Ab {time} {kind}. Bäh.|{kind} ab {time}. Rein da!",
+  "quip.sunUntil": "Sonne bis {time}. Genießen!|Raus! Sonne bis {time}|Sonnenbrille bis {time}",
+  "quip.sunStays": "Sonne satt. Raus mit dir!|Strahlend. Bleibt so.|Traumwetter. Keine Ausreden.",
+  "quip.sunFrom": "Ab {time} kommt die Sonne|Durchhalten: Sonne ab {time}|Ab {time} wird's schön",
+  "quip.someSunFrom": "Ab {time} blinzelt die Sonne|Ab {time} ein bisschen Sonne|Lichtblick ab {time}",
+  "quip.noSun": "Grau in grau. Tee kochen.|Sonne? Heute nicht.|Trüb. Einfach nur trüb.|2 Std. grau. Sorry.",
+  "quip.nightNoSun": "Nacht. Die Sonne hat frei.|Sterne statt Sonne|Nacht. Ab ins Bett.",
+
   // precipitation types (start of the summary sentence)
   "kind.rain": "Regen",
   "kind.sleet": "Schneeregen",

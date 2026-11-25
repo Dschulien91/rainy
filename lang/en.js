@@ -65,6 +65,31 @@
   "summary.nightNoSun.one": "Night – no sun for the next hour",
   "summary.nightNoSun.other": "Night – no sun for the next {count} hours",
 
+  // v1.57: the summary as a friend would put it (user, 25.11.2026). Each key holds a few lines split by "|"; one is
+  // picked per place and half hour. Keep each line short: on phones the summary is one line (about 26 characters).
+  "quip.rain.until": "Wet till {time}, then done|Brolly till {time}, then free|Stops at {time}. Promise.|Hang in there till {time}|Stay in till {time}",
+  "quip.rain.untilHeavy": "It's pouring. Till {time}.|Shitty till about {time}|Don't go out. Till {time}.",
+  "quip.rain.lasts": "Rain. And more rain.|Raining non-stop. Sorry.|Sofa weather, 2 h at least|Shitty. And it stays.",
+  "quip.rain.lastsHeavy": "Pouring. Not stopping.|Proper shitty. For hours.|Biblical. Staying so.",
+  "quip.rain.from": "Wet from {time}|Dry till {time}. Hurry!|Go now! Rain at {time}|Pack a brolly: {time}",
+  "quip.rain.fromHeavy": "Downpour at {time}. Get in!|Apocalypse at {time}|It gets nasty at {time}",
+  "quip.dry": "Dry for 2 h. Go out!|Not a drop. Go out!|Leave the brolly home|Dry. All good.",
+  "quip.snow.until": "Snow till {time}. Hat on!|Snowing till about {time}|White till {time}",
+  "quip.snow.lasts": "Snow, snow, snow|Full winter. Staying so.|Snowing and snowing",
+  "quip.snow.from": "Snow from {time}|It turns white at {time}|Hat on: snow at {time}",
+  "quip.freezing.until": "Freezing rain till {time}. Careful!",
+  "quip.freezing.lasts": "Freezing rain. Careful, slippery!",
+  "quip.freezing.from": "Freezing rain at {time}. Careful!",
+  "quip.other.until": "{kind} till {time}. Yuck.|{kind} till {time}. Get in!",
+  "quip.other.lasts": "{kind}. Yuck. Staying so.|{kind}. Better stay in.",
+  "quip.other.from": "{kind} from {time}. Yuck.|{kind} at {time}. Get in!",
+  "quip.sunUntil": "Sun till {time}. Enjoy!|Go out! Sun till {time}|Shades on till {time}",
+  "quip.sunStays": "Sunny. Go outside!|Glorious. Staying so.|Perfect. No excuses.",
+  "quip.sunFrom": "Sun's back at {time}|Hang on: sun at {time}|Nice from {time}",
+  "quip.someSunFrom": "Sun peeks out at {time}|A bit of sun at {time}|Glimmer of hope: {time}",
+  "quip.noSun": "Grey. Just grey.|Sun? Not today.|Grey for 2 h. Tea time.|Gloomy. Sorry.",
+  "quip.nightNoSun": "Night. Sun's off duty.|Stars, not sun|Night. Go to bed.",
+
   // precipitation types (start of the summary sentence)
   "kind.rain": "Rain",
   "kind.sleet": "Sleet",
