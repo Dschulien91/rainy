@@ -545,7 +545,7 @@
 "use strict";
 // v1.52: a radar that is out is hatched like every other area without radar (user 24.11.2026; the variants of
 // v1.51 are gone - the server keeps /api/radar/mask?kind=outage)
-const VERSION = "v1.58";
+const VERSION = "v1.59";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -2878,12 +2878,16 @@ if (USE_GL) {
 // "doch nicht gut", the still one A at all zooms instead, energy-saving). The texture is fixed to the map and only
 // moves along the steering wind when another time step is shown, so it travels with the clouds on the timeline; no
 // redraw loop - the GPU works only when the map or the step changes.
-const GL_CLOUD = { size: 256, cols: 8, zooms: [3, 8], step: 600e3 };
+// v1.59: the atlas cells carry `margin` px of the neighbour tiles on every side (server-v2.02, "<t0>-<n>m8"), so the
+// smoothing and the interpolation run across tile edges. Before, every tile only knew its own pixels: the smoothing
+// had to fade out towards the tile edge and left an unsmoothed band there - a big grey area showed the tile squares
+// (user, 25.11.2026: "between the squares there is always a hard edge, then the next picture begins").
+const GL_CLOUD = { size: 256, cols: 8, zooms: [3, 8], step: 600e3, margin: 8 };
 const GL_CLOUD_FS = `precision highp float;
 varying vec2 v_uv;
 uniform sampler2D u_data, u_lut;
 uniform vec2 u_cell, u_tex, u_off, u_shift;
-uniform float u_r, u_h, u_detail, u_dark, u_fray, u_blur;
+uniform float u_r, u_h, u_detail, u_dark, u_fray, u_blur, u_m;
 float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
 float vnoise(vec2 p) {
   vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
@@ -2894,19 +2898,20 @@ float fbm(vec2 p) {
   for (int k = 0; k < 4; k++) { s += a * vnoise(p); p = p * 2.03 + vec2(17.1, 9.2); a *= 0.5; }
   return s;
 }
+// u_cell: the tile's first pixel in the atlas; u_m: the neighbours' pixels around it in the cell (0 for single tiles)
 float field(vec2 t) { // the cloudiness at t (atlas pixels), inside this step's cell
-  return texture2D(u_data, clamp(t, u_cell + 0.5, u_cell + ${GL_CLOUD.size}.0 - 0.5) / u_tex).r;
+  return texture2D(u_data, clamp(t, u_cell - u_m + 0.5, u_cell + ${GL_CLOUD.size}.0 + u_m - 0.5) / u_tex).r;
 }
 void main() {
   // inside this step's cell only (the cells beside it are other time steps)
-  vec2 t = clamp(u_cell + v_uv * ${GL_CLOUD.size}.0, u_cell + 0.5, u_cell + ${GL_CLOUD.size}.0 - 0.5);
+  vec2 t = clamp(u_cell + v_uv * ${GL_CLOUD.size}.0, u_cell - u_m + 0.5, u_cell + ${GL_CLOUD.size}.0 + u_m - 0.5);
   vec4 d = texture2D(u_data, t / u_tex);
   if (d.a < 0.5) discard; // outside the sunny area
   vec2 w = u_off + vec2(gl_FragCoord.x, u_h - gl_FragCoord.y) / u_r - u_shift; // CSS pixels of the map
   float v = d.r;
-  // rounder outlines: a 3 x 3 binomial blur (CLOUD_LOOKS); narrower towards the tile's edge, where it reaches 0 - the
-  // neighbour tile's pixels are not in this cell, and a blur cut off there left a straight seam along the tile edge
-  vec2 e = min(t - u_cell, u_cell + ${GL_CLOUD.size}.0 - t);
+  // rounder outlines: a 3 x 3 binomial blur (CLOUD_LOOKS); with the margin it reaches across the tile edge. Only a
+  // single tile (no margin, while the atlas loads) narrows it towards its edge
+  vec2 e = min(t - (u_cell - u_m), u_cell + ${GL_CLOUD.size}.0 + u_m - t);
   float r = min(u_blur, max(min(e.x, e.y) - 0.5, 0.0));
   if (r > 0.25) {
     v = (4.0 * v + 2.0 * (field(t + vec2(r, 0.0)) + field(t - vec2(r, 0.0)) + field(t + vec2(0.0, r)) + field(t - vec2(0.0, r)))
@@ -2959,8 +2964,9 @@ const GLCloud = GLRain.extend({
     const { key, t0, n, base } = this.run, step = GL_CLOUD.step, dz = this._dz(), pass = ++this.pass;
     const i = this.ts == null ? -1 : (this.ts - t0) / step;
     const inAtlas = n > 0 && !atlasFailed.has(base) && Number.isInteger(i) && i >= 0 && i < n;
-    const single = (t, ts) => ({ u: `${base}/tiles/cloud/${key}/${ts}/${t.z}/${t.x}/${t.y}.${TILE_EXT}`, z: t.z, x: t.x, y: t.y, t0: ts, n: 1, key });
-    const atlas = (t) => ({ u: `${base}/tiles/clouddata/${key}/${t0}-${n}/${t.z}/${t.x}/${t.y}.${TILE_EXT}`, z: t.z, x: t.x, y: t.y, t0, n, key, atlas: true });
+    const single = (t, ts) => ({ u: `${base}/tiles/cloud/${key}/${ts}/${t.z}/${t.x}/${t.y}.${TILE_EXT}`, z: t.z, x: t.x, y: t.y, t0: ts, n: 1, key, m: 0 });
+    const M = GL_CLOUD.margin;
+    const atlas = (t) => ({ u: `${base}/tiles/clouddata/${key}/${t0}-${n}m${M}/${t.z}/${t.x}/${t.y}.${TILE_EXT}`, z: t.z, x: t.x, y: t.y, t0, n, key, atlas: true, m: M });
     const ready = (u) => { const e = this.tex.get(u); return !!(e && e.tex); };
     const view = this._tiles(dz), inView = new Set(view.map((t) => `${t.x}/${t.y}`));
     const want = [];
@@ -2969,7 +2975,7 @@ const GLCloud = GLRain.extend({
     if (inAtlas) {
       if (cz < dz) for (const t of this._tiles(cz, 0.3)) want.push(atlas(t));
       for (const t of view) want.push(atlas(t));
-      const full = 2 * 4 * 256 * 256 * GL_CLOUD.cols * Math.ceil(n / GL_CLOUD.cols);
+      const full = 2 * 4 * (256 + 2 * M) ** 2 * GL_CLOUD.cols * Math.ceil(n / GL_CLOUD.cols);
       let room = Math.floor(GL_BUDGET / full) - want.filter((w) => w.n > 1).length;
       for (const t of this._tiles(dz, 0.3)) { if (room-- <= 0) break; if (!inView.has(`${t.x}/${t.y}`)) want.push(atlas(t)); }
     } else if (cz < dz && this.ts != null) for (const t of this._tiles(cz, 0.3)) want.push(single(t, this.ts));
@@ -3048,7 +3054,9 @@ const GLCloud = GLRain.extend({
       gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([x0, y0, 0, 0, x1, y0, 1, 0, x0, y1, 0, 1, x1, y1, 1, 1]), gl.STREAM_DRAW);
       const k = (this.ts - e.t0) / step;
       gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, e.tex); gl.uniform1i(loc("u_data"), 0);
-      gl.uniform2f(loc("u_cell"), (k % GL_CLOUD.cols) * 256, Math.floor(k / GL_CLOUD.cols) * 256);
+      const m = e.m || 0, cs = 256 + 2 * m; // atlas cell: the tile and its margin
+      gl.uniform2f(loc("u_cell"), (k % GL_CLOUD.cols) * cs + m, Math.floor(k / GL_CLOUD.cols) * cs + m);
+      gl.uniform1f(loc("u_m"), m);
       gl.uniform2f(loc("u_tex"), e.w, e.h);
       gl.uniform1f(loc("u_blur"), CLOUD_LOOK.blur * Math.pow(2, e.z - 8));
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
