@@ -86,6 +86,25 @@ COLLAPSE_MIN = 6
 DEAD_KEEP_MS = 24 * 3600_000
 
 
+def dead_outline(shape, b, boxes):
+    """The no-data mask of a dropped-out radar from its dead COLLAPSE_KM boxes, with a rounded outline (server-v2.01).
+    The plain union of the boxes put a staircase of 20 km blocks on the map (25.11.2026, South Tyrol / Trentino: a
+    hatched block with dead-straight east-west edges at 46.11 / 46.30 N and north-south ones at 11.37 / 11.89 E, and
+    the rain of the neighbouring radars cut along them in every step, now and forecast). A radar's coverage is round:
+    one-box notches are closed (a disc of one box), then the corners are rounded (blur of a third of a box, cut at
+    one half). This is the outline of the same boxes, not a new area: it stays inside the union grown by half a box."""
+    m = np.zeros(shape, np.uint8)
+    for r, c in boxes:
+        m[r * b:(r + 1) * b, c * b:(c + 1) * b] = 1
+    if not m.any():
+        return m.astype(bool)
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * b + 1, 2 * b + 1))
+    pad = 2 * b   # closing must not stick to the window's edge
+    mp = cv2.morphologyEx(np.pad(m, pad), cv2.MORPH_CLOSE, k)[pad:-pad, pad:-pad]
+    sm = cv2.GaussianBlur(mp.astype(np.float32), (0, 0), sigmaX=b / 3.0, borderType=cv2.BORDER_REPLICATE)
+    return sm >= 0.5
+
+
 class Layer:
     name, credit = "", ""
     SHIFT_MS = 0        # an image stamped T belongs to the host's time step T + SHIFT_MS (see timing())
@@ -255,10 +274,7 @@ class Layer:
                 self._save_dead()
             mask = None
             if any(since <= t for since in self.dead.values()):  # not the images before it dropped out
-                mask = np.zeros(f[0].shape, bool)
-                for (r, c), since in self.dead.items():
-                    if since <= t:
-                        mask[r * b:(r + 1) * b, c * b:(c + 1) * b] = True
+                mask = dead_outline(f[0].shape, b, [k for k, since in self.dead.items() if since <= t])
             with self.lock:
                 self.blind[t] = mask
 

@@ -169,7 +169,11 @@ class Thunder:
         (x0, x1), (y0, y1) = merc(np.array(LIGHTNING_BOX[0::2]), np.array(LIGHTNING_BOX[1::2]))
         url = (f"{EUM}?service=WMS&version=1.3.0&request=GetMap&layers=mtg_fd:li_afa&styles=&crs=EPSG:3857"
                f"&bbox={x0},{y0},{x1},{y1}&width={LIGHTNING_SIZE[0]}&height={LIGHTNING_SIZE[1]}&format=image/png&transparent=true")
-        img = Image.open(io.BytesIO(self.fetch(url + (f"&time={t}" if t else ""), timeout=60))).convert("RGBA")
+        body = self.fetch(url + (f"&time={t}" if t else ""), timeout=60)
+        try:
+            img = Image.open(io.BytesIO(body)).convert("RGBA")
+        except Exception:  # a WMS error page instead of the PNG (24.11.2026, 3x): say what came, not "cannot identify ..."
+            raise ValueError(f"no image from the lightning WMS (time {t}): {body[:120]!r}") from None
         self.set_lightning(np.asarray(img)[..., 3] > 0, iso_ms(t) if t else None)
         self.lightning_time = t
 

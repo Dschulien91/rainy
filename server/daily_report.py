@@ -148,7 +148,10 @@ def state(day):
 
 # how old a source's newest data may be before it counts as missing (minutes): OPERA is normally 5-10 min late and
 # listed every minute or two, the national layers and DWD ~5 min, the sunny satellite every 10-15 min
-SOURCE_LIMIT = {"opera": 25, "mrms": 20, "dwd": 20, "sunny": MAX_SUN_AGE}
+# lightning (EUMETSAT MTG LI): the newest flashes are normally 11-32 min old (10-min product, ~10 min late, fetched
+# every 5 min); with 25 the report showed "!! 205 min ohne neue Daten" on 24.11.2026 for 75 min of normal jitter plus
+# a real 130-min stall of EUMETSAT's layer (12:10-14:10Z, data older than thunder.LIGHTNING_MAX_AGE_MS)
+SOURCE_LIMIT = {"opera": 25, "mrms": 20, "dwd": 20, "sunny": MAX_SUN_AGE, "lightning": 40}
 SOURCE_DEFAULT = 25
 
 
