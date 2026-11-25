@@ -91,18 +91,22 @@ def dead_outline(shape, b, boxes):
     The plain union of the boxes put a staircase of 20 km blocks on the map (25.11.2026, South Tyrol / Trentino: a
     hatched block with dead-straight east-west edges at 46.11 / 46.30 N and north-south ones at 11.37 / 11.89 E, and
     the rain of the neighbouring radars cut along them in every step, now and forecast). A radar's coverage is round:
-    one-box notches are closed (a disc of one box), then the corners are rounded (blur of a third of a box, cut at
-    one half). This is the outline of the same boxes, not a new area: it stays inside the union grown by half a box."""
+    one-box notches are closed (a disc of 1.5 boxes), then the outline is rounded (blur of 2/3 of a box, cut at 0.4).
+    v2.04: v2.01's disc of one box and blur of 1/3 box still left the 20 km steps visible along a diagonal (the
+    Sardinian drop-out of 25.11. 09:55Z); offline on that day's dead boxes this one is a smooth footprint that grows
+    the area by ~30 % (up to about a box beyond the union: hatched, i.e. no data - the safe side) and leaves ~3 % of
+    it out (box corners)."""
     m = np.zeros(shape, np.uint8)
     for r, c in boxes:
         m[r * b:(r + 1) * b, c * b:(c + 1) * b] = 1
     if not m.any():
         return m.astype(bool)
-    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * b + 1, 2 * b + 1))
-    pad = 2 * b   # closing must not stick to the window's edge
+    r = int(round(1.5 * b))
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
+    pad = 2 * r   # closing must not stick to the window's edge
     mp = cv2.morphologyEx(np.pad(m, pad), cv2.MORPH_CLOSE, k)[pad:-pad, pad:-pad]
-    sm = cv2.GaussianBlur(mp.astype(np.float32), (0, 0), sigmaX=b / 3.0, borderType=cv2.BORDER_REPLICATE)
-    return sm >= 0.5
+    sm = cv2.GaussianBlur(mp.astype(np.float32), (0, 0), sigmaX=2.0 * b / 3.0, borderType=cv2.BORDER_REPLICATE)
+    return sm >= 0.4
 
 
 class Layer:
