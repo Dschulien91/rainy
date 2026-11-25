@@ -107,7 +107,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v1.95"
+VERSION = "server-v1.96"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -2482,6 +2482,9 @@ def monitor_status():
         out.update(om_probe_take())  # "om" / "om_pub": weather model probes since the last row (server-v1.86)
     elif not NA and REGIONS["eu"].node_seen is not None:  # radars missing from the newest OPERA image (server-v1.91)
         out["radars_out"] = list(REGIONS["eu"].nodes_missing)
+        dead = {l.name: len(l.dead) for l in getattr(REGIONS["eu"], "layers", []) if getattr(l, "dead", None)}
+        if dead:
+            out["layer_radars_out"] = dead  # national layers: boxes of a dropped-out radar (national.COLLAPSE_MIN)
     return out
 
 

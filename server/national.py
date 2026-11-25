@@ -69,6 +69,18 @@ FEATHER_KM = 30.0
 WAIT_MIN = 20          # a time step is composed without a layer's image after this long
 ALIVE_MIN = 30         # a layer that delivered within this time is waited for
 NEAR_MS = 10 * 60_000  # without the exact image: the nearest one within this distance
+# DROPPED-OUT RADAR (server-v1.96): 25.11.2026 04:25 UTC Radar-DPC's SRI lost the rain of South Tyrol and Trentino at
+# once - 13 boxes of 20 km around 46.46 N 11.21 E (the Monte Macaion radar) went from rain to dry in one image, while
+# the 60 South Tyrol and 96 Trentino gauges kept measuring rain (wet at 12-15 / 33-42 of them, more than before) and
+# OPERA sees nothing there either. The product reports a radar that is out as "no rain", not as "no data", so the map
+# showed a large rain area vanishing (user, 25.11.: "a huge cloud over Bozen"). In the hours before, at most 2 boxes
+# turned dry from one image to the next. Now: at least COLLAPSE_MIN boxes that turn from wet (> 30 % of the box) to
+# dry (< 2 %) in one image are taken as a radar that dropped out; they stay "no data" in the picture (bridged with the
+# forecast for a few steps, then hatched, as an OPERA radar that is out) until rain shows up in them again (the radar
+# is back) or for DEAD_KEEP_MS at most.
+COLLAPSE_KM = 20.0
+COLLAPSE_MIN = 6
+DEAD_KEEP_MS = 6 * 3600_000
 
 
 class Layer:
@@ -84,6 +96,8 @@ class Layer:
         self.host, self.log, self.ua = host, log, ua
         self.lock = threading.Lock()
         self.frames = {}        # ts -> (rate on the host window, float16, < 0 = no data; weight float16)
+        self.dead = {}          # (box row, box col) -> step since when a dropped-out radar's box shows no rain
+        self.blind = {}         # ts -> bool mask on the host window (dead boxes in that image) or None
         self.first_poll_done = False
         self.failed = 0.0
         self.geometry()
@@ -181,7 +195,62 @@ class Layer:
         with self.lock:
             for t in [t for t in self.frames if t < now - KEEP_MS]:
                 del self.frames[t]
+            for t in [t for t in self.blind if t not in self.frames]:
+                del self.blind[t]
+        if got:
+            self.watch()
         return got
+
+    def _boxes(self, rate):
+        """Wet share (> 0.1 mm/h) and data share of the COLLAPSE_KM boxes of a host-window image."""
+        b = max(1, int(round(COLLAPSE_KM / self.host.KM_PER_PX)))
+        h, w = rate.shape[0] // b, rate.shape[1] // b
+        a = np.asarray(rate[:h * b, :w * b], np.float32).reshape(h, b, w, b)
+        return (a > 0.1).mean(axis=(1, 3)), (a >= 0).mean(axis=(1, 3)), b
+
+    def watch(self):
+        """Dropped-out radar (see COLLAPSE_MIN): the images not looked at yet, oldest first."""
+        with self.lock:
+            todo = sorted(t for t, f in self.frames.items() if f is not None and t not in self.blind)
+        for t in todo:
+            with self.lock:
+                f = self.frames.get(t)
+                prev = next((self.frames[t - k * STEP_MS] for k in (1, 2) if self.frames.get(t - k * STEP_MS) is not None), None)
+            if f is None:
+                continue
+            wet, cov, b = self._boxes(f[0])
+            for k in [k for k, since in self.dead.items() if wet[k] >= 0.02 or cov[k] < 0.5 or t - since > DEAD_KEEP_MS]:
+                del self.dead[k]
+                if not self.dead:
+                    self.log(f"layer {self.name}: rain shows again where a radar had dropped out "
+                             f"({datetime.fromtimestamp(t / 1000, timezone.utc):%H:%MZ})")
+            if prev is not None:
+                wet0, cov0, _ = self._boxes(prev[0])
+                gone = (wet0 > 0.3) & (wet < 0.02) & (cov >= 0.5) & (cov0 >= 0.5)
+                if gone.sum() >= COLLAPSE_MIN:
+                    r, c = np.nonzero(gone)
+                    for k in zip(r.tolist(), c.tolist()):
+                        self.dead.setdefault(k, t)
+                    lon, lat = self.host.pixel_lonlat(self.win[1].start + (c.mean() + 0.5) * b,
+                                                      self.win[0].start + (r.mean() + 0.5) * b)
+                    self.log(f"layer {self.name}: the rain of {len(r)} boxes of {COLLAPSE_KM:.0f} km around "
+                             f"{float(lat):.2f} N {float(lon):.2f} E vanished at once at "
+                             f"{datetime.fromtimestamp(t / 1000, timezone.utc):%H:%MZ} (a radar dropped out) - "
+                             f"no data there until rain shows again")
+            mask = None
+            if self.dead:
+                mask = np.zeros(f[0].shape, bool)
+                for r, c in self.dead:
+                    mask[r * b:(r + 1) * b, c * b:(c + 1) * b] = True
+            with self.lock:
+                self.blind[t] = mask
+
+    def blind_at(self, ts):
+        """The dead-box mask of the image get(ts) answers with (None: none)."""
+        ts -= self.SHIFT_MS
+        with self.lock:
+            ok = [t for t, f in self.frames.items() if f is not None and abs(t - ts) <= NEAR_MS]
+            return self.blind.get(min(ok, key=lambda t: abs(t - ts))) if ok else None
 
     def loop(self):
         while True:
@@ -244,6 +313,10 @@ def compose(grid, layers, ts):
         mean = num / np.maximum(den, 1e-6)
         rest = np.clip(1 - den, 0, 1)
         grid[...] = np.where(have & base, (1 - rest) * mean + rest * grid, np.where(have, mean, grid))
+    for l in layers:  # a dropped-out radar's area: no data, whatever OPERA or a neighbour shows there (COLLAPSE_MIN)
+        m = None if l.SHADOW else l.blind_at(ts)
+        if m is not None:
+            grid[l.win][m] = -1.0
     return used
 
 
