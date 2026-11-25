@@ -542,17 +542,17 @@ class Mosaic:
             return make()
         return self._cached(f"c/{key}/{ts}/{z}/{x}/{y}/{fmt}", make)
 
-    def cloud_data_tile(self, key, t0, n, z, x, y, fmt="png"):
+    def cloud_data_tile(self, key, t0, n, z, x, y, fmt="png", margin=0):
         """All sunny frames t0 .. t0 + (n - 1) x 10 min of one tile as one atlas PNG / WebP (SunnyDE.image_atlas)."""
         if not hasattr(self.clouds, "image_atlas") or not (1 <= n <= 40) or z > 8:
             return None
         span = 2 * WORLD / (1 << z)
         bbox = (-WORLD + x * span, WORLD - (y + 1) * span, -WORLD + (x + 1) * span, WORLD - y * span)
         run = int(key) if key.isdigit() else None
-        make = lambda: self.clouds.image_atlas(t0, n, bbox, TILE, TILE, run=run, fmt=fmt)
+        make = lambda: self.clouds.image_atlas(t0, n, bbox, TILE, TILE, run=run, fmt=fmt, margin=margin)
         if not self.cloud_key_known(key):
             return make()
-        return self._cached(f"ca/{key}/{t0}/{n}/{z}/{x}/{y}/{fmt}", make)
+        return self._cached(f"ca/{key}/{t0}/{n}/{z}/{x}/{y}/{fmt}" + (f"/m{margin}" if margin else ""), make)
 
     def cloud_key_known(self, key):
         """The cloud key's run is still kept (or the source keeps no runs): its tiles can be cached as immutable."""

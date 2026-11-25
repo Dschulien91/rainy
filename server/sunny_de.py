@@ -1589,10 +1589,17 @@ class SunnyDE:
 
     ATLAS_COLS = 8
 
-    def image_atlas(self, t0, n, bbox, w, h, run=None, fmt="png"):
+    def image_atlas(self, t0, n, bbox, w, h, run=None, fmt="png", margin=0):
         """The frames t0, t0 + 10 min, ... (n of them) of one map tile in ONE grey + alpha PNG, ATLAS_COLS cells of
         w x h per row (a frame the run lacks stays transparent). The app loads one of these per tile position for the
-        whole sunny timeline instead of one tile per time step (15.11.2026: ~250 requests, clouds came in late)."""
+        whole sunny timeline instead of one tile per time step (15.11.2026: ~250 requests, clouds came in late).
+        margin (server-v2.02): each cell is the tile plus this many pixels of its neighbours on every side
+        (w + 2 margin wide), so the app can smooth and interpolate across tile edges: without them the smoothed
+        clouds showed the tile squares (user 25.11.2026: "a big grey area is made of squares with hard edges")."""
+        if margin:
+            minx, miny, maxx, maxy = bbox
+            dx, dy = (maxx - minx) / w * margin, (maxy - miny) / h * margin
+            bbox, w, h = (minx - dx, miny - dy, maxx + dx, maxy + dy), w + 2 * margin, h + 2 * margin
         rows = -(-n // self.ATLAS_COLS)  # only as many columns as the frames need (server-v1.69; cell i stays at
         out = np.zeros((rows * h, min(n, self.ATLAS_COLS) * w, 2), np.uint8)  # (i // ATLAS_COLS, i % ATLAS_COLS))
         col_row = None

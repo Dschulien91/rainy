@@ -107,7 +107,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v2.01"
+VERSION = "server-v2.02"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -2187,15 +2187,17 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send(404, b"bad tile", "text/plain", 3600)
                 return self.send(200, png, tileimg.TYPES[fmt], 86400 if MOSAIC.key_known(key) else 60)
             if u.path.startswith("/tiles/clouddata/"):  # all sunny frames of one tile in one atlas (app v1.13)
-                m = re.fullmatch(r"/tiles/clouddata/(\d+)/(\d+)-(\d+)/(\d+)/(\d+)/(\d+)\.(png|webp)", u.path)
+                # "<t0>-<n>m8": cells with 8 px of the neighbour tiles around them (server-v2.02, app v1.59)
+                m = re.fullmatch(r"/tiles/clouddata/(\d+)/(\d+)-(\d+)(m8)?/(\d+)/(\d+)/(\d+)\.(png|webp)", u.path)
                 if not m:
                     return self.send(404, b"not found", "text/plain", 60)
                 key = m.group(1)
-                t0, n, z, x, y = map(int, m.groups()[1:6])
-                fmt = m.group(7)
+                t0, n = int(m.group(2)), int(m.group(3))
+                z, x, y = map(int, m.groups()[4:7])
+                fmt, margin = m.group(8), 8 if m.group(4) else 0
                 if not (0 <= x < (1 << z) and 0 <= y < (1 << z)):
                     return self.send(404, b"bad tile", "text/plain", 3600)
-                png = MOSAIC.cloud_data_tile(key, t0, n, z, x, y, fmt=fmt)
+                png = MOSAIC.cloud_data_tile(key, t0, n, z, x, y, fmt=fmt, margin=margin)
                 if png is None:
                     return self.send(404, b"no atlas", "text/plain", 60)
                 return self.send(200, png, tileimg.TYPES[fmt], 86400 if MOSAIC.cloud_key_known(key) else 60)
