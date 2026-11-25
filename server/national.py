@@ -69,14 +69,14 @@ FEATHER_KM = 30.0
 WAIT_MIN = 20          # a time step is composed without a layer's image after this long
 ALIVE_MIN = 30         # a layer that delivered within this time is waited for
 NEAR_MS = 10 * 60_000  # without the exact image: the nearest one within this distance
-# DROPPED-OUT RADAR (server-v1.96, the whole area v1.97): 25.11.2026 04:25 UTC Radar-DPC's SRI lost the rain of South Tyrol and Trentino at
+# DROPPED-OUT RADAR (server-v1.96, the whole area v1.97, cleared as a whole v1.98): 25.11.2026 04:25 UTC Radar-DPC's SRI lost the rain of South Tyrol and Trentino at
 # once - 13 boxes of 20 km around 46.46 N 11.21 E (the Monte Macaion radar) went from rain to dry in one image, while
 # the 60 South Tyrol and 96 Trentino gauges kept measuring rain (wet at 12-15 / 33-42 of them, more than before) and
 # OPERA sees nothing there either. The product reports a radar that is out as "no rain", not as "no data", so the map
 # showed a large rain area vanishing (user, 25.11.: "a huge cloud over Bozen"). In the hours before, at most 2 boxes
 # turned dry from one image to the next. Now: at least COLLAPSE_MIN boxes that turn from wet (> 30 % of the box) to
 # dry (< 2 %) in one image are taken as a radar that dropped out; they stay "no data" in the picture (bridged with the
-# forecast for a few steps, then hatched, as an OPERA radar that is out) until rain shows up in them again (the radar
+# forecast for a few steps, then hatched, as an OPERA radar that is out) until rain shows up in a good part of them again (the radar
 # is back) or for DEAD_KEEP_MS at most.
 COLLAPSE_KM = 20.0
 COLLAPSE_MIN = 6
@@ -219,11 +219,13 @@ class Layer:
             if f is None:
                 continue
             wet, cov, b = self._boxes(f[0])
-            for k in [k for k, since in self.dead.items() if wet[k] >= 0.02 or cov[k] < 0.5 or t - since > DEAD_KEEP_MS]:
-                del self.dead[k]
-                if not self.dead:
-                    self.log(f"layer {self.name}: rain shows again where a radar had dropped out "
-                             f"({datetime.fromtimestamp(t / 1000, timezone.utc):%H:%MZ})")
+            # back: rain in a good part of the area again (v1.97: not box by box - a neighbouring radar's bit of rain
+            # in one box at the edge of its range cleared that box, and Bozen showed "dry" in the middle of the hole)
+            if self.dead and (np.mean([wet[k] >= 0.1 for k in self.dead]) >= 0.3
+                              or t - min(self.dead.values()) > DEAD_KEEP_MS):
+                self.dead = {}
+                self.log(f"layer {self.name}: rain shows again where a radar had dropped out "
+                         f"({datetime.fromtimestamp(t / 1000, timezone.utc):%H:%MZ})")
             if prev is not None:
                 wet0, cov0, _ = self._boxes(prev[0])
                 gone = (wet0 > 0.3) & (wet < 0.02) & (cov >= 0.5) & (cov0 >= 0.5)
@@ -233,7 +235,7 @@ class Layer:
                     # the vanished ones (25.11.: Bozen itself was dry at 04:20 and kept showing "dry" in the hole)
                     hull = np.zeros(wet.shape, np.uint8)
                     cv2.fillConvexPoly(hull, cv2.convexHull(np.stack([c, r], 1).astype(np.int32)), 1)
-                    rr, cc = np.nonzero((hull > 0) & (wet < 0.02) & (cov >= 0.5))
+                    rr, cc = np.nonzero((hull > 0) & (wet < 0.1) & (cov >= 0.5))
                     for k in zip(rr.tolist(), cc.tolist()):
                         self.dead.setdefault(k, t)
                     lon, lat = self.host.pixel_lonlat(self.win[1].start + (c.mean() + 0.5) * b,
