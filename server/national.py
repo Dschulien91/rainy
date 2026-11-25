@@ -97,6 +97,7 @@ class Layer:
         self.lock = threading.Lock()
         self.frames = {}        # ts -> (rate on the host window, float16, < 0 = no data; weight float16)
         self.dead = {}          # (box row, box col) -> step since when a dropped-out radar's box shows no rain
+        self._load_dead()
         self.blind = {}         # ts -> bool mask on the host window (dead boxes in that image) or None
         self.first_poll_done = False
         self.failed = 0.0
@@ -219,10 +220,12 @@ class Layer:
             if f is None:
                 continue
             wet, cov, b = self._boxes(f[0])
+            before = dict(self.dead)
+            self.dead = {k: v for k, v in self.dead.items() if k[0] < wet.shape[0] and k[1] < wet.shape[1]}
             # back: rain in a good part of the area again (v1.97: not box by box - a neighbouring radar's bit of rain
             # in one box at the edge of its range cleared that box, and Bozen showed "dry" in the middle of the hole)
-            if self.dead and (np.mean([wet[k] >= 0.1 for k in self.dead]) >= 0.3
-                              or t - min(self.dead.values()) > DEAD_KEEP_MS):
+            if self.dead and t > min(self.dead.values()) and (np.mean([wet[k] >= 0.1 for k in self.dead]) >= 0.3
+                                                               or t - min(self.dead.values()) > DEAD_KEEP_MS):
                 self.dead = {}
                 self.log(f"layer {self.name}: rain shows again where a radar had dropped out "
                          f"({datetime.fromtimestamp(t / 1000, timezone.utc):%H:%MZ})")
@@ -245,13 +248,40 @@ class Layer:
                              f"{float(lat):.2f} N {float(lon):.2f} E vanished at once at "
                              f"{datetime.fromtimestamp(t / 1000, timezone.utc):%H:%MZ} (a radar dropped out) - "
                              f"no data there until rain shows again")
+            if self.dead != before:
+                self._save_dead()
             mask = None
-            if self.dead:
+            if any(since <= t for since in self.dead.values()):  # not the images before it dropped out
                 mask = np.zeros(f[0].shape, bool)
-                for r, c in self.dead:
-                    mask[r * b:(r + 1) * b, c * b:(c + 1) * b] = True
+                for (r, c), since in self.dead.items():
+                    if since <= t:
+                        mask[r * b:(r + 1) * b, c * b:(c + 1) * b] = True
             with self.lock:
                 self.blind[t] = mask
+
+    # the dead boxes survive a restart (server-v1.99): the layer reloads only its last KEEP_MS, so the image before the
+    # drop-out - and with it the drop-out - is gone after a restart 80 min later
+    def _dead_file(self):
+        return os.path.join(os.environ.get("VERIFY_LOG_DIR", "."), f"layer_dead_{self.name}.json")
+
+    def _load_dead(self):
+        try:
+            with open(self._dead_file()) as f:
+                rows = json.load(f)
+            now = time.time() * 1000
+            self.dead = {(int(r), int(c)): int(t) for r, c, t in rows if now - t < DEAD_KEEP_MS}
+            if self.dead:
+                self.log(f"layer {self.name}: {len(self.dead)} boxes of a dropped-out radar still without data (from before the restart)")
+        except (OSError, ValueError, TypeError):
+            self.dead = {}
+
+    def _save_dead(self):
+        try:
+            with open(self._dead_file() + ".tmp", "w") as f:
+                json.dump([[r, c, t] for (r, c), t in self.dead.items()], f)
+            os.replace(self._dead_file() + ".tmp", self._dead_file())
+        except OSError as e:
+            self.log(f"layer {self.name}: dead boxes not saved ({e})")
 
     def blind_at(self, ts):
         """The dead-box mask of the image get(ts) answers with (None: none)."""
