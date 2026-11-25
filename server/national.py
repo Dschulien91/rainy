@@ -69,7 +69,7 @@ FEATHER_KM = 30.0
 WAIT_MIN = 20          # a time step is composed without a layer's image after this long
 ALIVE_MIN = 30         # a layer that delivered within this time is waited for
 NEAR_MS = 10 * 60_000  # without the exact image: the nearest one within this distance
-# DROPPED-OUT RADAR (server-v1.96): 25.11.2026 04:25 UTC Radar-DPC's SRI lost the rain of South Tyrol and Trentino at
+# DROPPED-OUT RADAR (server-v1.96, the whole area v1.97): 25.11.2026 04:25 UTC Radar-DPC's SRI lost the rain of South Tyrol and Trentino at
 # once - 13 boxes of 20 km around 46.46 N 11.21 E (the Monte Macaion radar) went from rain to dry in one image, while
 # the 60 South Tyrol and 96 Trentino gauges kept measuring rain (wet at 12-15 / 33-42 of them, more than before) and
 # OPERA sees nothing there either. The product reports a radar that is out as "no rain", not as "no data", so the map
@@ -229,11 +229,17 @@ class Layer:
                 gone = (wet0 > 0.3) & (wet < 0.02) & (cov >= 0.5) & (cov0 >= 0.5)
                 if gone.sum() >= COLLAPSE_MIN:
                     r, c = np.nonzero(gone)
-                    for k in zip(r.tolist(), c.tolist()):
+                    # the radar's whole area, not only where it rained just before: the dry boxes inside the hull of
+                    # the vanished ones (25.11.: Bozen itself was dry at 04:20 and kept showing "dry" in the hole)
+                    hull = np.zeros(wet.shape, np.uint8)
+                    cv2.fillConvexPoly(hull, cv2.convexHull(np.stack([c, r], 1).astype(np.int32)), 1)
+                    rr, cc = np.nonzero((hull > 0) & (wet < 0.02) & (cov >= 0.5))
+                    for k in zip(rr.tolist(), cc.tolist()):
                         self.dead.setdefault(k, t)
                     lon, lat = self.host.pixel_lonlat(self.win[1].start + (c.mean() + 0.5) * b,
                                                       self.win[0].start + (r.mean() + 0.5) * b)
-                    self.log(f"layer {self.name}: the rain of {len(r)} boxes of {COLLAPSE_KM:.0f} km around "
+                    self.log(f"layer {self.name}: the rain of {len(r)} boxes of {COLLAPSE_KM:.0f} km ({len(rr)} with the dry "
+                             f"ones between them) around "
                              f"{float(lat):.2f} N {float(lon):.2f} E vanished at once at "
                              f"{datetime.fromtimestamp(t / 1000, timezone.utc):%H:%MZ} (a radar dropped out) - "
                              f"no data there until rain shows again")
