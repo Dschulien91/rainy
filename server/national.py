@@ -80,7 +80,10 @@ NEAR_MS = 10 * 60_000  # without the exact image: the nearest one within this di
 # is back) or for DEAD_KEEP_MS at most.
 COLLAPSE_KM = 20.0
 COLLAPSE_MIN = 6
-DEAD_KEEP_MS = 6 * 3600_000
+# server-v2.00: 24 h (was 6). Macaion was still out 5.5 h after it dropped (25.11.2026 09:30-09:40 UTC: 16-31 of 96
+# Trentino gauges wet, no rain in the dead boxes); at 6 h its area would have shown "dry" again while it rained. A
+# radar that is back clears the area as soon as it rains there; hatching a dry area for longer is the smaller harm.
+DEAD_KEEP_MS = 24 * 3600_000
 
 
 class Layer:
