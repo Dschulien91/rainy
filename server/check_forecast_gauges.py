@@ -66,19 +66,43 @@ if not refs:
 print(f"{len(refs)} forecast runs of both instances, {time.strftime('%d.%m. %H:%M', time.gmtime(refs[0] / 1000))} - "
       f"{time.strftime('%d.%m. %H:%M', time.gmtime(refs[-1] / 1000))} UTC, {len(st)} gauges")
 truth = cng.truth(st, refs[0] - 1200_000, refs[-1] + 150 * 60_000, live="--archive" not in sys.argv)
-data = {name: {t: {k: v.astype(np.float32) for k, v in np.load(os.path.join(d, f"{t}.npz")).items()} for t in refs}
-        for name, d in DIRS.items()}
+# Memory (m1, 26.11.2026): until server-v2.09 every run's whole file of both instances and one Python tuple per
+# (run, lead, gauge) were held at once - > 2.2 GB for 48 h, OOM. Now: the gauge truth as a dense array (10-min slots),
+# the runs read one at a time (only their pictures kept, for "later pic"), the pairs as numpy blocks. Same numbers.
+SLOT = 600_000
+t_lo, t_hi = refs[0] // SLOT * SLOT, refs[-1] + (max(cng.FC_LEADS) + 10) * 60_000
+n_slot = int((t_hi - t_lo) // SLOT) + 1
+tv = np.zeros((len(st), n_slot), np.float64)      # gauge mm in the 10 minutes ending at the slot
+tp = np.zeros((len(st), n_slot), bool)            # ... present
+for k, s in enumerate(st):
+    for ts, v in truth.get(s[0], {}).get(s[1], {}).items():
+        if t_lo <= ts <= t_hi and ts % SLOT == 0:
+            j = int((ts - t_lo) // SLOT)
+            tv[k, j], tp[k, j] = v, True
+del truth
+keys, pics, n = {}, {}, len(st)   # per instance: {run: its keys}, {run: its picture at the gauges}
+for name, d in DIRS.items():
+    keys[name], pics[name] = {}, {}
+    for t in refs:
+        with np.load(os.path.join(d, f"{t}.npz")) as z:
+            keys[name][t] = set(z.files)
+            f0 = z["fc"]
+            n = min(n, f0.shape[1])
+            pics[name][t] = f0[0].astype(np.float32)
+for name in DIRS:
+    for t in refs:
+        pics[name][t] = pics[name][t][:n]
 # columns: per instance the served forecast, the variants every run of it has, its persistence
 cols = []   # (label, instance, key or None for persistence)
 for name in DIRS:
     cols.append((name, name, "fc"))
-    cols += [(f"{name[:3]}. {EXTRA[k]}", name, k) for k in EXTRA if all(k in data[name][t] for t in refs)]
+    cols += [(f"{name[:3]}. {EXTRA[k]}", name, k) for k in EXTRA if all(k in keys[name][t] for t in refs)]
     cols.append((f"{name[:3]}. persist", name, None))
     cols.append((f"{name[:3]}. later pic", name, "later"))
     for k in EXTRA:  # say when a shadow column is left out because only part of the runs have it
-        n = sum(k in data[name][t] for t in refs)
-        if 0 < n < len(refs):
-            print(f"(column {name[:3]}. {EXTRA[k]} left out: only {n} of {len(refs)} runs have it - use --with {k})")
+        m = sum(k in keys[name][t] for t in refs)
+        if 0 < m < len(refs):
+            print(f"(column {name[:3]}. {EXTRA[k]} left out: only {m} of {len(refs)} runs have it - use --with {k})")
 # "later pic" (16.11.): the instance's own picture at the forecast's VALID time at the same gauges = what the forecast is
 # trained to hit. forecast x ~ later pic x -> the amount error is the picture's (radar / gain); forecast x >> later pic x
 # -> the forecast itself inflates rain at the gauges (15./16.11.: Germany x1.7-1.9 at +60 with persistence x1.1-1.3).
@@ -87,33 +111,58 @@ def group(s):
     return f"sy-{s[1].split('-', 1)[0]}" if s[0] == "sy" else s[0]
 
 
-rows = {}   # (country, lead) -> [(gauge mm/h, one value per column ..., gauge index, valid time)]
-n = min(len(st), *(z["fc"].shape[1] for inst in data.values() for z in inst.values()))
+gname = [group(s) for s in st[:n]]
+gcodes = sorted(set(gname))
+gid = np.array([gcodes.index(g) for g in gname], np.int32)
+# (country, lead) -> list of blocks (gauge mm/h float64, values [m, columns] float32, gauge index, valid time)
+rows = {}
 for t in refs:
+    need = {name: sorted({key for _, inst, key in cols if inst == name and key not in (None, "later")}) for name in DIRS}
+    run = {}
+    for name, d in DIRS.items():
+        with np.load(os.path.join(d, f"{t}.npz")) as z:
+            run[name] = {k: z[k].astype(np.float32) for k in need[name]}
     for li, lead in enumerate(cng.FC_LEADS):
         T = t + lead * 60_000
         def col(inst, key):
             if key is None:
-                return data[inst][t]["fc"][0][:n]
+                return pics[inst][t]
             if key == "later":
-                z = data[inst].get(T)
-                return z["fc"][0][:n] if z is not None else np.full(n, np.nan, np.float32)
-            return data[inst][t][key][li + (key == "fc")][:n]
+                z = pics[inst].get(T)
+                return z if z is not None else np.full(n, np.nan, np.float32)
+            return run[inst][key][li + (key == "fc")][:n]
         vals = np.stack([col(inst, key) for _, inst, key in cols])
         ok = np.isfinite(vals).all(0)
-        for k in np.flatnonzero(ok):
-            q = truth.get(st[k][0], {}).get(st[k][1], {})
-            v = [q.get(T), q.get(T + 600_000)]
-            if None not in v:
-                rows.setdefault((group(st[k]), lead), []).append((np.mean(v) * 6, *vals[:, k], k, T))
+        j = (T - t_lo) // SLOT
+        if T % SLOT or j + 1 >= n_slot:
+            continue
+        ok &= tp[:n, j] & tp[:n, j + 1]
+        sel = np.flatnonzero(ok)
+        if not len(sel):
+            continue
+        g = (tv[sel, j] + tv[sel, j + 1]) / 2 * 6
+        for c in np.unique(gid[sel]):
+            m = gid[sel] == c
+            rows.setdefault((gcodes[c], lead), []).append((g[m], vals[:, sel[m]].T, sel[m], np.full(int(m.sum()), T, np.int64)))
+    del run
 
 
-def hourly(r):
+def joined(blocks):
+    """The blocks of some (country, lead) keys -> (gauge, values, gauge index, valid time) arrays."""
+    return (np.concatenate([b[0] for b in blocks]), np.concatenate([b[1] for b in blocks]),
+            np.concatenate([b[2] for b in blocks]), np.concatenate([b[3] for b in blocks]))
+
+
+def hourly(g, v, k, T):
     """Six consecutive 10-minute rows of a gauge within a full hour -> their mean (= mm in that hour)."""
-    groups = {}
-    for x in r:
-        groups.setdefault((x[-2], x[-1] // 3600_000), []).append(x[:-2])
-    return np.array([np.mean(g, 0) for g in groups.values() if len(g) == 6], np.float32).reshape(-1, len(cols) + 1)
+    x = np.column_stack([g, v.astype(np.float64)])
+    key = k.astype(np.int64) * (1 << 32) + T // 3600_000
+    u, first, inv, cnt = np.unique(key, return_index=True, return_inverse=True, return_counts=True)
+    s = np.zeros((len(u), x.shape[1]), np.float64)
+    np.add.at(s, inv, x)
+    keep = np.flatnonzero(cnt == 6)
+    keep = keep[np.argsort(first[keep], kind="stable")]   # in the order the hours first appear
+    return (s[keep] / 6).astype(np.float32).reshape(-1, len(cols) + 1)
 
 
 import synop  # noqa: E402
@@ -132,13 +181,14 @@ for name, cs in groups:
     if only and not any(o in cs or o.lower() in name.lower() for o in only):
         continue
     for lead in cng.FC_LEADS:
-        r = [x for c in cs for x in rows.get((c, lead), [])]
-        if not r:
+        blocks = [b for c in cs for b in rows.get((c, lead), [])]
+        if not blocks:
             continue
-        a = np.array([x[:-2] for x in r], np.float32)
+        g, v, k, T = joined(blocks)
+        a = np.column_stack([g, v]).astype(np.float32)
         if not cs[0].startswith("sy-") and cs not in (("pt",), ("ct",)):  # hourly amounts: hours tables only
             cng.table(f"{name}, +{lead} min", a[:, 0], {c[0]: a[:, i + 1] for i, c in enumerate(cols)})
-        h = hourly(r)
+        h = hourly(g, v, k, T)
         if len(h):
             cng.table(f"{name}, +{lead} min, hours", h[:, 0], {c[0]: h[:, i + 1] for i, c in enumerate(cols)},
                       ths=(0.2, 1.0, 3.0), unit="mm")
