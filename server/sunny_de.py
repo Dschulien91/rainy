@@ -1270,13 +1270,43 @@ class SunnyDE:
     # ---------- update ----------
     def _jump(self, ts, share, back=(1, 2)):
         """Mean daytime |share - an earlier image's share| inside the shown area (the first of `back` steps that exists),
-        or None without such an image."""
+        or None without such an image. Negative `back` steps look at later images."""
         with self.lock:
             prev = next((self.obs[ts - b * STEP_MS] for b in back if ts - b * STEP_MS in self.obs), None)
         if prev is None:
             return None
         m = (self.inside() > 0.5) & (self.elev(ts) >= SCORE_ELEV) & np.isfinite(share) & np.isfinite(prev.astype(np.float32))
         return float(np.abs(share[m] - prev.astype(np.float32)[m]).mean()) if m.sum() >= 500 else None
+
+    def _spike(self, ts, share):
+        """True when the image at ts differs by more than JUMP_MAX from the images before and after it (each one that
+        exists, at least one): a bad SIDhr file in the history. 26.11.2026: DWD's 08:30Z file (0.8 MB instead of ~3 MB)
+        had DNI > 120 W/m2 on 87 % of its area (24 % ten minutes before and after); add_slot skipped it, but the
+        restart at 09:14 forgot that, took it again as a late slot - late slots were never checked - and the timeline
+        showed a cloud-free Europe at 08:30 (Munich, Milan, Vienna: no sun, full sun, no sun)."""
+        jumps = [j for j in (self._jump(ts, share, back=(1, 2)), self._jump(ts, share, back=(-1, -2))) if j is not None]
+        return bool(jumps) and min(jumps) > JUMP_MAX
+
+    def _drop_slot(self, bad, why):
+        with self.lock:
+            for d in (self.obs, self.k, self.disp):
+                d.pop(bad, None)
+        for d in (self.verify.pending, self.verify.spending, *(v.spending for v in self.extra_verify)):
+            for key in [key for key in d if key[1] == bad]:
+                del d[key]
+        self.skipped.add(bad)
+        self.log(f"sunny: slot {ts_stamp(bad)} dropped ({why})")
+
+    def _drop_spikes(self):
+        """Drops the images of the history that are spikes (_spike), e.g. one taken before the check existed."""
+        with self.lock:
+            ts_all = sorted(self.obs)
+        for t in ts_all[1:-1]:
+            with self.lock:
+                g = self.obs.get(t)
+            if g is not None and self._spike(t, g.astype(np.float32)):
+                self._drop_slot(t, "its sun share differs from the images before and after it by more than "
+                                   f"{JUMP_MAX} on average")
 
     def add_slot(self, ts, sid_data, cth_data=None):
         """Ingest one slot as the newest image, make the forecast, hand it to the verification. False: slot skipped."""
@@ -1286,15 +1316,7 @@ class SunnyDE:
         if jump is not None and jump > JUMP_MAX and ts - STEP_MS in self.obs:
             before = self._jump(ts, share, back=(2,))
             if before is not None and before <= JUMP_MAX:  # the previous image was the odd one out: drop it
-                bad = ts - STEP_MS
-                with self.lock:
-                    for d in (self.obs, self.k, self.disp):
-                        d.pop(bad, None)
-                for d in (self.verify.pending, self.verify.spending, *(v.spending for v in self.extra_verify)):
-                    for key in [key for key in d if key[1] == bad]:
-                        del d[key]
-                self.skipped.add(bad)
-                self.log(f"sunny: slot {ts_stamp(bad)} dropped (sun share jumped by {jump:.2f} on average and back)")
+                self._drop_slot(ts - STEP_MS, f"sun share jumped by {jump:.2f} on average and back")
                 jump = None
         if jump is not None and jump > JUMP_MAX and self.skips_in_row < JUMP_ACCEPT:
             self.skipped.add(ts)
@@ -1359,7 +1381,7 @@ class SunnyDE:
             d, path = self._state_path()
             os.makedirs(d, exist_ok=True)
             tmp = path[:-4] + ".tmp.npz"
-            np.savez_compressed(tmp, ref=np.array([ref], np.int64), **parts)
+            np.savez_compressed(tmp, ref=np.array([ref], np.int64), skipped=np.array(sorted(self.skipped), np.int64), **parts)
             os.replace(tmp, path)
         except Exception as e:
             self.log(f"sunny: state not saved: {e}")
@@ -1384,6 +1406,9 @@ class SunnyDE:
             with self.lock:
                 self.obs, self.fc, self.disp, self.k, self.ref = got["obs"], got["fc"], got["disp"], got["k"], ref
                 self.disp_snaps[ref] = dict(self.disp)
+            # the slots skipped as implausible stay skipped (before 26.11.2026 a restart forgot them, see _spike)
+            self.skipped |= {int(t) for t in z["skipped"]} if "skipped" in z.files else set()
+            self._drop_spikes()
             self.log(f"sunny: continuing with the run of {ts_stamp(ref)} from before the restart "
                      f"({len(got['obs'])} images, {len(got['fc'])} forecast steps)")
             return True
@@ -1444,6 +1469,11 @@ class SunnyDE:
             data = self.fetch(SID_URL + sids[t], timeout=120)
             if t < (self.ref or 0):  # an older slot that arrived late: history only, no forecast from it
                 k, share, disp = self.ingest(t, data, cth)
+                if self._spike(t, share):
+                    self.skipped.add(t)
+                    self.log(f"sunny: late slot {ts_stamp(t)} skipped (sun share differs from its neighbours by "
+                             f"more than {JUMP_MAX} on average)")
+                    continue
                 with self.lock:
                     self.obs[t], self.disp[t] = share.astype(np.float16), disp
                     if t >= self.ref - K_KEEP_MS:
