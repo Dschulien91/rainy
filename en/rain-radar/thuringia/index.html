@@ -538,13 +538,13 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=1.61"></script>
-<script src="lang/en.js?v=1.61"></script>
+<script src="lang/de.js?v=1.62"></script>
+<script src="lang/en.js?v=1.62"></script>
 <script>
 "use strict";
 // v1.52: a radar that is out is hatched like every other area without radar (user 24.11.2026; the variants of
 // v1.51 are gone - the server keeps /api/radar/mask?kind=outage)
-const VERSION = "v1.61";
+const VERSION = "v1.62";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -2919,10 +2919,14 @@ if (USE_GL) {
 const GL_CLOUD = { size: 256, cols: 8, zooms: [3, 8], step: 600e3, margin: 8 };
 const GL_CLOUD_FS = `precision highp float;
 varying vec2 v_uv;
-uniform sampler2D u_data, u_lut;
+uniform sampler2D u_data, u_lut, u_noise;
 uniform vec2 u_cell, u_tex, u_off, u_shift;
 uniform float u_r, u_h, u_detail, u_dark, u_fray, u_blur, u_m;
-float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+// v1.62: the noise's lattice values come from a fixed 64 x 64 random texture (one texel per lattice point). The usual
+// fract(sin(dot(p, k)) * 43758.5) needs sin() exact to ~1e-5 for arguments of 10^5-10^6 (the lattice points are map
+// pixels / 230): phone GPUs are not, neighbouring cells disagreed on their shared corner, and the texture broke into
+// hard-edged rectangles all over an overcast map (user's phone, 26.11.2026, Rieti; emulated on the PC: same picture).
+float hash(vec2 p) { return texture2D(u_noise, (mod(p, 64.0) + 0.5) / 64.0).r; }
 float vnoise(vec2 p) {
   vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
   return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x), mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x), f.y);
@@ -2974,6 +2978,10 @@ const GLCloud = GLRain.extend({
     if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
     this.buf = gl.createBuffer();
     this.lutDay = null;
+    // the noise texture's random bytes: a fixed seed, so the cloud texture looks the same on every visit
+    const rnd = new Uint8Array(64 * 64 * 4);
+    for (let i = 0, h = 0x9e3779b9; i < rnd.length; i++) { h = Math.imul(h ^ (h >>> 15), 0x2c1b3c6d) ^ (i * 0x632be5ab); rnd[i] = (h >>> 23) & 255; }
+    this.noiseTex = this._texture(rnd, 64, 64, gl.NEAREST);
   },
   // the colour table of skyLut for the step's daylight (one 256 x 1 texture, made again when the daylight changes)
   _lut(day) {
@@ -3056,6 +3064,7 @@ const GLCloud = GLRain.extend({
       .sort((a, b2) => ((a.key === key) - (b2.key === key)) * 100 + (Math.abs(b2.z - dz) - Math.abs(a.z - dz)) * 2 + (a.n > 1) - (b2.n > 1));
     const loc = (n) => gl.getUniformLocation(this.prog, n);
     gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this._lut(daylightAt(this.ts))); gl.uniform1i(loc("u_lut"), 1);
+    gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, this.noiseTex); gl.uniform1i(loc("u_noise"), 2);
     gl.uniform2f(loc("u_off"), b.min.x + o.x, b.min.y + o.y);
     gl.uniform1f(loc("u_r"), r); gl.uniform1f(loc("u_h"), c.height);
     // the texture at every zoom, a little weaker far out where the cloud field itself shows its shapes
