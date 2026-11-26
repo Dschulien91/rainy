@@ -444,6 +444,10 @@ class SunModel:
         self.points = None
         self.maps = (((grid.lon - self.lons[0]) / deg).astype(np.float32),
                      ((grid.lat - self.lats[0]) / deg).astype(np.float32))
+        # server-v2.06: the grid's pixels outside the model's box get NaN, not the box's edge values: replicated, they
+        # drew straight stripes into the sunny map west of 12 W and north of 59.5 N (Europe, 26.11.2026)
+        self.covers = ((self.maps[0] >= 0) & (self.maps[0] <= len(self.lons) - 1)
+                       & (self.maps[1] >= 0) & (self.maps[1] <= len(self.lats) - 1))
 
     def refresh(self, inside, past_steps=4, forecast_steps=14):
         if not self.available() or time.time() - self.at < MODEL_REFRESH_S:
@@ -500,7 +504,7 @@ class SunModel:
 
     def field(self, ts, what="share"):
         """Model sunshine share ("share"), low cloud cover ("low", 0..1) or direct normal irradiance ("dni", W/m2) on
-        the sunny grid at ts; None outside."""
+        the sunny grid at ts (NaN outside the model's box); None outside its times."""
         with self.lock:
             times, share = {"share": (self.times, self.share), "low": (self.low_times, self.low),
                             "dni": (self.times, self.dni)}[what]
@@ -509,7 +513,8 @@ class SunModel:
         k = min(int(np.searchsorted(times, ts, side="right")) - 1, len(times) - 2)
         f = (ts - times[k]) / (times[k + 1] - times[k])
         m = ((1 - f) * share[k] + f * share[k + 1]).astype(np.float32)
-        return cv2.remap(fill_nan(m, 3.0), *self.maps, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+        v = cv2.remap(fill_nan(m, 3.0), *self.maps, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+        return np.where(self.covers, v, np.nan).astype(np.float32)
 
 
 class SunStations:
@@ -1035,7 +1040,7 @@ class SunnyDE:
                 # night and rising sun only: replay 08./09.11. vs the DWD stations, morning MAE +60/+90/+120
                 # .102/.110/.124 -> .078/.084/.086, midday unchanged, but evening +10 .099 -> .127 (sunset: no fog cap)
                 fog_time = (e < 0) | (self.elev(ts + 1_800_000) > e) | (sid_data is None)  # IR alone: no DNI sees the fog
-                cap = np.clip(1.0 - LOWCC_W * low, 0.0, 1.0)
+                cap = np.clip(1.0 - LOWCC_W * np.nan_to_num(low), 0.0, 1.0)  # no cap outside the model's box
                 k_ir = np.where(fog_time, np.minimum(k_ir, cap), k_ir).astype(np.float32)
         k_ir_o = k_ir  # the low-sun shadow keeps the IR k as it was
         if k_ir is not None and IR_F != 1.0:

@@ -474,13 +474,14 @@ class Mosaic:
             return make()
         return self._cached(f"{'r' if use_de else 're'}{variant}/{key}/{ts}/{z}/{x}/{y}", make)
 
-    def rain_data_tile(self, key, t0, n, z, x, y, use_de=True, variant="dwd", fmt="png", margin=DATA_MARGIN):
+    def rain_data_tile(self, key, t0, n, z, x, y, use_de=True, variant="dwd", fmt="png", margin=None):
         """Data tile PNG or lossless WebP (fmt, tileimg.py; see DATA_SIZE) of the time steps t0, t0 + 5 min, ... (n of them) for the WebGL map; the
         timeline's first step is part of the URL, so a tile never changes for its URL (cacheable like the pictures).
         margin: the neighbours' cells around each step's cell (DATA_MARGIN; DATA_MARGIN_WIDE for app v1.60+)."""
         if not (z in DATA_ZOOMS and 1 <= n <= DATA_COLS * DATA_ROWS):
             return None
         run, own = self.key_run(key)
+        margin = DATA_MARGIN if margin is None else margin  # (defined below the class)
 
         def make():
             span = 2 * WORLD / (1 << z)
