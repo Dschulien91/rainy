@@ -107,7 +107,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v2.06"
+VERSION = "server-v2.07"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -2103,7 +2103,7 @@ POINT_CACHE = {}  # (radar key, lat, lon, with DWD) -> rain point answer; the ke
 
 
 GEO_CACHE = {}  # proxied geocoding answers (rounded coordinates / query text) -> bytes
-GEO_UP = {"/api/geo/reverse": ("https://photon.komoot.io/reverse", ("lat", "lon", "lang")),
+GEO_UP = {"/api/geo/reverse": ("https://photon.komoot.io/reverse", ("lat", "lon", "lang", "limit")),
           "/api/geo/search": ("https://geocoding-api.open-meteo.com/v1/search", ("name", "count", "language", "format"))}
 
 
@@ -2114,6 +2114,8 @@ class Handler(BaseHTTPRequestHandler):
         q = {k: v[0][:120] for k, v in parse_qs(u.query).items() if k in keys}
         if "lat" in q:
             q["lat"], q["lon"] = f"{float(q['lat']):.3f}", f"{float(q['lon']):.3f}"  # ~100 m
+        if "limit" in q:  # app v1.60 takes the first of a few results that names a place (server-v2.07)
+            q["limit"] = str(max(1, min(5, int(q["limit"])))) if q["limit"].isdigit() else "1"
         url = f"{up}?{urllib.parse.urlencode(sorted(q.items()))}"
         body = GEO_CACHE.get(url)
         if body is None:
