@@ -548,13 +548,13 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=1.60"></script>
-<script src="lang/en.js?v=1.60"></script>
+<script src="lang/de.js?v=1.61"></script>
+<script src="lang/en.js?v=1.61"></script>
 <script>
 "use strict";
 // v1.52: a radar that is out is hatched like every other area without radar (user 24.11.2026; the variants of
 // v1.51 are gone - the server keeps /api/radar/mask?kind=outage)
-const VERSION = "v1.60";
+const VERSION = "v1.61";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -965,6 +965,17 @@ async function buildBasemap(key) {
     const minZoom = { place_suburb: 12, place_village: 10, place_town: 7, place_city: 5, place_city_large: 4, water_name: 9 };
     style.layers = style.layers.filter((l) => !drop.has(l.id));
     for (const l of style.layers) if (minZoom[l.id] != null) l.minzoom = Math.max(l.minzoom || 0, minZoom[l.id]);
+    // v1.61: city states are labelled like a town, not as a country - "Staat Vatikanstadt" stood in big bold letters
+    // over Rome (user, 26.11.2026: "solche Mini-Staaten eher wie eine Stadt behandeln"); below the towns and cities, so
+    // in a collision the city's name wins
+    const micro = ["in", ["get", "iso_a2"], ["literal", ["VA", "MC", "SM"]]];
+    const isCountry = (l) => l.type === "symbol" && l["source-layer"] === "place" && /country/.test(l.id) && l.filter;
+    for (const l of style.layers) if (isCountry(l)) l.filter = ["all", l.filter, ["!", micro]];
+    const townAt = style.layers.findIndex((l) => l.type === "symbol" && l["source-layer"] === "place" && /town/.test(l.id));
+    if (townAt >= 0) {
+      const town = style.layers[townAt];
+      style.layers.splice(townAt, 0, { ...town, id: "rainy_city_state", filter: ["all", ["==", ["get", "class"], "country"], micro], maxzoom: 24 });
+    }
     // orientation comes from borders, not roads: roads, rails and road labels only when zoomed in to the city
     const isRoad = (l) => l["source-layer"] === "transportation" || l["source-layer"] === "transportation_name";
     // road layers meant for overview zooms only (maxzoom <= 12) go entirely; minzoom >= maxzoom would invalidate the style
@@ -1050,6 +1061,7 @@ async function buildBasemap(key) {
         paint: { "line-color": "#ffffff", "line-opacity": 0.6, "line-width": l.paint["line-width"] ?? 1 } }));
     basemapTop = L.maplibreGL({ style: { ...top, layers: [...sunWater, ...roadTop, ...roadLight, ...borders, ...top.layers] }, interactive: false, pane: "labels" }).addTo(map);
     basemapTop.getMaplibreMap().on("load", applyBasemapMode);
+    basemapTop.getMaplibreMap().on("idle", () => updateHereLabel()); // the map's labels placed: show or hide ours
     const dropOld = () => { for (const l of old.splice(0)) map.removeLayer(l); };
     if (old.length) { basemapTop.getMaplibreMap().once("idle", dropOld); setTimeout(dropOld, 2500); }
   } catch (err) { console.warn("basemap failed", err); }
@@ -1114,11 +1126,26 @@ const youAreHere = L.circleMarker([FALLBACK.lat, FALLBACK.lon], {
 // v1.45: the name of the user's own place stays next to the blue dot at every zoom (user, 22.11.2026) - the map's own
 // label of that place only appears from some zoom on and sits at the town centre, often off screen when zoomed in.
 // The map's label with the same name is hidden meanwhile, so the name is not shown twice. ?here=b|c|d: the variants.
+// v1.61: from HERE_MAP_ZOOM on the map's own label is back, and the one at the dot goes while the map shows that name
+// on screen (user, 26.11.2026: zoomed in "sieht man ja den Stadtnamen, ab dann muss Rom nicht mehr nebenstehen")
 const HERE_STYLE = (new URLSearchParams(location.search).get("here") || "a").toLowerCase();
+const HERE_MAP_ZOOM = 9;
 let hereName = "";
+function mapShowsName(name) {
+  const m = basemapTop && basemapTop.getMaplibreMap();
+  if (!m || !m.isStyleLoaded()) return false;
+  const lang = (navigator.language || "de").slice(0, 2);
+  const layers = m.getStyle().layers.filter((l) => l.type === "symbol" && l["source-layer"] === "place").map((l) => l.id);
+  try { return m.queryRenderedFeatures({ layers }).some((f) => (f.properties[`name:${lang}`] || f.properties.name) === name); }
+  catch { return false; }
+}
 function updateHereLabel(name) {
   if (name !== undefined) hereName = name || "";
   if (HERE_STYLE === "off" || !hereName) { youAreHere.unbindTooltip(); hideMapLabel(""); return; }
+  if (map.getZoom() >= HERE_MAP_ZOOM) {
+    hideMapLabel("");
+    if (mapShowsName(hereName)) { youAreHere.unbindTooltip(); return; }
+  }
   const below = HERE_STYLE === "c";
   const cls = "here-label" + (HERE_STYLE === "b" || HERE_STYLE === "d" ? " pill" : "") + (mapDark ? "" : " light");
   const tip = youAreHere.getTooltip();
@@ -1127,11 +1154,13 @@ function updateHereLabel(name) {
     youAreHere.bindTooltip(esc(hereName), { permanent: true, interactive: false, className: cls,
       direction: below ? "bottom" : HERE_STYLE === "d" ? "top" : "right", offset: below ? [0, 6] : HERE_STYLE === "d" ? [0, -8] : [6, 0] });
   } else tip.setContent(esc(hereName));
-  hideMapLabel(hereName);
+  if (map.getZoom() < HERE_MAP_ZOOM) hideMapLabel(hereName);
 }
 function hideMapLabel(name) {
   const m = basemapTop && basemapTop.getMaplibreMap();
   if (!m || !m.isStyleLoaded()) return;
+  if (m._rainyHidden === name) return; // unchanged (updateHereLabel runs on every "idle" of the map)
+  m._rainyHidden = name;
   const lang = (navigator.language || "de").slice(0, 2);
   const label = ["coalesce", ["get", `name:${lang}`], ["get", "name"]];
   for (const l of m.getStyle().layers) {
