@@ -1568,15 +1568,31 @@ class SunnyDE:
             g = self.disp_snaps.get(run, {}).get(ts)
             return g if g is not None else self.disp.get(ts)
 
+    SMOOTH_CELLS = 0.8  # Gaussian sigma in grid cells for the map tiles (_grey_alpha)
+
     def _grey_alpha(self, g, bbox, w, h, col_row=None):
         minx, miny, maxx, maxy = bbox
         if col_row is None:
             X, Y = np.meshgrid(minx + (np.arange(w) + 0.5) / w * (maxx - minx), maxy - (np.arange(h) + 0.5) / h * (maxy - miny))
             col_row = tuple(v.astype(np.float32) for v in self.grid.to_pixels(X, Y))
         col, row = col_row
-        known = (g < 255).astype(np.float32)
-        v = cv2.remap(np.where(g < 255, g, 0).astype(np.float32), col, row, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
-        kn = cv2.remap(known, col, row, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        # server-v2.08: smooth upsampling - the grid smoothed by SMOOTH_CELLS, then bicubic. Bilinear made every cloud
+        # outline a staircase of grid cells with straight sides and right-angled corners when zoomed in (user,
+        # 26.11.2026: "eckige Kanten", 4 km cells at 50 N: ~40 px each at zoom 10). Only the crop the tile needs is
+        # smoothed; its margin (> 3 sigma) keeps neighbouring tiles identical along their common edge.
+        pad = int(3 * self.SMOOTH_CELLS) + 3
+        c0, r0 = max(int(np.floor(col.min())) - pad, 0), max(int(np.floor(row.min())) - pad, 0)
+        c1, r1 = min(int(np.ceil(col.max())) + pad + 1, g.shape[1]), min(int(np.ceil(row.max())) + pad + 1, g.shape[0])
+        if c0 >= c1 or r0 >= r1:  # the tile lies outside the grid
+            z = np.zeros(col.shape, np.uint8)
+            return z, z, col_row
+        sub = g[r0:r1, c0:c1]
+        ok = (sub < 255).astype(np.float32)
+        blur = lambda a: cv2.GaussianBlur(a, (0, 0), self.SMOOTH_CELLS, borderType=cv2.BORDER_CONSTANT)
+        vs, ks = blur(np.where(sub < 255, sub, 0).astype(np.float32)), blur(ok)
+        cc, rr = col - np.float32(c0), row - np.float32(r0)
+        v = cv2.remap(vs, cc, rr, cv2.INTER_CUBIC, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        kn = np.clip(cv2.remap(ks, cc, rr, cv2.INTER_CUBIC, borderMode=cv2.BORDER_CONSTANT, borderValue=0), 0, 1)
         ins = cv2.remap(self.inside(), col, row, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
         grey = np.clip(v / np.maximum(kn, 1e-3), 0, 255).astype(np.uint8)
         alpha = ((ins > 0.5) & (kn > 0.5)).astype(np.uint8) * 255
