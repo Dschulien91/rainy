@@ -544,13 +544,13 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=1.62"></script>
-<script src="lang/en.js?v=1.62"></script>
+<script src="lang/de.js?v=1.63"></script>
+<script src="lang/en.js?v=1.63"></script>
 <script>
 "use strict";
 // v1.52: a radar that is out is hatched like every other area without radar (user 24.11.2026; the variants of
 // v1.51 are gone - the server keeps /api/radar/mask?kind=outage)
-const VERSION = "v1.62";
+const VERSION = "v1.63";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -1136,7 +1136,7 @@ function mapShowsName(name) {
   catch { return false; }
 }
 function updateHereLabel(name) {
-  if (name !== undefined) hereName = name || "";
+  if (name !== undefined) { hereName = name || ""; updateHomeArea(hereName); }
   if (HERE_STYLE === "off" || !hereName) { youAreHere.unbindTooltip(); hideMapLabel(""); return; }
   if (map.getZoom() >= HERE_MAP_ZOOM) {
     hideMapLabel("");
@@ -1164,6 +1164,37 @@ function hideMapLabel(name) {
     m.setLayoutProperty(l.id, "text-field", name ? ["case", ["==", label, name], "", label] : label);
   }
 }
+// v1.63: the blue dot's town as an area - a light tint under the weather and its boundary line over it (user,
+// 26.11.2026: the own town "besser dargestellt werden mit recht früh sichtbaren Außengrenzen, vielleicht sogar einfach
+// das ganze Stadtgebiet leicht hervorheben farblich"; variant B of four picked). The outline comes from our server
+// (server/areas.py: OpenStreetMap boundaries via Overture Maps, looked up there, so no third party learns the place);
+// shown from HOME_AREA_ZOOM on, where a town is more than a blob around the dot.
+map.createPane("homeFill").style.zIndex = 330; // under the weather (350)
+map.createPane("homeLine").style.zIndex = 420; // over it, under the labels (450)
+map.getPane("homeFill").style.pointerEvents = map.getPane("homeLine").style.pointerEvents = "none";
+const HOME_AREA_ZOOM = 7, HOME_AREA_RGB = "#2f7bf5";
+let homeArea = null, homeAreaKey = "";
+async function updateHomeArea(name) {
+  if (!API_BASE) return;
+  const ll = youAreHere.getLatLng(), lat = ll.lat.toFixed(3), lon = ll.lng.toFixed(3), key = `${lat},${lon}|${name}`;
+  if (key === homeAreaKey) return;
+  homeAreaKey = key;
+  let d = null;
+  if (name) try { d = await getJSON(`${API_BASE}/api/geo/area?lat=${lat}&lon=${lon}&name=${encodeURIComponent(name)}`); } catch {}
+  if (key !== homeAreaKey) return; // a newer place won
+  if (homeArea) homeArea.forEach((l) => map.removeLayer(l));
+  homeArea = d && d.geometry ? [
+    L.geoJSON(d.geometry, { pane: "homeFill", interactive: false, style: { stroke: false, fillColor: HOME_AREA_RGB, fillOpacity: 0.14 } }),
+    L.geoJSON(d.geometry, { pane: "homeLine", interactive: false, style: { color: HOME_AREA_RGB, weight: 2, opacity: 0.9, fill: false } }),
+  ] : null;
+  showHomeArea();
+}
+function showHomeArea() {
+  if (!homeArea) return;
+  const on = map.getZoom() >= HOME_AREA_ZOOM;
+  for (const l of homeArea) if (on !== map.hasLayer(l)) on ? l.addTo(map) : map.removeLayer(l);
+}
+map.on("zoomend", showHomeArea);
 const pickedMarker = L.marker([0, 0], {
   interactive: false, keyboard: false,
   icon: L.divIcon({

@@ -83,6 +83,7 @@ from PIL import Image
 from pyproj import Transformer
 
 import alerts
+import areas
 import auth
 import bench_inca
 import clouds
@@ -107,7 +108,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v2.10"
+VERSION = "server-v2.11"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -2251,6 +2252,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(200, json.dumps({"outbox": devtools.OUTBOX[-10:]}, ensure_ascii=False).encode(), "application/json", 0)
             if u.path in ("/api/geo/reverse", "/api/geo/search"):  # place names / search, anonymised for the user
                 return self.geo(u)
+            if u.path == "/api/geo/area":  # the blue dot's town as an area (server/areas.py, app v1.63)
+                body = json.dumps(areas.lookup(float(q["lat"]), float(q["lon"]), q.get("name", "")[:120]),
+                                  separators=(",", ":")).encode()
+                return self.send(200, body, "application/json", 86400)
             if u.path == "/api/warnings/point" and WARNINGS is not None:  # official warnings at a place
                 import official_warnings
                 ws = WARNINGS.at(round(float(q["lat"]), 2), round(float(q["lon"]), 2), lang=q.get("lang", "de")[:5])
