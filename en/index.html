@@ -548,13 +548,13 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=1.59"></script>
-<script src="lang/en.js?v=1.59"></script>
+<script src="lang/de.js?v=1.60"></script>
+<script src="lang/en.js?v=1.60"></script>
 <script>
 "use strict";
 // v1.52: a radar that is out is hatched like every other area without radar (user 24.11.2026; the variants of
 // v1.51 are gone - the server keeps /api/radar/mask?kind=outage)
-const VERSION = "v1.59";
+const VERSION = "v1.60";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -1856,8 +1856,11 @@ function getPosition() {
 // Place name via Photon (OpenStreetMap data, no API key or app identification needed).
 async function reverseGeocode(loc, detail = false) {
   try {
-    const d = await getJSON(`${GEO_REVERSE}?lat=${loc.lat.toFixed(3)}&lon=${loc.lon.toFixed(3)}&lang=${LANG}`);
-    const a = (d.features && d.features[0] && d.features[0].properties) || {};
+    // v1.60: five results, the first one with a place: the nearest feature can be something without one - at 51.0 N
+    // 10.0 E it is OSM's node of the continent and the app said "Europa"
+    const d = await getJSON(`${GEO_REVERSE}?lat=${loc.lat.toFixed(3)}&lon=${loc.lon.toFixed(3)}&lang=${LANG}&limit=5`);
+    const all = (d.features || []).map((f) => f.properties || {});
+    const a = all.find((p) => p.city || p.town || p.village || p.county || p.state) || all[0] || {};
     const city = a.city || a.town || a.village || a.county || a.state;
     const part = detail && (a.district || a.locality);
     const name = part && city && part !== city ? `${part}, ${city}` : city || part || a.name || t("place.unknown");
@@ -2618,7 +2621,9 @@ function tileLayer(kind, ts, coarse = false) {
 // draws them on the GPU in the look of the server's pictures (palette colours, darker inner contour, smooth edges):
 // the timeline and zooming need no new downloads, and each zoom asks for one file per tile instead of 36.
 // The pictures stay the default and the fallback (no WebGL, or the switch off).
-const GL_DATA = { size: 128, margin: 2, cols: 7, rows: 6, q: 8, zooms: [3, 8], step: 5 * 60e3 };
+// v1.60: margin 4 (server-v2.05, "<t0>-<n>m4"; was 2): the smoothing (1.5 cells) plus the B-spline taps (1.5 cells) run
+// across the tile edge without clamping - clamped, a band boundary along a tile edge broke off straight (Tivoli, 26.11.2026)
+const GL_DATA = { size: 128, margin: 4, cols: 7, rows: 6, q: 8, zooms: [3, 8], step: 5 * 60e3 };
 // v1.25: at most this many data tiles on the screen (else one data zoom coarser), downloads at a time, and the GPU
 // memory budget for the tiles (counted twice per texture; phones and tablets get less)
 const GL_MAX_VIEW = 40, GL_PARALLEL = 6;
@@ -2664,7 +2669,8 @@ vec4 bicubic(vec2 t) {
 // cell and its margin): coarse sources (2 km Europe grid, quantised national products) drew stair-step outlines when
 // zoomed in (user, 22.11.2026: "Ränder komisch verpixelt", picked variant C). Only the picture - the values are not.
 float smoothClass(vec2 t) {
-  vec2 lo = u_cell - 0.5, hi = u_cell + ${GL_DATA.size}.0 + 0.5;
+  // as far into the margin as the B-spline's taps stay inside it
+  vec2 lo = u_cell - ${GL_DATA.margin}.0 + 1.5, hi = u_cell + ${GL_DATA.size + GL_DATA.margin}.0 - 1.5;
   vec2 a = vec2(u_blur, u_blur * 0.4), b = vec2(-u_blur * 0.4, u_blur);
   return 0.25 * (bicubic(clamp(t + a, lo, hi)).r + bicubic(clamp(t - a, lo, hi)).r +
                  bicubic(clamp(t + b, lo, hi)).r + bicubic(clamp(t - b, lo, hi)).r) * 255.0 / ${GL_DATA.q}.0;
@@ -2778,7 +2784,7 @@ const GLRain = L.Renderer.extend({
     const { key, t0, n, base } = this.run, step = GL_DATA.step, dz = this._dz(), pass = ++this.pass;
     const i = this.ts == null ? -1 : (this.ts - t0) / step;
     const shown = Number.isInteger(i) && i >= 0 && i < n ? this.ts : null;
-    const item = (t, a, k) => ({ u: `${base}/${key}/${a}-${k}/${t.z}/${t.x}/${t.y}.${TILE_EXT}`, z: t.z, x: t.x, y: t.y, t0: a, n: k, key });
+    const item = (t, a, k) => ({ u: `${base}/${key}/${a}-${k}m${GL_DATA.margin}/${t.z}/${t.x}/${t.y}.${TILE_EXT}`, z: t.z, x: t.x, y: t.y, t0: a, n: k, key });
     const ready = (u) => { const e = this.tex.get(u); return !!(e && e.tex); };
     const view = this._tiles(dz), inView = new Set(view.map((t) => `${t.x}/${t.y}`));
     const want = [];
