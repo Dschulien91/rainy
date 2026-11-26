@@ -18,6 +18,9 @@ fixed edges, mostly east-west: compare with the moving rain before calling a hit
 09:45-10:20Z: 47.93 N 8.17-8.44 E (south-east Black Forest, ~20 km ENE of the DWD Feldberg radar), eun only;
 tools/recompose_national.py reproduced it in the mix of the DWD and Swiss layers (there the DWD layer read 2-5 mm/h,
 the Swiss one 0.5-1.3, at the same places), while neither layer alone has it that straight - cause not settled.
+Last line (eu / eun, since 26.11.2026): "grid lock" - the share of straight edges on the 4 km S-PROG grid's lines,
+measured steps vs forecast steps (see grid_lock()). A forecast share well above the measured one says the forecast's
+straight edges come from upsampling the coarse grid (26.11.: Alps measured 0.25, forecast 0.35 eun / 0.41 eu).
 """
 import argparse
 import io
@@ -117,6 +120,52 @@ def main():
         else:
             where = f"N-S edge at {lon_of(xs[0] + (k + 1) / 128):.3f} E, {lat_of(ys[0] + (b + 1) / 16):.2f}-{lat_of(ys[0] + b / 16):.2f} N"
         print(f"  {where}: {n} steps ({stamp(fr[0])} .. {stamp(fr[-1])})")
+    if "/na" not in a.base:
+        grid_lock(q, frames, xs, ys, a.min_px)
+
+
+# Europe's forecast runs S-PROG on a 4 km grid (2 km picture grid / SPROG_DOWN 2, LAEA below; pixel 0 at x = 0) and
+# scales it up. 26.11.2026: the straight forecast edges lay ON that grid's lines - light rain zeroed below the threshold
+# on the 4 km grid, upsampled bilinearly and cut at 0.05 mm/h has its outline exactly between two coarse pixels.
+# grid_lock() measures that: the LAEA position of every straight class edge (all steps, not only the fixed ones) modulo
+# 4 km; "locked" = within 1/8 of a coarse pixel boundary (1/4 of the edges by chance). Measured steps are the control
+# (their 2 km grid has no 4 km structure); a forecast share well above the measured one = edges made by the coarse
+# grid, not by the weather. Near 10 E the grid runs along the map's rows, so the test is sharpest there (Alps,
+# Germany); far east or west the grid is rotated and few straight runs are grid lines in the first place.
+LAEA = "+proj=laea +lat_0=55.0 +lon_0=10.0 +x_0=1950000.0 +y_0=-2100000.0 +units=m +ellps=WGS84"
+COARSE_M = 4000.0
+
+
+def grid_lock(q, frames, xs, ys, min_px):
+    try:
+        from pyproj import Transformer
+    except ImportError:
+        print("grid lock: pyproj missing, skipped")
+        return
+    tr = Transformer.from_crs("EPSG:4326", LAEA, always_xy=True)
+    share = {}
+    for kind in (False, True):
+        ph = []
+        for i, f in enumerate(frames):
+            if bool(f["fc"]) != kind:
+                continue
+            for axis, k, s, n in straight_runs((q[i] // 8).astype(np.int16), min_px):
+                t = np.arange(s, s + n, 3) + 0.5
+                if axis == 0:   # E-W edge: its northing
+                    lat = np.full(len(t), lat_of(ys[0] + (k + 1) / 128))
+                    lon = np.array([lon_of(xs[0] + v / 128) for v in t])
+                    v = np.asarray(tr.transform(lon, lat)[1])
+                else:           # N-S edge: its easting
+                    lon = np.full(len(t), lon_of(xs[0] + (k + 1) / 128))
+                    lat = np.array([lat_of(ys[0] + v / 128) for v in t])
+                    v = np.asarray(tr.transform(lon, lat)[0])
+                ph.append((v % COARSE_M) / COARSE_M)
+        ph = np.concatenate(ph) if ph else np.zeros(0)
+        share["fc" if kind else "obs"] = (float(((ph < 0.125) | (ph >= 0.875)).mean()) if len(ph) else float("nan"), len(ph))
+    (so, no), (sf, nf) = share["obs"], share["fc"]
+    verdict = "FORECAST EDGES ON THE 4 KM GRID" if nf >= 200 and sf >= max(0.32, so + 0.06) else "no grid lock"
+    print(f"grid lock (edges within 1/8 of a 4 km line, 0.25 by chance): measured {so:.2f} ({no} points), forecast "
+          f"{sf:.2f} ({nf} points) -> {verdict}")
 
 
 if __name__ == "__main__":
