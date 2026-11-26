@@ -474,9 +474,10 @@ class Mosaic:
             return make()
         return self._cached(f"{'r' if use_de else 're'}{variant}/{key}/{ts}/{z}/{x}/{y}", make)
 
-    def rain_data_tile(self, key, t0, n, z, x, y, use_de=True, variant="dwd", fmt="png"):
+    def rain_data_tile(self, key, t0, n, z, x, y, use_de=True, variant="dwd", fmt="png", margin=DATA_MARGIN):
         """Data tile PNG or lossless WebP (fmt, tileimg.py; see DATA_SIZE) of the time steps t0, t0 + 5 min, ... (n of them) for the WebGL map; the
-        timeline's first step is part of the URL, so a tile never changes for its URL (cacheable like the pictures)."""
+        timeline's first step is part of the URL, so a tile never changes for its URL (cacheable like the pictures).
+        margin: the neighbours' cells around each step's cell (DATA_MARGIN; DATA_MARGIN_WIDE for app v1.60+)."""
         if not (z in DATA_ZOOMS and 1 <= n <= DATA_COLS * DATA_ROWS):
             return None
         run, own = self.key_run(key)
@@ -484,9 +485,9 @@ class Mosaic:
         def make():
             span = 2 * WORLD / (1 << z)
             step = span / DATA_SIZE
-            idx = np.arange(-DATA_MARGIN, DATA_SIZE + DATA_MARGIN) + 0.5
+            idx = np.arange(-margin, DATA_SIZE + margin) + 0.5
             X, Y = np.meshgrid(-WORLD + x * span + idx * step, WORLD - y * span - idx * step)
-            S = DATA_SIZE + 2 * DATA_MARGIN
+            S = DATA_SIZE + 2 * margin
             # only as many rows / columns as the steps need (server-v1.68): the app's first request per tile is the
             # shown step alone (n = 1), a 132 x 132 image instead of a mostly empty 924 x 792 one; the layout of
             # step i stays (i // DATA_COLS, i % DATA_COLS), the app reads the texture size from the image
@@ -504,7 +505,7 @@ class Mosaic:
             return tileimg.encode(Image.fromarray(img, "RGB"), fmt, "rain", 6)
         if not self.key_known(key):
             return make()
-        ck = f"{'d' if use_de else 'de'}{variant}/{key}/{t0}/{n}/{z}/{x}/{y}/{fmt}"
+        ck = f"{'d' if use_de else 'de'}{variant}/{key}/{t0}/{n}/{z}/{x}/{y}/{fmt}/m{margin}"
         with self.cache_lock:
             if ck in self.data_cache:
                 self.data_cache.move_to_end(ck)
@@ -615,6 +616,10 @@ class Mosaic:
 # DATA_MARGIN on every side (bilinear/bicubic sampling across tile edges without seams).
 DATA_SIZE = 128
 DATA_MARGIN = 2
+# server-v2.05 / app v1.60 ("<t0>-<n>m4"): 4 cells. The app's smoothing reaches 1.5 cells from a point and the B-spline
+# sampling 1.5 more: with 2 cells it was clamped near the tile edge, a little differently on either side, and a band
+# boundary running along a tile edge broke off in a straight line (Tivoli, 26.11.2026)
+DATA_MARGIN_WIDE = 4
 DATA_COLS, DATA_ROWS = 7, 6     # up to 42 time steps (the timeline has 36-37)
 DATA_Q = 8
 DATA_ZOOMS = range(3, 9)        # the app asks for zoom 3-8 (closer in: zoom 8, enlarged on the GPU)
@@ -727,7 +732,8 @@ def prerender_data(mosaic, key, box, zooms, use_de=True, variant="dwd"):
                 for y in range(int((WORLD - y1) * k), int((WORLD - y0) * k) + 1):
                     for fmt in PRERENDER_FMTS:
                         _yield_to_users(mosaic)
-                        mosaic.rain_data_tile(key, first, count, z, x, y, use_de=use_de, variant=variant, fmt=fmt)
+                        mosaic.rain_data_tile(key, first, count, z, x, y, use_de=use_de, variant=variant, fmt=fmt,
+                                              margin=DATA_MARGIN_WIDE)
                         done += 1
     return done
 

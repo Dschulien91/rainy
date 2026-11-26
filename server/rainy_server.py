@@ -107,7 +107,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v2.04"
+VERSION = "server-v2.05"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -2173,16 +2173,19 @@ class Handler(BaseHTTPRequestHandler):
                         "tiles": MOSAIC.render_summary()}  # rain tile render time per zoom (server CPU)
                 return self.send(200, json.dumps(body).encode(), "application/json", 10)
             if u.path.startswith("/tiles/raindata"):  # data tiles for the app's WebGL map (mosaic.rain_data_tile)
-                m = re.fullmatch(r"/tiles/(raindata|raindataown|raindataeu)/([\w-]+)/(\d+)-(\d+)/(\d+)/(\d+)/(\d+)\.(png|webp)", u.path)
+                # "<t0>-<n>m4": cells with 4 neighbour cells around them instead of 2 (server-v2.05, app v1.60)
+                m = re.fullmatch(r"/tiles/(raindata|raindataown|raindataeu)/([\w-]+)/(\d+)-(\d+)(m4)?/(\d+)/(\d+)/(\d+)\.(png|webp)", u.path)
                 if not m:
                     return self.send(404, b"not found", "text/plain", 60)
                 kind, key = m.group(1), m.group(2)
-                t0, n, z, x, y = map(int, m.groups()[2:7])
-                fmt = m.group(8)  # lossless WebP (server-v1.69, tileimg.py) or PNG: the same values
+                t0, n = int(m.group(3)), int(m.group(4))
+                z, x, y = map(int, m.groups()[5:8])
+                margin = mosaic.DATA_MARGIN_WIDE if m.group(5) else mosaic.DATA_MARGIN
+                fmt = m.group(9)  # lossless WebP (server-v1.69, tileimg.py) or PNG: the same values
                 if not (0 <= x < (1 << z) and 0 <= y < (1 << z)):
                     return self.send(404, b"bad tile", "text/plain", 3600)
                 png = MOSAIC.rain_data_tile(key, t0, n, z, x, y, use_de=kind != "raindataeu",
-                                            variant="own" if kind == "raindataown" else "dwd", fmt=fmt)
+                                            variant="own" if kind == "raindataown" else "dwd", fmt=fmt, margin=margin)
                 if png is None:
                     return self.send(404, b"bad tile", "text/plain", 3600)
                 return self.send(200, png, tileimg.TYPES[fmt], 86400 if MOSAIC.key_known(key) else 60)
