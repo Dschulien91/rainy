@@ -623,6 +623,7 @@ SMN_ITEMS = "https://data.geo.admin.ch/api/stac/v1/collections/ch.meteoschweiz.o
 CH_EVERY_S = 570               # ~10 min (a little less, so that a 300 s polling loop takes every second round)
 CH_BOX = (45.8, 49.1, 5.9, 17.2)  # lat min, lat max, lon min, lon max
 CH_SUN_ELEV = -2.0             # deg: a small margin before sunrise / after sunset
+NETWORK_LIVE_MS = 2 * 3600_000 # EuSunStations.newest: a network whose newest value is this far behind is skipped
 
 
 class EuSunStations(SunStations):
@@ -719,6 +720,27 @@ class EuSunStations(SunStations):
         except Exception as e:
             self.log(f"sunny stations AT/CH: {e}")
         return n
+
+    @staticmethod
+    def network(sid):
+        return sid[:2] if sid[:3] in ("AT:", "CH:") else "DE"
+
+    def newest(self):
+        """The newest 10-min end that EVERY live network has reached (min over DE / AT / CH of each one's median newest
+        end; a network with nothing in NETWORK_LIVE_MS does not hold the others back). Until 27.11.2026 this was the
+        median over all stations: Austria's ~265 stations (GeoSphere, ~10 min late) outnumber the ~60 DWD ones (files
+        ~20-40 min late) and the Swiss ones (read every ~10 min), so a run was scored before DWD / MeteoSwiss had its
+        end - the Europe station rows were Austria alone (26.11.: Austria overcast all day -> MAE 0.002)."""
+        with self.lock:
+            ends = {}
+            for sid, v in self.values.items():
+                if v:
+                    ends.setdefault(self.network(sid), []).append(max(v))
+        if not ends:
+            return 0
+        top = max(max(e) for e in ends.values())
+        live = [int(np.median(e)) for e in ends.values() if top - max(e) <= NETWORK_LIVE_MS]
+        return min(live)
 
 
 class SunVerify:
