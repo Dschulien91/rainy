@@ -396,7 +396,7 @@
   .hour .bar i { display: block; width: 100%; border-radius: 3px; }
   /* v1.64: the 7-day strip - one entry per day, all seven side by side */
   .hours.days .hour { flex: 1 0 44px; }
-  /* where a new day starts in the 24 h / 3-day strips: variants for the user (?daysep=A|B|C|D, v1.64) */
+  /* where a new day starts in the 24 h / 3-day strips: C since v1.65 (A, B, D for comparison via ?daysep=) */
   body.daysep-A .hour.day-start::before { content: ""; position: absolute; left: 0; top: 6px; bottom: 6px; width: 1.5px;
     border-radius: 1px; background: var(--muted); opacity: .55; }
   body.daysep-B .hour.day-odd { background-color: var(--day-tint); }
@@ -565,13 +565,13 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=1.64"></script>
-<script src="lang/en.js?v=1.64"></script>
+<script src="lang/de.js?v=1.65"></script>
+<script src="lang/en.js?v=1.65"></script>
 <script>
 "use strict";
 // v1.52: a radar that is out is hatched like every other area without radar (user 24.11.2026; the variants of
 // v1.51 are gone - the server keeps /api/radar/mask?kind=outage)
-const VERSION = "v1.64";
+const VERSION = "v1.65";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -809,8 +809,10 @@ const MAP_STYLE = (() => {
 // sunshine (server/sunny_de.py) + 24 h / 3 days from the weather model; the Europe/USA radar is hidden and everything
 // outside Germany is hatched); "full" = everything (test with ?edition=full).
 const EDITION = new URLSearchParams(location.search).get("edition") === "full" ? "full" : "de";
-// v1.64: how a new day shows in the 24 h / 3-day strips - variants A-D for the user to choose (?daysep=A..D)
-{ const v = (new URLSearchParams(location.search).get("daysep") || "").toUpperCase(); if (/^[ABCD]$/.test(v)) document.body.classList.add(`daysep-${v}`); }
+// How a new day shows in the 24 h / 3-day strips: v1.64 offered variants A-D, v1.65 serves C (a blue line before the
+// first slot of the day, its label bold; user, 27.11.2026: "nimm erstmal die Version C"). ?daysep=A|B|D still shows
+// the others for comparison.
+{ const v = (new URLSearchParams(location.search).get("daysep") || "C").toUpperCase(); document.body.classList.add(`daysep-${/^[ABCD]$/.test(v) ? v : "C"}`); }
 const DE_ONLY = EDITION === "de";
 // Europe radar (beta, being verified - parallel to the Germany edition): the rain radar for all of Europe from the
 // Europe test server (EUMETNET OPERA + our own 2 h nowcast, server EDITION=eu behind /eu/ on the same domain; locally
