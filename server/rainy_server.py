@@ -108,7 +108,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v2.13"
+VERSION = "server-v2.14"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -139,7 +139,7 @@ _om_state = {"at": 0.0, "ok": False}
 # rows carry the count, the failures and the slowest answer of each since the last row (daily_report.py flags them).
 OM_PROBE_S = 60
 OM_PROBE_Q = ("&minutely_15=temperature_2m,precipitation,cloud_cover,is_day&past_minutely_15=8&forecast_minutely_15=64"
-              "&hourly=temperature_2m,precipitation,cloud_cover,is_day,weather_code&forecast_hours=74"
+              "&hourly=temperature_2m,precipitation,cloud_cover,is_day,weather_code&past_hours=12&forecast_hours=170"
               "&daily=sunrise,sunset&forecast_days=4&timezone=auto&timeformat=unixtime&models=icon_seamless")
 _om_probe = {}
 _om_probe_lock = threading.Lock()
@@ -2651,6 +2651,10 @@ def main_eu():
         threading.Thread(target=model_at_gauges_loop, daemon=True).start()
         threading.Thread(target=tile_gap_loop, daemon=True).start()
         synop_start()
+        # the weather models behind the app's 24 h / 3-day / 7-day strips against METAR stations, Europe and North
+        # America (model_check.py, scored by check_models.py; user 27.11.2026: measure every view, take the best source)
+        import model_check
+        model_check.ModelCheck(fetch, log, os.environ.get("VERIFY_LOG_DIR", "."), OPENMETEO_URL).start()
         # competitors' open nowcasts at our gauges (bench_competitors.py, 16.11.2026: MET Norway / Yr, RMI INCA-BE,
         # CHMI COTREC, HungaroMet MEANDER, KNMI; 17.11.2026: DWD RV, MeteoSwiss, GeoSphere INCA)
         # - score_competitors.py

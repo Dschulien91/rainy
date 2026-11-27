@@ -27,6 +27,7 @@
   "range.2h": "2 h",
   "range.24h": "24 h",
   "range.3d": "3 days",
+  "range.7d": "7 days",
   "range.mapLabel": "Map time range",
   "hours.tab24": "24 hours",
   "chart.play": "Play",
@@ -140,6 +141,8 @@
 
   // hourly strip
   "hours.now": "Now",
+  "hours.today": "Today",
+  "hours.dayTitle": "{wd}: average of 10 am-8 pm",
   "hours.dayHour": "{wd} {hour}h",
   "hours.hour": "{hour}:00",
   "hours.far": "more than 48 h ahead, less certain",

@@ -14,6 +14,7 @@ verify_log/daily/<that day YYYYMMDD>.txt:
   rain alerts     verify_alerts.py  share of alerts that were right, by lead time and intensity
   sunny           score_sun.py   sat pers kpers nwp, the variants, and the analysis itself at the stations
   jumps           score_jumps.py what a user sees when moving the timeline: break at "now", jumps between images
+  weather models  check_models.py the models behind the 24 h / 3-day / 7-day strips at METAR stations (app v1.64)
 WetterOnline itself is scored on the user's desktop (tools/wo_verify.py, wo_verify_eu.py), never from the server.
 
   python daily_report.py [YYYYMMDD]   -> writes that day's file now (default: yesterday UTC)
@@ -61,6 +62,9 @@ JOBS = [
     ("sunny Europa", ["score_sun.py", "sat", "pers", "kpers", "nwp", "--prefix", "eu"]),
     ("sunny Europa: Varianten im Test", ["score_sun.py", "sat", "sharp", "shblur", "satnwp", "lowf10", "metfog", "--prefix", "eu"]),
     ("Sprünge auf der Zeitachse (was man beim Verschieben sieht)", ["score_jumps.py"]),
+    # app v1.64 / server-v2.14: the weather models behind the 24 h / 3-day / 7-day strips at METAR stations
+    ("Wettermodelle gegen Messwerte (24 Stunden, 3 Tage, 7 Tage; app = was die App zeigt; < = kleinster Temperaturfehler; POD = Regen erkannt, FAR = Fehlalarme)",
+     ["check_models.py", "--by"]),
 ]
 # what a full day should hold: rows per lead (a run every 5 min for rain), health rows (every 5 min)
 RUNS = {"fcgrid": ("dwd", 288), "eugrid": ("own", 288), "sungrid": ("sat", None), "eusungrid": ("sat", None),

@@ -26,6 +26,7 @@
   "range.2h": "2 h",
   "range.24h": "24 h",
   "range.3d": "3 Tage",
+  "range.7d": "7 Tage",
   "range.mapLabel": "Zeitraum der Karte",
   "hours.tab24": "24 Stunden",
   "chart.play": "Abspielen",
@@ -139,6 +140,8 @@
 
   // hourly strip
   "hours.now": "Jetzt",
+  "hours.today": "Heute",
+  "hours.dayTitle": "{wd}: 10-20 Uhr im Schnitt",
   "hours.dayHour": "{wd} {hour}h",
   "hours.hour": "{hour} Uhr",
   "hours.far": "mehr als 48 h voraus, unsicherer",

@@ -68,7 +68,7 @@
     --temp: #e5484d;
     --night: #eef0f4;
     --logo: #0B2A5B;
-    --night-band: #e6e9ef;
+    --night-band: #e6e9ef; --day-tint: #f2f5fa; --day-tint-night: #dce1e9;
     --shadow: 0 -6px 24px rgba(20, 24, 31, 0.12);
   }
   @media (prefers-color-scheme: dark) {
@@ -80,7 +80,7 @@
       --sun-soft: #7a5a14;
       --night: #1d2129;
       --logo: #8FB2FF;
-      --night-band: #0b0d11;
+      --night-band: #0b0d11; --day-tint: #1c2029; --day-tint-night: #050608;
       --shadow: 0 -6px 24px rgba(0, 0, 0, 0.5);
     }
   }
@@ -93,7 +93,7 @@
     --sun-soft: #fbd98a;
     --night: #eef0f4;
     --logo: #0B2A5B;
-    --night-band: #e6e9ef;
+    --night-band: #e6e9ef; --day-tint: #f2f5fa; --day-tint-night: #dce1e9;
     --shadow: 0 -6px 24px rgba(20, 24, 31, 0.12);
   }
   :root.theme-dark {
@@ -104,7 +104,7 @@
     --sun-soft: #7a5a14;
     --night: #1d2129;
     --logo: #8FB2FF;
-    --night-band: #0b0d11;
+    --night-band: #0b0d11; --day-tint: #1c2029; --day-tint-night: #050608;
     --shadow: 0 -6px 24px rgba(0, 0, 0, 0.5);
   }
   * { box-sizing: border-box; }
@@ -394,6 +394,20 @@
   .hour svg { width: 26px; height: 26px; }
   .hour .bar { width: 14px; height: 16px; display: flex; align-items: flex-end; background: var(--night); border-radius: 3px; overflow: hidden; }
   .hour .bar i { display: block; width: 100%; border-radius: 3px; }
+  /* v1.64: the 7-day strip - one entry per day, all seven side by side */
+  .hours.days .hour { flex: 1 0 44px; }
+  /* where a new day starts in the 24 h / 3-day strips: variants for the user (?daysep=A|B|C|D, v1.64) */
+  body.daysep-A .hour.day-start::before { content: ""; position: absolute; left: 0; top: 6px; bottom: 6px; width: 1.5px;
+    border-radius: 1px; background: var(--muted); opacity: .55; }
+  body.daysep-B .hour.day-odd { background-color: var(--day-tint); }
+  body.daysep-B .hour.day-odd.night { background-color: var(--day-tint-night); }
+  body.daysep-C .hour.day-start::before { content: ""; position: absolute; left: 0; top: 2px; bottom: 2px; width: 2px;
+    border-radius: 1px; background: var(--rain); opacity: .8; }
+  body.daysep-C .hour.day-start > span:not(.tp):not(.bar):not(.zz):not(.far) { color: var(--fg); font-weight: 700; }
+  body.daysep-D .hour.day-start { margin-left: 10px; }
+  body.daysep-D .hour.day-start::before { content: ""; position: absolute; left: -6px; top: 4px; bottom: 4px; width: 2px;
+    border-radius: 1px; background: var(--line); }
+  body.daysep-D .hour.day-start > span:first-of-type { color: var(--fg); font-weight: 700; }
   /* map data attribution (OpenStreetMap licence): tiny, low contrast, links to the full list in the legal notice */
   .leaflet-control-attribution.attrib { background: transparent !important; box-shadow: none; margin: 0 !important;
     padding: 0 6px 1px !important; font-size: 9px; line-height: 12px; opacity: .65; }
@@ -474,6 +488,7 @@
     <div class="toggle" role="tablist">
       <button id="fav24" role="tab" data-i18n="range.24h">24 h</button>
       <button id="fav3d" role="tab" data-i18n="range.3d">3 Tage</button>
+      <button id="fav7d" role="tab" data-i18n="range.7d">7 Tage</button>
     </div>
   </div>
   <div class="fav-list" id="favList"></div>
@@ -515,6 +530,7 @@
   <div class="hours-tabs" id="hoursTabs">
     <button data-range="24h" aria-expanded="false"><span data-i18n="hours.tab24">24 Stunden</span> <span class="chev">▾</span></button>
     <button data-range="3d" aria-expanded="false"><span data-i18n="range.3d">3 Tage</span> <span class="chev">▾</span></button>
+    <button data-range="7d" aria-expanded="false"><span data-i18n="range.7d">7 Tage</span> <span class="chev">▾</span></button>
   </div>
   <div class="hours" id="hours" hidden></div>
 </div>
@@ -548,13 +564,13 @@
 <script src="vendor/leaflet.js"></script>
 <script src="vendor/maplibre-gl.js"></script>
 <script src="vendor/leaflet-maplibre-gl.js"></script>
-<script src="lang/de.js?v=1.63"></script>
-<script src="lang/en.js?v=1.63"></script>
+<script src="lang/de.js?v=1.64"></script>
+<script src="lang/en.js?v=1.64"></script>
 <script>
 "use strict";
 // v1.52: a radar that is out is hatched like every other area without radar (user 24.11.2026; the variants of
 // v1.51 are gone - the server keeps /api/radar/mask?kind=outage)
-const VERSION = "v1.63";
+const VERSION = "v1.64";
 // ---------- Language ----------
 // Texts live in lang/<code>.js (window.I18N[code]); German is the reference and the fallback for missing keys.
 // Adding a language: new file lang/<code>.js + its <script> tag above + its code in SUPPORTED.
@@ -792,6 +808,8 @@ const MAP_STYLE = (() => {
 // sunshine (server/sunny_de.py) + 24 h / 3 days from the weather model; the Europe/USA radar is hidden and everything
 // outside Germany is hatched); "full" = everything (test with ?edition=full).
 const EDITION = new URLSearchParams(location.search).get("edition") === "full" ? "full" : "de";
+// v1.64: how a new day shows in the 24 h / 3-day strips - variants A-D for the user to choose (?daysep=A..D)
+{ const v = (new URLSearchParams(location.search).get("daysep") || "").toUpperCase(); if (/^[ABCD]$/.test(v)) document.body.classList.add(`daysep-${v}`); }
 const DE_ONLY = EDITION === "de";
 // Europe radar (beta, being verified - parallel to the Germany edition): the rain radar for all of Europe from the
 // Europe test server (EUMETNET OPERA + our own 2 h nowcast, server EDITION=eu behind /eu/ on the same domain; locally
@@ -1933,7 +1951,12 @@ async function reverseGeocode(loc, detail = false) {
 // sum / the weather of the PRECEDING hour (H-1..H; checked 20.11.2026: Frankfurt 20:00 = 3.2 mm = the 15-min values
 // 19:15-20:00), temperature and cloud cover are values at H. The slot "H" means H..H+1 (as the radar hours in
 // hoursWithRadar), so it takes precipitation and code from the next entry - before, rain showed one hour late and
-// "Now" showed the past hour's rain. Needs one hour more than shown (forecast_hours=74 for 73 slots).
+// "Now" showed the past hour's rain. Needs one hour more than shown.
+// v1.64: the request reaches 7 days ahead (forecast_hours=170: day 7's 10-20 h even at UTC-8 late in the evening) and
+// 12 hours back (past_hours=12: today's 10-20 h window for the 7-day strip in the evening); fromNow() gives the slots
+// from the current hour on for the 24 h / 3-day strips.
+const OM_HOURS = "&past_hours=12&forecast_hours=170";
+const fromNow = (list) => { const h0 = Math.floor(Date.now() / 3600e3) * 3600e3; return list.filter((h) => h.ts >= h0); };
 function modelHours(h) {
   const out = [];
   for (let i = 0; i + 1 < h.time.length; i++) out.push({
@@ -1948,7 +1971,7 @@ async function loadPoint(loc, req = locRequest) {
     `&minutely_15=temperature_2m,precipitation,cloud_cover,is_day` +
     `&past_minutely_15=8&forecast_minutely_15=64` +
     `&hourly=temperature_2m,precipitation,cloud_cover,is_day,weather_code,wind_speed_700hPa,wind_direction_700hPa` +
-    `&forecast_hours=74&daily=sunrise,sunset&forecast_days=4&timezone=auto&timeformat=unixtime`;
+    `${OM_HOURS}&daily=sunrise,sunset&forecast_days=4&timezone=auto&timeformat=unixtime`;
   if (!state.picked) EARLY_URLS[0] = omFirstUrl(url, loc.lat, loc.lon);
   let d;
   // v1.49: two quick retries before giving up - one lost request (a phone between cells, a server restart) showed
@@ -1971,7 +1994,8 @@ async function loadPoint(loc, req = locRequest) {
   // Steering wind at ~3 km height: fallback for how clouds move when the satellite gives no usable motion.
   const h = d.hourly;
   state.wind = h ? { kmh: h.wind_speed_700hPa[0], from: h.wind_direction_700hPa[0] } : null;
-  state.hours = h ? modelHours(h) : [];
+  state.hoursAll = h ? modelHours(h) : [];
+  state.hours = fromNow(state.hoursAll);
   const dl = d.daily;
   state.sunEvents = dl ? [...dl.sunrise.map((t) => ({ ts: t * 1000, type: "rise" })), ...dl.sunset.map((t) => ({ ts: t * 1000, type: "set" }))]
     .sort((a, b) => a.ts - b.ts) : [];
@@ -3603,6 +3627,65 @@ function hourBlocks(list, size) {
   }
   return out;
 }
+// v1.64: one entry per day for the 7-day strip (user, 27.11.2026: "eine Anzeige pro Tag ... die Zeit zwischen zehn
+// und zwanzig Uhr ... wenn es um zwölf regnet, fünfzehn Uhr Sonne, dann muss das irgendwie auch beides rüberkommen";
+// temperature = the mean of 10-20 h). Per local day the hourly slots 10:00 ... 19:00 (= 10-20 h): the mean
+// temperature; the icon from the wet slots (precipitation >= 0.1 mm or a wet weather code): none -> the sky of the
+// mean cloud cover; some, with the dry slots mostly not overcast -> sun, cloud and drops (showers between sunny
+// spells); mostly wet or overcast -> cloud and drops; thunder in any slot -> the thunder icon; drops / flakes by the
+// wettest slot as in the hourly icons. Bar: rain = the share of wet slots (colour of their mean rate), sunny = the
+// sun share of the daylight slots. A day needs 6 of its 10 slots (the last day may end early).
+const DAY_FROM = 10, DAY_TO = 20;
+const dayKey = (ts, tz) => {
+  try { return new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(ts)); }
+  catch { return new Date(ts).toISOString().slice(0, 10); }
+};
+function dayBlocks(list, tz) {
+  const days = [];
+  for (const h of list) {
+    const lp = localParts(h.ts, tz);
+    if (lp.hour < DAY_FROM || lp.hour >= DAY_TO) continue;
+    const key = dayKey(h.ts, tz);
+    if (!days.length || days[days.length - 1].key !== key) days.push({ key, wd: lp.wd, ts: h.ts, slots: [] });
+    days[days.length - 1].slots.push(h);
+  }
+  return days.filter((d) => d.slots.length >= 6).map((d) => {
+    const g = d.slots, mean = (a) => a.reduce((x, y) => x + y, 0) / a.length;
+    const isWet = (h) => h.precip >= 0.1 || (h.code >= 51 && h.code <= 67) || (h.code >= 71 && h.code <= 86) || h.code >= 95;
+    const wet = g.filter(isWet), dry = g.filter((h) => !isWet(h)), lit = g.filter((h) => h.isDay);
+    const snowy = wet.filter((h) => (h.code >= 71 && h.code <= 77) || h.code === 85 || h.code === 86).length * 2 > wet.length;
+    const peak = wet.length ? wet.reduce((a, h) => (h.precip > a.precip ? h : a)) : null;
+    const cover = mean(g.map((h) => h.cover)), dryCover = dry.length ? mean(dry.map((h) => h.cover)) : 100;
+    const thunder = g.some((h) => h.code >= 95);
+    // the icon goes through weatherIcon() with a representative "hour": code + precip pick the kind, cover the sky
+    let code, precip = 0, sky = cover;
+    if (thunder) { code = 95; precip = peak ? peak.precip : 0; }
+    else if (wet.length) {
+      precip = Math.max(0.1, peak.precip);
+      code = snowy ? (peak.precip >= 1 ? 75 : 71) : 0;
+      sky = wet.length <= g.length / 2 && dryCover < 85 ? Math.min(dryCover, 60) : 95; // showers with sunny spells
+    } else code = cover >= 90 ? 3 : cover >= 40 ? 2 : cover >= 15 ? 1 : 0;
+    const wetMm = wet.length ? mean(wet.map((h) => h.precip)) : 0;
+    return { ts: d.ts, key: d.key, wd: d.wd, temp: mean(g.map((h) => h.temp)), cover: sky, isDay: 1, code, precip,
+      wetShare: wet.length / g.length, wetMm, sun: lit.length ? mean(lit.map((h) => 1 - h.cover / 100)) : 0 };
+  });
+}
+function daysHTML(all, rain, tz = PLACE_TZ) {
+  const days = dayBlocks(all || [], tz).slice(0, 7);
+  if (!days.length) return "";
+  const today = dayKey(Date.now(), tz);
+  return days.map((d) => {
+    const label = d.key === today ? t("hours.today") : d.wd;
+    let v, color;
+    if (rain) { v = d.wetShare; color = d.wetShare > 0 ? rgba(rainColor(Math.max(0.1, d.wetMm))) : "transparent"; }
+    else { v = clamp(d.sun, 0, 1); color = "var(--sun)"; }
+    const bar = v > 0.02 ? `<i style="height:${Math.max(3, v * 16).toFixed(1)}px;background:${color}"></i>` : "";
+    const icon = weatherIcon({ code: d.code, precip: d.precip, cover: d.cover, isDay: 1 });
+    const far = d.ts - Date.now() >= 48 * 3600e3 ? `<span class="far" title="${esc(t("hours.far"))}"></span>` : "";
+    return `<div class="hour" title="${esc(t("hours.dayTitle", { wd: label }))}">${far}<span>${label}</span>${icon}` +
+      `<span class="tp">${Math.round(d.temp)}°</span><span class="bar">${bar}</span></div>`;
+  }).join("");
+}
 // HTML for an hourly strip (24 hourly entries or 18 four-hour blocks).
 // "Now" (the first hourly slot) shows the temperature of this moment, as the header does (v1.32: before, the value at
 // the start of the hour - up to ~1 C off the header); nowTemp from the 15-min data, else between the first two hours.
@@ -3611,7 +3694,7 @@ function stripHTML(all, three, rain, tz = PLACE_TZ, nowTemp = null) {
   if (!all || !all.length) return "";
   if (nowTemp == null) nowTemp = hourlyNowTemp(all);
   const items = three ? hourBlocks(all, 4).slice(0, 18) : all.slice(0, 24);
-  let lastDay = localParts(items[0].ts, tz).wd;
+  let lastDay = localParts(items[0].ts, tz).wd, dayNo = 0;
   // Night = 23-7 h (sleeping hours); a 4-hour block counts as night when most of its hours fall in that range.
   const isNight = (h) => {
     const start = localParts(h.ts, tz).hour, len = three ? 4 : 1;
@@ -3624,12 +3707,14 @@ function stripHTML(all, three, rain, tz = PLACE_TZ, nowTemp = null) {
     const lp = localParts(h.ts, tz);
     const newDay = lp.wd !== lastDay;
     lastDay = lp.wd;
+    if (newDay && i > 0) dayNo++;
     const label = i === 0 ? t("hours.now") : three || newDay ? t("hours.dayHour", { wd: lp.wd, hour: lp.hour }) : t("hours.hour", { hour: lp.hour });
     let v, color;
     if (rain) { v = Math.sqrt(clamp(h.precip, 0, 8) / 8); color = h.precip >= 0.1 ? rgba(rainColor(h.precip)) : "transparent"; }
     else { v = h.isDay ? clamp(1 - h.cover / 100, 0, 1) : 0; color = "var(--sun)"; }
     const bar = v > 0.02 ? `<i style="height:${Math.max(3, v * 16).toFixed(1)}px;background:${color}"></i>` : "";
-    const cls = night[i] ? " night" + (night[i - 1] ? "" : " night-start") + (night[i + 1] ? "" : " night-end") : "";
+    const cls = (night[i] ? " night" + (night[i - 1] ? "" : " night-start") + (night[i + 1] ? "" : " night-end") : "") +
+      (newDay && i > 0 ? " day-start" : "") + (dayNo % 2 ? " day-odd" : "");
     // Zz marks the start of a night band; a small dot marks entries beyond 48 h (coarser model, less certain).
     const marks = (night[i] && !night[i - 1] ? '<span class="zz">Zz</span>' : "") +
       (h.ts - Date.now() >= 48 * 3600e3 ? `<span class="far" title="${esc(t("hours.far"))}"></span>` : "");
@@ -3655,7 +3740,10 @@ function hoursWithRadar(list) {
 }
 function renderHours() {
   const p = state.point, now = p && p.t.length ? interp(p.t, p.temp, Date.now()) : null;
-  document.getElementById("hours").innerHTML = stripHTML(hoursWithRadar(state.hours), state.hoursRange === "3d", state.mode === "rain", PLACE_TZ, now);
+  const el = document.getElementById("hours"), days = state.hoursRange === "7d";
+  el.classList.toggle("days", days);
+  el.innerHTML = days ? daysHTML(hoursWithRadar(state.hoursAll), state.mode === "rain", PLACE_TZ)
+    : stripHTML(hoursWithRadar(state.hours), state.hoursRange === "3d", state.mode === "rain", PLACE_TZ, now);
 }
 // Short message over the map; it stays until hideToast().
 function toast(text) {
@@ -3664,7 +3752,8 @@ function toast(text) {
   el.classList.add("show");
 }
 function hideToast() { document.getElementById("toast").classList.remove("show"); }
-// Hourly strip: closed, "24h" (hourly) or "3d" (4-hour steps); tapping the open tab closes it. Remembered per device.
+// Hourly strip: closed, "24h" (hourly), "3d" (4-hour steps) or "7d" (days, v1.64); tapping the open tab closes it.
+// Remembered per device.
 function setHours(range) {
   const open = !!range;
   if (open) state.hoursRange = range;
@@ -3691,7 +3780,7 @@ document.getElementById("hoursTabs").addEventListener("click", (e) => {
 // Tap an hour: jump the map timeline to it (the map covers the next 2 hours; later hours live in the strip).
 document.getElementById("hours").addEventListener("click", (e) => {
   const btn = e.target.closest(".hour");
-  if (!btn) return;
+  if (!btn || !btn.dataset.ts) return; // the 7-day entries are no map time
   const ts = +btn.dataset.ts;
   const fr = cur().frames;
   if (ts > fr[fr.length - 1].ts) {
@@ -3849,7 +3938,7 @@ async function setLocation(loc, picked, knownName) {
       if (!(state.point && state.point.loc && sameLoc(state.point.loc, loc))) PLACE_TZ = own ? DEVICE_TZ : tzFromLon(loc.lon);
       const same = state.point && state.point.loc && sameLoc(state.point.loc, loc);
       if (!same) state.point = { loc, t: [], temp: [], precip: [], cover: [], isDay: [] };
-      if (!same) state.hours = [];
+      if (!same) state.hours = state.hoursAll = [];
       toast(t("toast.modelDown"));
       setTimeout(() => { if (state.loc === loc) refreshAll(); }, 2 * 60e3);
     } else if (document.getElementById("toast").textContent === t("toast.modelDown")) hideToast();
@@ -4309,27 +4398,29 @@ async function loadFavData(favs) {
   // best-match request for all: a favourite could show another temperature than the place itself, and the slowest
   // remote model held up the whole list for up to ~20 s)
   const one = (f) => omJSON(`${OM_BASE}/v1/forecast?latitude=${(+f.lat).toFixed(2)}&longitude=${(+f.lon).toFixed(2)}` +
-    `&hourly=temperature_2m,precipitation,cloud_cover,is_day,weather_code&forecast_hours=74&timezone=auto&timeformat=unixtime`, f.lat, f.lon);
+    `&hourly=temperature_2m,precipitation,cloud_cover,is_day,weather_code${OM_HOURS}&timezone=auto&timeformat=unixtime`, f.lat, f.lon);
   const list = (await Promise.all(favs.map(one))).map((x) => Object.assign(modelHours(x.hourly), { tz: x.timezone }));
   favData = { at: Date.now(), list }; favDataKey = key;
   return list;
 }
 async function renderFavs() {
   const favs = loadFavs(), el = document.getElementById("favList");
-  const rain = state.mode === "rain", three = favRange === "3d";
+  const rain = state.mode === "rain", three = favRange === "3d", days = favRange === "7d";
   document.getElementById("favRain").classList.toggle("on", rain);
   document.getElementById("favSun").classList.toggle("on", !rain);
-  document.getElementById("fav24").classList.toggle("on", !three);
+  document.getElementById("fav24").classList.toggle("on", !three && !days);
   document.getElementById("fav3d").classList.toggle("on", three);
+  document.getElementById("fav7d").classList.toggle("on", days);
   if (!favs.length) {
     el.innerHTML = `<p class="loading">${t("favs.empty")}</p>`;
     return;
   }
   const card = (f, i, hours) => `<div class="fav" data-i="${i}"><div class="fav-head">` +
     `<button class="drag" aria-label="${esc(t("favs.move"))}">≡</button>` +
-    `<button class="fav-name">${esc(f.name)}${hours && hours.length ? `<small>${Math.round(hourlyNowTemp(hours))}°</small>` : ""}</button>` +
+    `<button class="fav-name">${esc(f.name)}${hours && fromNow(hours).length ? `<small>${Math.round(hourlyNowTemp(fromNow(hours)))}°</small>` : ""}</button>` +
     `<button class="fav-del" aria-label="${esc(t("favs.remove"))}">${CLOSE}</button></div>` +
-    (hours ? `<div class="hours">${stripHTML(hours, three, rain, hours.tz)}</div>` : `<div class="loading">${t("favs.loading")}</div>`) + "</div>";
+    (hours ? (days ? `<div class="hours days">${daysHTML(hours, rain, hours.tz)}</div>` : `<div class="hours">${stripHTML(fromNow(hours), three, rain, hours.tz)}</div>`)
+      : `<div class="loading">${t("favs.loading")}</div>`) + "</div>";
   el.innerHTML = favs.map((f, i) => card(f, i, favData && favDataKey === favs.map((x) => `${x.lat},${x.lon}`).join(";") ? favData.list[i] : null)).join("");
   try {
     const list = await loadFavData(favs);
@@ -4343,7 +4434,7 @@ document.getElementById("favs").addEventListener("click", openFavs);
 document.getElementById("favClose").addEventListener("click", closeFavs);
 document.getElementById("favRain").addEventListener("click", () => { state.mode = "rain"; applyView(); renderFavs(); });
 document.getElementById("favSun").addEventListener("click", () => { state.mode = "sun"; applyView(); renderFavs(); });
-for (const [id, r] of [["fav24", "24h"], ["fav3d", "3d"]]) {
+for (const [id, r] of [["fav24", "24h"], ["fav3d", "3d"], ["fav7d", "7d"]]) {
   document.getElementById(id).addEventListener("click", () => {
     favRange = r;
     try { localStorage.setItem("rainy.favRange", r); } catch {}
