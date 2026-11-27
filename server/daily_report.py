@@ -44,14 +44,18 @@ JOBS = [
     ("Regen-Alarme: Anteil richtiger Alarme (Regen am Regenmesser innerhalb +-15 min um den vorhergesagten Beginn); point = Regel am Punkt, circle = echte Alarmregel (5-km-Kreis); reliability = wie oft es je nach vorhergesagtem nassen Anteil des Kreises wirklich regnete", ["verify_alerts.py"]),
     ("Regen Europa, ganzes OPERA-Gebiet", ["score_same.py", "own", "pers", "--log", "eugrid"]),
     ("Regen Europa, zellgenau", ["score_same.py", "own", "pers", "--log", "eugrid", "--strict"]),
-    ("Regen Europa: Varianten im Test (oro = Bergregen bleibt stehen, inflow = Zufluss vom Rand, cells = mit Modell-Schauern, sprog0 = ohne Mitführen des letzten Bildes)",
-     ["score_same.py", "own", "oro", "inflow", "cells", "sprog0", "--log", "eugrid"]),
+    ("Regen Europa: Varianten im Test (oro = Bergregen bleibt stehen, cells = mit Modell-Schauern, sprog0 = ohne Mitführen des letzten Bildes)",
+     ["score_same.py", "own", "oro", "cells", "sprog0", "--log", "eugrid"]),
     # NWP_SERVE (18.11.2026): own = served with the rapid-update model blend, own0 = without it, nwp = the 4 km reference
     ("Regen Europa: Modell-Blend (own = ausgeliefert mit Blend, own0 = ohne, nwp = 4-km-Referenz des Blends)",
      ["score_same.py", "own", "own0", "nwp", "--log", "eugrid"]),
     ("Regen Europa, Ausschnitt wie WetterOnline", ["score_same.py", "own", "pers", "--log", "eugrid", "--area", "wo"]),
     ("Regen Europa an den österreichischen Regenmessern: eigene (own) gegen den Nowcast des österreichischen Wetterdienstes (inca) und 'bleibt so' (pers)",
      ["score_inca.py"]),
+    # 27.11.2026: the section above is the OPERA instance ("Europäisch", not gauge-adjusted: Austria x0.48 on 26.11.);
+    # the app's default Europe picture ("eun", gauge-adjusted) writes its own bench rows (x0.81-0.88 the same day)
+    ("Dasselbe mit unserem eigenen Europa-Bild (Standard in der App, an Regenmessern angeglichen)",
+     ["eun:score_inca.py"]),
     ("sunny Deutschland", ["score_sun.py", "sat", "pers", "kpers", "nwp"]),
     ("sunny Deutschland: Varianten im Test (sat = ausgeliefert mit Modell-Blend seit v1.84, satadv = reine Verschiebung)", ["score_sun.py", "sat", "satkp", "satadv", "lowf03", "kpers"]),
     ("sunny Europa", ["score_sun.py", "sat", "pers", "kpers", "nwp", "--prefix", "eu"]),
@@ -226,9 +230,11 @@ def write_report(day=None):
     out.append("")
     env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
     for title, cmd in JOBS:
+        sub, script = cmd[0].split(":") if ":" in cmd[0] else ("", cmd[0])  # "eun:x.py" = the eun sub-folder's rows
         try:
-            r = subprocess.run([sys.executable, os.path.join(HERE, cmd[0]), *cmd[1:], "--day", day], capture_output=True,
-                               text=True, encoding="utf-8", errors="replace", timeout=900, cwd=HERE, env=env)
+            r = subprocess.run([sys.executable, os.path.join(HERE, script), *cmd[1:], "--day", day], capture_output=True,
+                               text=True, encoding="utf-8", errors="replace", timeout=900, cwd=HERE,
+                               env={**env, "VERIFY_LOG_DIR": os.path.join(LOG_DIR, sub)} if sub else env)
             body = (r.stdout or r.stderr).strip()
         except Exception as e:
             body = f"(failed: {e})"

@@ -108,7 +108,7 @@ try:  # pySTEPS builds on Linux (Docker image); without it the simple nowcast is
 except ImportError:
     HAVE_PYSTEPS = False
 
-VERSION = "server-v2.12"
+VERSION = "server-v2.13"
 # Edition: "de" = first public version (Germany: DWD radar + DWD nowcast, rain alerts, weather model, sunshine from DWD
 # satellite data (sunny_de.py); no Europe/USA radar, no EUMETSAT clouds - their loops are not started); "full" = everything;
 # "eu" = the Europe test instance next to the Germany one (deploy/docker-compose.yml "api-eu", behind /eu/ on the same
@@ -1291,7 +1291,8 @@ class EuropeOpera(Region):
     SPROG_DOWN = 3 if EU_KM == 1 else 2
     RAW_DOWN = 3 if EU_KM == 1 else 2   # S-PROG alone, at ~3-4 km: the verification's "sprog" variant
     ORO_DEM = "dem_eu4km.npz"   # terrain for the shadow "oro" (build_dem.py; the OPERA grid at 4 km)
-    INFLOW_SHADOW = True        # the shadow "inflow": the coverage's inflow edge (inflow_forecast)
+    # the shadow "inflow" (inflow_forecast) ran 19.-27.11.2026 and stayed equal to own (no effect): off since server-v2.12
+    INFLOW_SHADOW = False
     # Europe test instance: ICON-EU only - it is on the server's disk (openmeteo-sync); "best match" read AROME, HARMONIE,
     # MET Nordic ... from the remote mirror for ~60k points per refresh (took > 15 min locally)
     MODELS = os.environ.get("EU_MODELS") or None
@@ -1776,7 +1777,8 @@ class NorthAmericaMrms(EuropeOpera):
     # stationary front in the Southeast). Offline, 47 + 35 runs, tolerant CSI >= 1 mm/h +60/+90/+120: persistence
     # .766/.678/.616, own .748/.657/.585, fade 240 .800/.702/.623, fade 240 + motion x0.7 .803/.712/.639 (cell by cell
     # -0.01..0.02 vs own, still +0.04..0.05 over persistence; amount .98/.95 vs .93/.91). Scored shadows first.
-    ADV_SHADOWS = {"adv240": (240, 1.0), "adv240s": (240, 0.7)}
+    # adv240 / adv240s ran 20.-27.11.2026: neutral at the NA minute gauges (22.11.) -> off since server-v2.12 (CPU / RAM)
+    ADV_SHADOWS = {}
     K = 2
     DEG = northamerica.DEG0 * K
     LAT_TOP = northamerica.LAT1 + northamerica.DEG0 / 2
