@@ -80,9 +80,8 @@ results.append(run("P: dry, no rain coming", series(), expect=None, prob=True)[1
 results.append(run("P: certain rain in 15 min -> main", series(15, 60, rate=3, share=1.0), expect="main", prob=True)[1])
 k, info = AlertEngine.evaluate(series(15, 60, rate=3, share=1.0), NOW, CFG, {}, prob=True)
 t, b = AlertEngine.message(k, info, "Hamburg", "Europe/Berlin")
-results.append(info["prob"] >= 65 and info["prob"] % 5 == 0 and f"wahrscheinlich ({info['prob']} %)" in t
-               and "Wahrscheinlichkeit" not in b)
-results.append(f"likely ({info['prob']} %)" in AlertEngine.message(k, info, "Hamburg", "Europe/Berlin", "en")[0])
+results.append(info["prob"] >= 65 and info["prob"] % 5 == 0 and "%" not in t + b)  # no percentage in the text
+results.append("%" not in "".join(AlertEngine.message(k, info, "Hamburg", "Europe/Berlin", "en")))
 print(f"     text: {t} / {b}")
 results.append(run("P: marginal share 0.55 in 20 min -> nothing", series(20, 60, share=0.55), expect=None, prob=True)[1])
 results.append(run("   (the same with the old rule -> main)", series(20, 60, share=0.55), expect="main")[1])

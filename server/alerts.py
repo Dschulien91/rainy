@@ -56,14 +56,10 @@ TEXT = {
     "de": {"levels": {"Starker Regen": "Starker Regen", "Mäßiger Regen": "Mäßiger Regen", "Leichter Regen": "Leichter Regen"},
            "kinds": {"snow": "Schnee", "sleet": "Schneeregen", "freezing": "Glatteisregen", "graupel": "Graupel", "hail": "Hagel"},
            "rain_word": "Regen", "your_place": "dein Ort", "long": "länger anhaltend", "minutes": "etwa {m} Min. lang",
-           "chance": " Wahrscheinlichkeit ca. {p} %.",
-           "early": ("{icon} {lv} in ca. 1 Std. – {place}", "Voraussichtlich ab ca. {when}, {dur}.{chance} Wir melden uns kurz vorher noch einmal."),
-           "upgrade": ("⛈ Jetzt starker Regen erwartet – {place}", "Ab ca. {when}, {dur}.{chance}"),
-           "reminder": ("⏰ {lv} in {mins} Min. – {place}", "Erinnerung: ab ca. {when}, {dur}.{chance}"),
-           "main": ("{icon} {lv} in {mins} Min. – {place}", "Ab ca. {when}, {dur}.{chance}"),
-           # probabilistic trigger (RAIN_ALERT_PROB): the calibrated probability in the title
-           "main_p": ("{icon} {lv} wahrscheinlich ({p} %) in ~{mins} Min. – {place}", "Ab ca. {when}, {dur}."),
-           "early_p": ("{icon} {lv} wahrscheinlich ({p} %) in ca. 1 Std. – {place}", "Voraussichtlich ab ca. {when}, {dur}. Wir melden uns kurz vorher noch einmal."),
+           "early": ("{icon} {lv} in ca. 1 Std. – {place}", "Voraussichtlich ab ca. {when}, {dur}. Wir melden uns kurz vorher noch einmal."),
+           "upgrade": ("⛈ Jetzt starker Regen erwartet – {place}", "Ab ca. {when}, {dur}."),
+           "reminder": ("⏰ {lv} in {mins} Min. – {place}", "Erinnerung: ab ca. {when}, {dur}."),
+           "main": ("{icon} {lv} in {mins} Min. – {place}", "Ab ca. {when}, {dur}."),
            "raining": ("🌧 Jetzt regnet es – {place}", "Erinnerung von vorhin."),
            "allclear": ("🌤 Entwarnung – {place}", "Der angekündigte Niederschlag kommt voraussichtlich doch nicht (nächste 2 Std.)."),
            "thunder_now": "Jetzt bis ca. {to}", "thunder_from": "Ab ca. {fr} bis ca. {to}",
@@ -72,13 +68,10 @@ TEXT = {
     "en": {"levels": {"Starker Regen": "Heavy rain", "Mäßiger Regen": "Moderate rain", "Leichter Regen": "Light rain"},
            "kinds": {"snow": "snow", "sleet": "sleet", "freezing": "freezing rain", "graupel": "graupel", "hail": "hail"},
            "rain_word": "rain", "your_place": "your place", "long": "lasting a while", "minutes": "for about {m} min",
-           "chance": " Probability about {p} %.",
-           "early": ("{icon} {lv} in about 1 h – {place}", "Expected from about {when}, {dur}.{chance} We will remind you shortly before."),
-           "upgrade": ("⛈ Heavy rain now expected – {place}", "From about {when}, {dur}.{chance}"),
-           "reminder": ("⏰ {lv} in {mins} min – {place}", "Reminder: from about {when}, {dur}.{chance}"),
-           "main": ("{icon} {lv} in {mins} min – {place}", "From about {when}, {dur}.{chance}"),
-           "main_p": ("{icon} {lv} likely ({p} %) in ~{mins} min – {place}", "From about {when}, {dur}."),
-           "early_p": ("{icon} {lv} likely ({p} %) in about 1 h – {place}", "Expected from about {when}, {dur}. We will remind you shortly before."),
+           "early": ("{icon} {lv} in about 1 h – {place}", "Expected from about {when}, {dur}. We will remind you shortly before."),
+           "upgrade": ("⛈ Heavy rain now expected – {place}", "From about {when}, {dur}."),
+           "reminder": ("⏰ {lv} in {mins} min – {place}", "Reminder: from about {when}, {dur}."),
+           "main": ("{icon} {lv} in {mins} min – {place}", "From about {when}, {dur}."),
            "raining": ("🌧 It is raining now – {place}", "Reminder from earlier."),
            "allclear": ("🌤 All clear – {place}", "The expected precipitation is unlikely to come after all (next 2 h)."),
            "thunder_now": "Now until about {to}", "thunder_from": "From about {fr} until about {to}",
@@ -92,7 +85,8 @@ def text(cfg):
 MAX_PLACES = 20
 # Share of alerts that were right (rain at the place within +-15 min of the predicted start), by lead time and
 # predicted peak: server/verify_alerts.py --truth radar (first 1.5 days of recorded forecasts, provisional; rerun
-# with more rainy days). (lead up to min, [light < 1 mm/h, moderate, heavy >= 4 mm/h]) - shown as "ca. X %".
+# with more rainy days). (lead up to min, [light < 1 mm/h, moderate, heavy >= 4 mm/h]) - logged with each alert,
+# not shown in the push text (since 28.11.2026).
 HIT_RATE = ((30, (30, 60, 70)), (45, (20, 60, 70)), (60, (20, 45, 55)), (90, (15, 40, 50)), (999, (15, 25, 35)))
 MAX_REMINDERS = 10
 
@@ -110,8 +104,7 @@ MAX_REMINDERS = 10
 # 248k step rows): leave-one-day-out reliability within ~0.03 for P 0.1-0.9 at all leads; transfers to the Europe
 # instances' 10-minute gauges with reliable truth (score_alert_prob.py). Rate / intensity added nothing (BSS +0.001)
 # and is defined differently per instance, so it is not an input. Scores and refits: server/score_alert_prob.py.
-# The 60 min heads-up then needs P >= P_EARLY (instead of the circle share); the push title carries the percentage
-# (TEXT main_p / early_p).
+# The 60 min heads-up then needs P >= P_EARLY (instead of the circle share).
 # Env (per instance): RAIN_ALERT_PROB=1 switches it on; RAIN_ALERT_P_MIN (default 0.65) is the alert threshold;
 # RAIN_ALERT_COEF = 9 comma-separated numbers (c0 and the 8 above) replaces the Germany coefficients.
 PROB_FEATURES = ("a", "m", "u", "s0", "L", "aL", "mL", "uL")
@@ -505,13 +498,9 @@ class AlertEngine:
         word = T["kinds"].get(info.get("ptype"))
         if word:  # same strength levels, other precipitation: "Starker Schnee" / "Heavy snow", ...
             lv = lv.replace(T["rain_word"].capitalize(), word.capitalize()).replace(T["rain_word"], word)
-        chance = T["chance"].format(p=info["prob"]) if info.get("prob") else ""
         key = kind if kind in ("early", "upgrade", "reminder") else "main"
-        if info.get("p_model") is not None and key in ("main", "early"):
-            key, chance = key + "_p", ""  # probabilistic trigger: the percentage goes into the title
-        title_f, body_f = T[key]
-        fill = {"icon": icon, "lv": lv, "place": place, "when": when, "dur": dur, "chance": chance, "mins": mins,
-                "p": info.get("prob")}
+        title_f, body_f = T[key]  # no percentage in the text (user, 28.11.2026); info["prob"] stays in the logs
+        fill = {"icon": icon, "lv": lv, "place": place, "when": when, "dur": dur, "mins": mins}
         return title_f.format(**fill), body_f.format(**fill)
 
     # ---------- sending ----------

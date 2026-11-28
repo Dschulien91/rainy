@@ -56,7 +56,7 @@ def main():
     vapid = Vapid01()  # same key object as alerts.py
     vapid.generate_keys()
     subs = [fake_subscription(port) for _ in range(a.n)]
-    payload = json.dumps({"title": "🌧 Mäßiger Regen in 45 Min. – Hamburg", "body": "Ab ca. 17:40, etwa 30 Min. lang. Wahrscheinlichkeit ca. 60 %."})
+    payload = json.dumps({"title": "🌧 Mäßiger Regen in 45 Min. – Hamburg", "body": "Ab ca. 17:40, etwa 30 Min. lang."})
 
     def one(sub):
         webpush(sub, payload, vapid_private_key=vapid, vapid_claims={"sub": "https://example.invalid"}, ttl=900)

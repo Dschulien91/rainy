@@ -8,80 +8,39 @@
 <style>
   body { font: 16px/1.55 system-ui, sans-serif; max-width: 680px; margin: 0 auto; padding: 24px 16px 48px; color: #1b1f26; background: #fff; }
   h1 { font-size: 24px; } h2 { font-size: 18px; margin-top: 28px; }
-  .todo { background: #fff3cd; padding: 0 4px; border-radius: 3px; }
-  @media (prefers-color-scheme: dark) { body { background: #1f2329; color: #e8ebf0; } .todo { background: #5c4a12; } a { color: #8ab4ff; } }
+  @media (prefers-color-scheme: dark) { body { background: #1f2329; color: #e8ebf0; } a { color: #8ab4ff; } }
 </style>
 </head>
 <body>
 <h1>Datenschutzerklärung</h1>
 
-<h2>Kurz gesagt</h2>
-<p>rainy funktioniert ohne Konto. Ein Login ist freiwillig; er synchronisiert Favoriten und Einstellungen auf mehreren
-Geräten und ist für Regen- und Gewitterwarnungen nötig. Cookies setzen wir nur, wenn sie technisch nötig sind (gewählte Sprache, Anmeldung). Dein Standort wird nur verwendet, um das Wetter für diesen Ort
-zu zeigen, und nur auf etwa 1 km gerundet an unseren Server geschickt. Wir geben keine Daten an Dritte weiter.</p>
-
 <h2>Verantwortlich</h2>
-<p>Julian Harzer, Hammer Steindamm 64, 20535 Hamburg<br>E-Mail: <a href="mailto:hey@hellorainy.com">hey@hellorainy.com</a></p>
+<p>Julian Harzer, Hammer Steindamm 64, 20535 Hamburg, <a href="mailto:hey@hellorainy.com">hey@hellorainy.com</a></p>
 
-<h2>Welche Daten verarbeitet werden</h2>
-<p><b>Standort.</b> Mit deiner Erlaubnis fragt die App den Standort deines Geräts ab. Für Wetter, Radar und Ortsnamen schickt
-sie die Koordinaten gerundet (Wetter und Radar ca. 1 km, Ortsname ca. 100 m) an unseren Server. Er beantwortet die Anfrage
-und speichert sie nicht; Antworten werden ohne Bezug zu dir zwischengespeichert, damit gleiche Orte nicht neu berechnet werden.
-Ortsnamen und Ortssuche fragt unser Server bei Photon (komoot) bzw. Open-Meteo an – ohne deine IP-Adresse oder Gerätedaten.</p>
-<p><b>Server-Protokolle.</b> Unser Server speichert keine IP-Adressen und keine Zugriffsprotokolle mit Personenbezug.
-Technisch bedingt sehen unser Hosting-Anbieter Hetzner Online GmbH (Industriestr. 25, 91710 Gunzenhausen; Server in
-Deutschland) und das Auslieferungsnetz Cloudflare, Inc. (101 Townsend St, San Francisco, CA 94107, USA) die IP-Adresse beim
-Abruf (Art. 6 Abs. 1 lit. f DSGVO, sicherer und schneller Betrieb). Mit beiden bestehen Verträge zur Auftragsverarbeitung
-(Art. 28 DSGVO). Cloudflare ist nach dem EU-US Data Privacy Framework zertifiziert; Daten können dabei auch in die USA
-übertragen werden.</p>
-<p><b>Sprach-Cookie.</b> Wechselst du die Sprache, speichert ein Cookie „rainy_lang“ deine Wahl für ein Jahr, damit die
-Startseite in dieser Sprache öffnet (technisch notwendig, § 25 Abs. 2 TDDDG).</p>
-<p><b>Einstellungen und Favoriten</b> liegen ohne Anmeldung nur auf deinem Gerät (Browser-Speicher) und werden nicht
-übertragen.</p>
-<p><b>Regen- und Gewitterwarnungen (freiwillig, nur mit Konto).</b> Warnungen setzen eine Anmeldung voraus (siehe
-„Konto und Anmeldung“). Schaltest du sie ein, speichert unser Server verknüpft mit deinem Konto: die gewarnten Orte
-(gerundet auf ca. 1 km), deine Warn-Einstellungen (Vorwarnzeit, Vorwarnung bei Starkregen, Gewitterwarnung, Ruhezeit mit
-Beginn und Ende) und je Gerät, auf dem du Mitteilungen erlaubst, die Push-Adresse, die der Browser dafür erzeugt, deine
-Zeitzone und – bei „Mein Standort“ – den zuletzt auf diesem Gerät gesehenen Standort (gerundet auf ca. 1 km). Die
-Warn-Einstellungen werden wie deine Favoriten zwischen deinen Geräten synchronisiert. Die Nachricht wird über den
-Push-Dienst deines Browsers zugestellt (z. B. Google, Apple, Mozilla). Die Push-Adresse eines Geräts wird gelöscht, wenn
-du dich dort abmeldest; alle Warn-Einträge werden gelöscht, wenn du alle Warnungen ausschaltest oder dein Konto löschst
-(Art. 6 Abs. 1 lit. a DSGVO, Einwilligung). Warnungen, die vor Einführung der Anmeldung ohne Konto eingerichtet wurden,
-laufen ohne Kontobezug weiter, bis du sie ausschaltest oder der Push-Dienst die Adresse ungültig macht.</p>
-<p><b>Karte.</b> Die Kartenbilder stammen von OpenFreeMap (Daten von OpenStreetMap) und werden über unseren eigenen Server
-geladen; OpenFreeMap erhält dabei weder deine IP-Adresse noch andere Daten von dir. Nur wenn unser Server die Karte nicht
-liefern kann, lädt die App sie ersatzweise direkt von OpenFreeMap (tiles.openfreemap.org); dann sieht dieser Dienst deine
-IP-Adresse wie bei jedem Bildabruf. Beim Kartendesign „Satellit“ werden Bilder direkt von der NASA (gibs.earthdata.nasa.gov)
-geladen; dabei sieht die NASA deine IP-Adresse.</p>
+<h2>Betrieb der App</h2>
+<p>Beim Aufruf verarbeiten unser Hoster Hetzner Online GmbH (Deutschland) und das Auslieferungsnetz Cloudflare, Inc. (USA)
+technisch bedingt deine IP-Adresse (Art. 6 Abs. 1 lit. f DSGVO). Mit beiden bestehen Verträge zur Auftragsverarbeitung;
+Cloudflare ist nach dem EU-US Data Privacy Framework zertifiziert. Deinen Standort nutzt die App nur mit deiner Erlaubnis,
+um das Wetter dort zu zeigen; er geht gerundet an unseren Server und wird dort nicht gespeichert. Einstellungen und
+Favoriten liegen auf deinem Gerät. Technisch nötige Cookies und Browser-Speicher (Sprache, Anmeldung, Einstellungen)
+brauchen keine Einwilligung (§ 25 Abs. 2 TDDDG). Beim Kartendesign „Satellit“ lädt die App Bilder direkt von der NASA.</p>
 
-<h2>E-Mail</h2>
-<p>Schreibst du uns an hey@hellorainy.com, verwenden wir deine Nachricht und Adresse nur, um zu antworten. Die E-Mails
-liegen bei unserem E-Mail-Anbieter ALL-INKL.COM (Neue Medien Münnich, Hauptstraße 68, 02742 Friedersdorf).</p>
+<h2>Google Analytics</h2>
+<p>Nur wenn du einwilligst, nutzen wir Google Analytics der Google Ireland Limited (Irland), um zu verstehen, wie die App
+genutzt wird. Dabei werden Cookies gesetzt und Nutzungsdaten (z. B. aufgerufene Seiten, Gerät, ungefähre Herkunft) an
+Google übertragen, auch in die USA (EU-US Data Privacy Framework). Rechtsgrundlage ist deine Einwilligung (Art. 6 Abs. 1
+lit. a DSGVO, § 25 Abs. 1 TDDDG); du kannst sie jederzeit in den Cookie-Einstellungen widerrufen.</p>
 
-<h2>Konto und Anmeldung (freiwillig)</h2>
-<p>Meldest du dich an, speichern wir deine E-Mail-Adresse, bei Anmeldung mit Google zusätzlich die Konto-Kennung, die Google
-für rainy übermittelt, sowie deinen Namen und dein Profilbild, deine synchronisierten Favoriten und Einstellungen (auch die
-Warn-Einstellungen), gegebenenfalls deine Warn-Einträge (siehe oben) sowie die laufenden
-Anmeldesitzungen (nur als nicht umkehrbarer Hash). Rechtsgrundlage ist die Bereitstellung des Kontos (Art. 6 Abs. 1 lit. b
-DSGVO). Für die Anmeldung setzen wir die technisch notwendigen Cookies „rainy_session“ (Anmeldung, 180 Tage) und „rainy_in“
-(nur ein Hinweis, dass du angemeldet bist, ohne Inhalt) (§ 25 Abs. 2 TDDDG).</p>
-<p><b>Anmeldung mit Google.</b> Dabei wirst du zu Google Ireland Limited (Gordon House, Barrow Street, Dublin 4, Irland)
-weitergeleitet; Google erfährt, dass du dich bei rainy anmeldest, und übermittelt uns deine E-Mail-Adresse, eine
-Konto-Kennung, deinen Namen und dein Profilbild. Bei der Anmeldung mit Google speichern wir zusätzlich deinen Namen und
-dein Profilbild, um sie in den Einstellungen anzuzeigen. Beides wird mit dem Konto gelöscht. Das Profilbild lädt unser
-Server einmal bei der Anmeldung; die App holt es nur von unserem Server, nicht von Google. Es gelten zusätzlich die
-Datenschutzbestimmungen von Google.</p>
-<p><b>Anmeldung per E-Mail-Link.</b> Wir schicken dir einen Anmeldelink über unseren E-Mail-Anbieter ALL-INKL.COM. Der Link
-ist 15 Minuten gültig und nur einmal verwendbar.</p>
-<p><b>Löschen.</b> Du kannst dein Konto jederzeit in der App (Einstellungen → Konto) löschen; dabei werden E-Mail-Adresse,
-Name und Profilbild, synchronisierte Daten, Sitzungen und alle Warn-Einträge mit ihren Push-Adressen sofort gelöscht. Favoriten und
-Einstellungen auf deinem Gerät bleiben erhalten.</p>
+<h2>Konto und Warnungen (freiwillig)</h2>
+<p>Für Konto, Synchronisierung und Regen- oder Gewitterwarnungen speichern wir deine E-Mail-Adresse, bei Anmeldung mit
+Google auch Name und Profilbild, deine Favoriten, Einstellungen, gewarnten Orte und die Push-Adresse deines Geräts
+(Art. 6 Abs. 1 lit. b DSGVO). Warnungen werden über den Push-Dienst deines Browsers zugestellt. Anmelde-E-Mails und
+Post an uns laufen über ALL-INKL.COM (Deutschland). Du kannst dein Konto jederzeit in den Einstellungen löschen; dann
+löschen wir diese Daten.</p>
 
 <h2>Deine Rechte</h2>
-<p>Du hast das Recht auf Auskunft, Berichtigung, Löschung, Einschränkung der Verarbeitung, Datenübertragbarkeit und
-Widerspruch sowie auf Beschwerde bei einer Datenschutz-Aufsichtsbehörde. Schreib uns dazu an hey@hellorainy.com.
-Warn-Einträge sind mit deinem Konto verknüpft; ältere Warn-Einträge ohne Konto lassen sich nur über die App
-(Warnungen ausschalten) eindeutig zuordnen und löschen.</p>
+<p>Du hast das Recht auf Auskunft, Berichtigung, Löschung, Einschränkung, Datenübertragbarkeit, Widerspruch und Beschwerde
+bei einer Aufsichtsbehörde. Schreib uns an hey@hellorainy.com.</p>
 <p><a href="/de/">Zurück zur App</a> · <a href="impressum.html">Impressum</a></p>
 </body>
 </html>

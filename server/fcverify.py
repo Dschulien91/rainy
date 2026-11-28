@@ -221,7 +221,10 @@ class GridVerify:
             if not os.path.exists(path):
                 np.savez_compressed(path, rate=_down(g, self.shape).astype(np.float16))
             self.saved.add(name)
-        if len(self.saved) > 400:  # once in a while: forget old names, delete old files
+        # once every 6 h: forget old names, delete old files (it waited for 400 names = 33 h without a restart, so after
+        # the near-daily deploys it never ran and obs_eu kept every file, 28.11.2026)
+        if time.time() - getattr(self, "_pruned", 0) > 6 * 3600:
+            self._pruned = time.time()
             cutoff = (datetime.now(timezone.utc).timestamp() - OBS_KEEP_DAYS * 86400)
             for p in os.listdir(OBS_DIR):
                 if p.endswith(".npz") and datetime.strptime(p[:12], "%Y%m%d%H%M").replace(
@@ -398,7 +401,10 @@ class RegionVerify:
                 a, cov = self._grid(g)
                 np.savez_compressed(path, rate=np.where(cov, a, -1).astype(np.float16))
             self.saved.add(name)
-        if len(self.saved) > 400:
+        # once every 6 h: forget old names, delete old files (it waited for 400 names = 33 h without a restart, so after
+        # the near-daily deploys it never ran and obs_eu kept every file, 28.11.2026)
+        if time.time() - getattr(self, "_pruned", 0) > 6 * 3600:
+            self._pruned = time.time()
             cutoff = datetime.now(timezone.utc).timestamp() - OBS_KEEP_DAYS * 86400
             for p in os.listdir(self.obs_dir):
                 if p.endswith(".npz") and datetime.strptime(p[:12], "%Y%m%d%H%M").replace(

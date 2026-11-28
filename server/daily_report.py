@@ -17,11 +17,16 @@ verify_log/daily/<that day YYYYMMDD>.txt:
   weather models  check_models.py the models behind the 24 h / 3-day / 7-day strips at METAR stations (app v1.64)
 WetterOnline itself is scored on the user's desktop (tools/wo_verify.py, wo_verify_eu.py), never from the server.
 
+After the report it removes old measurement files from the whole verify_log (prune(): files whose name carries their
+date, after KEEP_DAYS, or KEEP_DAYS_LOW when the disk runs low).
+
   python daily_report.py [YYYYMMDD]   -> writes that day's file now (default: yesterday UTC)
 """
 import glob
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -32,6 +37,13 @@ from datetime import datetime, timedelta, timezone
 HERE = os.path.dirname(os.path.abspath(__file__))
 LOG_DIR = os.environ.get("VERIFY_LOG_DIR", os.path.join(HERE, "verify_log"))
 REPORT_HOUR_UTC = 5
+# Retention for the shared verify_log (28.11.2026: disk 88 % full, the logs grow ~0.6 GB a day): a measurement file
+# whose name carries its date (YYYYMMDD, YYYYMMDDhhmm or epoch ms) goes after KEEP_DAYS, after KEEP_DAYS_LOW when less
+# than LOW_FREE_GB are free. Skipped: the daily reports and folders whose owners keep longer on purpose (bench and
+# gaugetruth: 60 days) or that hold rare examples (cells, warnarchive).
+KEEP_DAYS, KEEP_DAYS_LOW, LOW_FREE_GB = 21, 10, 8
+KEEP_DIRS = {"daily", "bench", "gaugetruth", "cells", "warnarchive"}
+DATED = re.compile(r"(?<!\d)(20\d\d[01]\d[0-3]\d)(?:\d{2,6})?(?!\d)|(?<!\d)(1[78]\d{11})(?!\d)")
 JOBS = [
     ("Regen Deutschland gegen das spätere Radarbild: DWD, eigene, 'bleibt wie es ist' (pers) - CSI mit ~9 km Toleranz (Menge Vorhersage/real)",
      ["score_same.py", "dwd", "own", "pers"]),
@@ -250,6 +262,28 @@ def write_report(day=None):
     return path
 
 
+def prune(log=print):
+    """Removes dated measurement files older than KEEP_DAYS (KEEP_DAYS_LOW on a full disk); returns (files, bytes)."""
+    keep = KEEP_DAYS_LOW if shutil.disk_usage(LOG_DIR).free < LOW_FREE_GB * 1e9 else KEEP_DAYS
+    cut = datetime.now(timezone.utc) - timedelta(days=keep)
+    cut_day, cut_ms = cut.strftime("%Y%m%d"), cut.timestamp() * 1000
+    n = size = 0
+    for root, dirs, files in os.walk(LOG_DIR):
+        dirs[:] = [d for d in dirs if d not in KEEP_DIRS]
+        for name in files:
+            m = DATED.search(name)
+            if m and (m.group(1) < cut_day if m.group(1) else int(m.group(2)) < cut_ms):
+                fp = os.path.join(root, name)
+                try:
+                    size += os.path.getsize(fp)
+                    os.remove(fp)
+                    n += 1
+                except OSError:
+                    pass
+    log(f"verify_log: removed {n} files ({size / 1e9:.1f} GB) older than {keep} days")
+    return n, size
+
+
 def loop(log):
     while True:
         now = datetime.now(timezone.utc)
@@ -259,6 +293,10 @@ def loop(log):
                 log(f"daily report: {write_report(day)}")
             except Exception as e:
                 log(f"daily report failed: {e}")
+            try:
+                prune(log)
+            except Exception as e:
+                log(f"verify_log prune failed: {e}")
         time.sleep(600)
 
 
