@@ -968,7 +968,11 @@ class SunnyDE:
         self.stations = ((EuSunStations if area else SunStations)(fetch, log)) if stations else None
         self.model = (SunModel(self.grid, openmeteo_url, openmeteo_available, log, **(area or {}).get("model", {}))
                       if openmeteo_url else None)
-        self.verify = SunVerify(self, self.stations, log, log_dir, prefix=(area or {}).get("prefix", ""))
+        # Europe: station rows split by network (DE / AT / CH; score_sun.py --prefix eu --by) - 27.11.2026 the analysis
+        # read bias -0.12 at the DE/AT/CH stations as soon as DE and CH were in the truth, the Germany instance +0.004
+        # at the DWD stations: the all-station mean cannot say where
+        self.verify = SunVerify(self, self.stations, log, log_dir, prefix=(area or {}).get("prefix", ""),
+                                group=EuSunStations.network if isinstance(self.stations, EuSunStations) else None)
         self._inside = None
         self.cycle_s = None
         self._st_pix = None

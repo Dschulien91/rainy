@@ -123,3 +123,13 @@ if ANA:
     print(f"analysis at the stations (newest image vs gauge, {len(ANA)} images, {w} values): "
           f"MAE {sum(r['mae'] * r['n'] for r in ANA) / w:.3f}  hit {sum(r['hit'] * r['n'] for r in ANA) / w:.3f}  "
           f"bias {sum(r['bias'] * r['n'] for r in ANA) / w:+.3f}")
+    if "--by" in args:  # the analysis per group too (Europe: DE / AT / CH since server-v2.15)
+        ga = {}
+        for r in ANA:
+            for g, (k, ae, se, hi) in (r.get("by") or {}).items():
+                a = ga.setdefault(g, [0, 0.0, 0.0, 0])
+                a[0] += k; a[1] += ae; a[2] += se; a[3] += hi
+        for g in sorted(ga):
+            k, ae, se, hi = ga[g]
+            if k:
+                print(f"  analysis {g:8s} MAE {ae / k:.3f}  hit {hi / k:.3f}  bias {se / k:+.3f}  n {k}")
